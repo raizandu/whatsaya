@@ -10,6 +10,9 @@ import base64
 import time
 import threading
 import datetime
+import subprocess
+import tempfile
+import importlib.util
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -779,6 +782,122 @@ def _human_send(chat_id: str, message: str) -> None:
         _send_one(chat_id, part)
         if i < len(parts) - 1:
             time.sleep(random.uniform(0.6, 1.3))
+
+
+def _fish_tts_path() -> Path | None:
+    env = os.getenv("WHATSAPP_FISH_TTS", "").strip()
+    candidates = []
+    if env:
+        candidates.append(Path(env))
+    hermes_home = Path(os.getenv("HERMES_HOME", "/opt/data/.hermes"))
+    here = Path(__file__).resolve().parent
+    candidates.extend([
+        hermes_home / "scripts" / "fish_tts.py",
+        here / "deploy" / "scripts" / "fish_tts.py",
+        here.parent / "deploy" / "scripts" / "fish_tts.py",
+    ])
+    for path in candidates:
+        if path.is_file():
+            return path
+    return None
+
+
+_fish_tts_mod = None
+
+
+def _load_fish_tts():
+    """Carrega deploy/scripts/fish_tts.py (written_only_reason + mesmo CLI do Hermes)."""
+    global _fish_tts_mod
+    if _fish_tts_mod is not None:
+        return _fish_tts_mod
+    path = _fish_tts_path()
+    if not path:
+        return None
+    spec = importlib.util.spec_from_file_location("_whatsaya_fish_tts", path)
+    if not spec or not spec.loader:
+        return None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    _fish_tts_mod = mod
+    return mod
+
+
+def _voice_reply_enabled() -> bool:
+    if not os.getenv("FISH_API_KEY", "").strip():
+        return False
+    flag = os.getenv("WHATSAPP_AUTO_TTS", "true").strip().lower()
+    return flag not in {"0", "false", "no", "off"}
+
+
+def _send_bridge_media(chat_id: str, file_path: str, media_type: str = "audio") -> None:
+    payload = json.dumps({
+        "chatId": chat_id,
+        "filePath": file_path,
+        "mediaType": media_type,
+    }).encode("utf-8")
+    req = urllib.request.Request(f"{BRIDGE_URL}/send-media", data=payload, method="POST")
+    req.add_header("Content-Type", "application/json")
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        resp.read()
+
+
+def _maybe_send_voice(chat_id: str, text: str) -> bool:
+    """Gera PTT no Fish e manda pelo bridge. True se a nota de voz saiu."""
+    if not _voice_reply_enabled():
+        return False
+    blob = (text or "").strip()
+    if not blob:
+        return False
+
+    script = _fish_tts_path()
+    if not script:
+        logger.info("[voice] fish_tts.py ausente — só texto")
+        return False
+
+    try:
+        fish = _load_fish_tts()
+        reason = fish.written_only_reason(blob) if fish and hasattr(fish, "written_only_reason") else None
+    except Exception as err:
+        logger.warning(f"[voice] written_only_reason falhou: {err}")
+        reason = None
+    if reason:
+        logger.info(f"[voice] skip tts: {reason}")
+        return False
+
+    try:
+        typing_payload = json.dumps({"chatId": chat_id}).encode("utf-8")
+        typing_req = urllib.request.Request(f"{BRIDGE_URL}/typing", data=typing_payload, method="POST")
+        typing_req.add_header("Content-Type", "application/json")
+        with urllib.request.urlopen(typing_req, timeout=5):
+            pass
+    except Exception:
+        pass
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="whatsaya-tts-") as tmp:
+            inp = Path(tmp) / "in.txt"
+            out = Path(tmp) / "out.ogg"
+            inp.write_text(blob, encoding="utf-8")
+            proc = subprocess.run(
+                ["python3", str(script), str(inp), str(out), "ogg"],
+                capture_output=True,
+                text=True,
+                timeout=70,
+                env=os.environ.copy(),
+            )
+            err = (proc.stderr or "").strip()
+            if proc.returncode != 0 or not out.is_file() or out.stat().st_size < 64:
+                if err.startswith("skip tts:"):
+                    logger.info(f"[voice] {err}")
+                else:
+                    logger.warning(f"[voice] fish_tts falhou rc={proc.returncode}: {err[-400:]}")
+                return False
+            _send_bridge_media(chat_id, str(out), "audio")
+            logger.info(f"[voice] ptt enviado chat={chat_id!r} bytes={out.stat().st_size}")
+            return True
+    except Exception as err:
+        logger.warning(f"[voice] envio falhou: {err}")
+        return False
 
 
 def _normalize_brazilian_phone(phone: str) -> str:
@@ -7409,6 +7528,10 @@ def transform_llm_output(*args, **kwargs):
     except Exception as err:
         logger.warning(f"[transform_llm_output] envio falhou, Hermes manda o bloco filtrado: {err}")
         return clean_text
+    try:
+        _maybe_send_voice(str(chat_id), clean_text)
+    except Exception as err:
+        logger.warning(f"[transform_llm_output] voice falhou: {err}")
     logger.info("[transform_llm_output] bolhas enviadas; suprimindo envio do Hermes")
     return "\n"
 
