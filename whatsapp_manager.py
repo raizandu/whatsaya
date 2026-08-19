@@ -10,6 +10,9 @@ import base64
 import time
 import threading
 import datetime
+import subprocess
+import tempfile
+import importlib.util
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -248,10 +251,62 @@ _turn_key: dict[str, str] = {}       # chat_id → chave do turno atual
 _turn_sent: set[str] = set()         # chaves de turnos que já foram enviados
 _turn_lock = threading.Lock()
 
-# Dedup por sessão Hermes: garante que cada session_id só envia UMA resposta.
-# Segunda camada de proteção independente do turn-based dedup.
+# Dedup por sessão Hermes: NÃO usar como bloqueio de turno seguinte.
+# O Hermes reusa o mesmo session_id na conversa inteira; bloquear aqui
+# trava a 2ª mensagem ("Sessão já respondida"). O _turn_sent já cobre
+# o reenvio do mesmo user_message.
 _responded_sessions: set[str] = set()
 _responded_sessions_lock = threading.Lock()
+
+# Buffer de entrada: espera um instante e junta duas mensagens seguidas.
+_inbound_buf: dict[str, list[str]] = {}
+_inbound_leader: dict[str, bool] = {}
+_inbound_locks: dict[str, threading.Lock] = {}
+_inbound_locks_guard = threading.Lock()
+
+
+def _inbound_lock_for(chat_id: str) -> threading.Lock:
+    with _inbound_locks_guard:
+        lock = _inbound_locks.get(chat_id)
+        if lock is None:
+            lock = threading.Lock()
+            _inbound_locks[chat_id] = lock
+        return lock
+
+
+def _coalesce_contact_inbound(chat_id: str, text: str) -> str | None:
+    """Espera um instante e junta mensagens seguidas. None = esta chamada só alimenta o buffer."""
+    if not chat_id:
+        return text
+    try:
+        wait_s = float(os.getenv("WHATSAPP_INBOUND_BUFFER_S", "2"))
+    except ValueError:
+        wait_s = 2.0
+    if wait_s <= 0:
+        return text
+
+    blob = (text or "").strip()
+    lock = _inbound_lock_for(chat_id)
+    with lock:
+        _inbound_buf.setdefault(chat_id, []).append(blob)
+        if _inbound_leader.get(chat_id):
+            logger.info(f"[inbound-buf] +1 em {chat_id!r} (aguarda o lote)")
+            return None
+        _inbound_leader[chat_id] = True
+
+    time.sleep(wait_s)
+
+    with lock:
+        parts = [p for p in _inbound_buf.pop(chat_id, []) if p]
+        _inbound_leader.pop(chat_id, None)
+    if not parts:
+        return blob
+    # Dedupe vizinhos iguais (eco de áudio + texto)
+    merged: list[str] = []
+    for part in parts:
+        if not merged or merged[-1] != part:
+            merged.append(part)
+    return "\n".join(merged)
 
 # Dedup de mensagens recebidas: evita processar a mesma mensagem do WhatsApp duas vezes
 _seen_message_ids: set[str] = set()
@@ -747,9 +802,27 @@ def _split_human_bubbles(message: str) -> list[str]:
     return cleaned or [text]
 
 
+def isSystemError(message: str) -> bool:
+    """Firewall do adapter Hermes: status interno não pode ir para o WhatsApp."""
+    if not message or not isinstance(message, str):
+        return False
+    blob = message.strip()
+    if not blob:
+        return False
+    if "💾" in blob and _SYSTEM_STATUS_RE.search(blob):
+        return True
+    if blob.startswith("💾") and len(blob) < 160:
+        return True
+    return bool(_SYSTEM_STATUS_RE.search(blob))
+
+
 def _human_send(chat_id: str, message: str) -> None:
     """Envia mensagem simulando comportamento humano: typing + delay + bolhas."""
     import random
+
+    if isSystemError(message):
+        logger.warning(f"[human-send] status interno bloqueado chat={chat_id!r}: {message[:120]!r}")
+        return
 
     def _typing(cid: str) -> None:
         try:
@@ -771,6 +844,9 @@ def _human_send(chat_id: str, message: str) -> None:
     parts = _split_human_bubbles(message)
     if not parts:
         return
+    parts = [p for p in parts if not isSystemError(p)]
+    if not parts:
+        return
     logger.info(f"[human-send] chat={chat_id!r} bubbles={len(parts)} sizes={[len(p) for p in parts]}")
     for i, part in enumerate(parts):
         _typing(chat_id)
@@ -779,6 +855,161 @@ def _human_send(chat_id: str, message: str) -> None:
         _send_one(chat_id, part)
         if i < len(parts) - 1:
             time.sleep(random.uniform(0.6, 1.3))
+
+
+def _fish_tts_path() -> Path | None:
+    env = os.getenv("WHATSAPP_FISH_TTS", "").strip()
+    candidates = []
+    if env:
+        candidates.append(Path(env))
+    hermes_home = Path(os.getenv("HERMES_HOME", "/opt/data/.hermes"))
+    here = Path(__file__).resolve().parent
+    candidates.extend([
+        hermes_home / "scripts" / "fish_tts.py",
+        here / "deploy" / "scripts" / "fish_tts.py",
+        here.parent / "deploy" / "scripts" / "fish_tts.py",
+    ])
+    for path in candidates:
+        if path.is_file():
+            return path
+    return None
+
+
+_fish_tts_mod = None
+
+
+def _load_fish_tts():
+    """Carrega deploy/scripts/fish_tts.py (written_only_reason + mesmo CLI do Hermes)."""
+    global _fish_tts_mod
+    if _fish_tts_mod is not None:
+        return _fish_tts_mod
+    path = _fish_tts_path()
+    if not path:
+        return None
+    spec = importlib.util.spec_from_file_location("_whatsaya_fish_tts", path)
+    if not spec or not spec.loader:
+        return None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    _fish_tts_mod = mod
+    return mod
+
+
+def _voice_reply_enabled() -> bool:
+    if not os.getenv("FISH_API_KEY", "").strip():
+        return False
+    flag = os.getenv("WHATSAPP_AUTO_TTS", "true").strip().lower()
+    return flag not in {"0", "false", "no", "off"}
+
+
+def _send_bridge_media(chat_id: str, file_path: str, media_type: str = "audio") -> None:
+    payload = json.dumps({
+        "chatId": chat_id,
+        "filePath": file_path,
+        "mediaType": media_type,
+    }).encode("utf-8")
+    req = urllib.request.Request(f"{BRIDGE_URL}/send-media", data=payload, method="POST")
+    req.add_header("Content-Type", "application/json")
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        resp.read()
+
+
+def _fish_call(name: str, default, *args):
+    try:
+        fish = _load_fish_tts()
+        fn = getattr(fish, name, None) if fish else None
+        if callable(fn):
+            return fn(*args)
+    except Exception as err:
+        logger.warning(f"[voice] {name} falhou: {err}")
+    return default(*args) if callable(default) else default
+
+
+def _split_voice_and_text(text: str) -> tuple[str, str, str]:
+    """(spoken, intro_text, written_after) — spoken keeps Fish cues."""
+    return _fish_call("split_voice_and_text", lambda blob: ((blob or "").strip(), "", ""), text)
+
+
+def _strip_fish_cues(text: str) -> str:
+    return _fish_call("strip_fish_cues", lambda blob: (blob or "").strip(), text)
+
+
+def _prepare_spoken_for_tts(spoken: str) -> str:
+    return _fish_call("prepare_spoken_for_tts", lambda blob: (blob or "").strip(), spoken)
+
+
+def _maybe_send_voice(chat_id: str, text: str) -> bool:
+    """Gera PTT no Fish e manda pelo bridge. True se a nota de voz saiu."""
+    if not _voice_reply_enabled():
+        return False
+    blob = (text or "").strip()
+    if not blob:
+        return False
+
+    script = _fish_tts_path()
+    if not script:
+        logger.info("[voice] fish_tts.py ausente — só texto")
+        return False
+
+    reason = _fish_call("written_only_reason", lambda _: None, blob)
+    if reason:
+        logger.info(f"[voice] skip tts: {reason}")
+        return False
+
+    spoken = _prepare_spoken_for_tts(blob)
+    if not spoken:
+        return False
+
+    try:
+        typing_payload = json.dumps({"chatId": chat_id}).encode("utf-8")
+        typing_req = urllib.request.Request(f"{BRIDGE_URL}/typing", data=typing_payload, method="POST")
+        typing_req.add_header("Content-Type", "application/json")
+        with urllib.request.urlopen(typing_req, timeout=5):
+            pass
+    except Exception:
+        pass
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="whatsaya-tts-") as tmp:
+            inp = Path(tmp) / "in.txt"
+            out = Path(tmp) / "out.ogg"
+            inp.write_text(spoken, encoding="utf-8")
+            proc = subprocess.run(
+                ["python3", str(script), str(inp), str(out), "ogg"],
+                capture_output=True,
+                text=True,
+                timeout=70,
+                env=os.environ.copy(),
+            )
+            err = (proc.stderr or "").strip()
+            if proc.returncode != 0 or not out.is_file() or out.stat().st_size < 64:
+                if "skip tts:" in err:
+                    logger.info(f"[voice] {err}")
+                else:
+                    logger.warning(f"[voice] fish_tts falhou rc={proc.returncode}: {err[-400:]}")
+                return False
+            _send_bridge_media(chat_id, str(out), "audio")
+            logger.info(f"[voice] ptt enviado chat={chat_id!r} bytes={out.stat().st_size}")
+            return True
+    except Exception as err:
+        logger.warning(f"[voice] envio falhou: {err}")
+        return False
+
+
+def _deliver_contact_reply(chat_id: str, clean_text: str) -> None:
+    """Voz só, texto só quando precisa copiar, ou intro + áudio + dado escrito."""
+    spoken, before, after = _split_voice_and_text(clean_text)
+    if before:
+        _human_send(chat_id, before)
+    voiced = bool(spoken) and _maybe_send_voice(chat_id, spoken)
+    if spoken and not voiced:
+        _human_send(chat_id, _strip_fish_cues(spoken))
+    if after:
+        _human_send(chat_id, after)
+    logger.info(
+        f"[voice] deliver spoken={bool(spoken)} voiced={voiced} "
+        f"intro={bool(before)} written={bool(after)}"
+    )
 
 
 def _normalize_brazilian_phone(phone: str) -> str:
@@ -932,6 +1163,109 @@ def _best_contact_name(jid: str, bridge_name: str | None, db_name: str | None, p
     if not is_generic(db_name):
         return db_name.strip(), "log"
     return f"Contato {phone}", "fallback"
+
+
+_NOT_A_PERSON_NAME = {
+    "contato", "cliente", "user", "usuario", "usuário", "você", "voce", "you",
+    "whatsapp", "unknown", "null", "none", "undefined", "amigo", "amiga",
+    "beleza", "show", "ok", "opa", "oi", "oie", "sim", "nao", "não", "claro",
+    "perfeito", "valeu", "obrigado", "obrigada", "fechou", "combinado",
+    "entendi", "legal", "top", "blz", "tmj", "fala", "eita", "cara", "mano",
+    "bom", "dia", "tarde", "noite",
+}
+_SELF_INTRO_NAME = re.compile(
+    r"(?:meu\s+nome\s+[eé]\s+|me\s+chamo\s+|pode\s+me\s+chamar\s+de\s+|"
+    r"sou\s+[oa]\s+|aqui\s+[eé]\s+[oa]?\s*)"
+    r"([A-Za-zÀ-ÿ]{2,}(?:\s+[A-Za-zÀ-ÿ]{2,}){0,2})",
+    re.I,
+)
+_JUST_A_NAME = re.compile(r"^[A-Za-zÀ-ÿ]{2,20}[.!]?$")
+
+
+def _is_usable_person_name(name: str | None) -> bool:
+    """True se o rótulo serve para chamar a pessoa em voz (não número, LID, placeholder)."""
+    if not name or not isinstance(name, str):
+        return False
+    n = name.strip()
+    if len(n) < 2 or len(n) > 40:
+        return False
+    if "@" in n or n.startswith("+"):
+        return False
+    if n.lower().startswith("contato "):
+        return False
+    letters = re.sub(r"[^A-Za-zÀ-ÿ]", "", n)
+    if len(letters) < 2:
+        return False
+    if len(re.sub(r"\D", "", n)) >= 6:
+        return False
+    first = n.split()[0].lower()
+    return first not in _NOT_A_PERSON_NAME and n.lower() not in _NOT_A_PERSON_NAME
+
+
+def _spoken_first_name(name: str) -> str:
+    token = (name or "").strip().split()[0]
+    if not token:
+        return ""
+    return token[0].upper() + token[1:]
+
+
+def _resolve_lead_spoken_name(contact_info: dict | None, bridge_name: str | None = None) -> str | None:
+    """Primeiro nome falável: o que a pessoa disse > apelido > nome do WhatsApp."""
+    info = contact_info or {}
+    for candidate in (info.get("spoken_name"), info.get("nickname"), info.get("name"), bridge_name):
+        if _is_usable_person_name(candidate):
+            return _spoken_first_name(str(candidate))
+    return None
+
+
+def _extract_self_introduced_name(message: str) -> str | None:
+    """Pega o nome se a pessoa se apresentou. Não trata 'beleza'/'ok' como nome."""
+    blob = (message or "").strip()
+    if not blob:
+        return None
+    match = _SELF_INTRO_NAME.search(blob)
+    if match and _is_usable_person_name(match.group(1)):
+        return _spoken_first_name(match.group(1))
+    if _JUST_A_NAME.match(blob) and _is_usable_person_name(blob.rstrip(".!")):
+        return _spoken_first_name(blob.rstrip(".!"))
+    return None
+
+
+def _persist_spoken_name(key: str, name: str, contacts: dict) -> None:
+    if not key or not name:
+        return
+    rec = contacts.get(key) or {}
+    rec["spoken_name"] = name
+    if not _is_usable_person_name(rec.get("name")):
+        rec["name"] = name
+    contacts[key] = rec
+    try:
+        with open("/opt/data/personal_contacts.json", "w", encoding="utf-8") as f:
+            json.dump(contacts, f, indent=2, ensure_ascii=False)
+    except OSError as err:
+        logger.warning(f"[spoken-name] falha ao gravar: {err}")
+
+
+def _lead_name_prompt_block(spoken: str | None) -> str:
+    if spoken:
+        return (
+            "### NOME DO LEAD NA VOZ ###\n"
+            f"Nome para usar: {spoken}\n"
+            f"Use esse nome no áudio, natural, no máximo uma vez por resposta. "
+            f"Principalmente ao explicar o produto e ao falar de preço.\n"
+            f"Ex: \"Então {spoken}, funciona assim…\" / "
+            f"\"{spoken}, o investimento é R$997 de implementação e R$397 por mês…\"\n"
+            "Não force em toda frase. Não invente outro nome.\n\n"
+        )
+    return (
+        "### NOME DO LEAD NA VOZ ###\n"
+        "Nome: AUSENTE (WhatsApp sem nome claro).\n"
+        "Não invente nome. Não use número, LID nem a palavra Contato.\n"
+        "Depois de responder o que a pessoa perguntou, pergunte uma vez: "
+        "\"como posso te chamar?\"\n"
+        "Se ela já disse o nome nesta conversa, use-o.\n\n"
+    )
+
 
 def _extract_json_from_text(text: str) -> dict:
     """Extrai o primeiro objeto JSON válido de um texto usando balanceamento de chaves."""
@@ -5302,9 +5636,13 @@ def _build_support_prompt(
         )
         contact_block = "\n".join(lines) + "\n\n"
 
+    spoken = _resolve_lead_spoken_name(contact_info)
+    name_block = _lead_name_prompt_block(spoken)
+
     return {
         "context": (
             f"{_datetime_context_block()}"
+            f"{name_block}"
             "### PERSONA E DIRETRIZES DO SUPORTE WHATSAPP ###\n"
             f"{whatsapp_soul}\n\n"
             "### IDIOMA: APENAS PORTUGUÊS BRASILEIRO ###\n"
@@ -5530,8 +5868,10 @@ def _live_classify_contact(
     if not man_rel and contact_info and contact_info.get("relationship") in ["Vendedor", "Amigo", "AmigoProximo", "Parente", "Filho"]:
         man_rel = contact_info.get("relationship")
 
+    spoken_kept = (contact_info or {}).get("spoken_name")
     new_data = {
         "name": name,
+        "spoken_name": spoken_kept,
         "relationship": man_rel or classification.get("relationship", "Cliente"),
         "manual_relationship": man_rel,
         "notes": contact_info.get("notes") if contact_info else None,
@@ -6856,6 +7196,18 @@ def pre_gateway_dispatch(*args, **kwargs):
         if sender_id and msg_text:
             _last_owner_text[sender_id] = msg_text
 
+    if not is_owner:
+        buf_chat = str(getattr(event.source, "chat_id", "") or sender_id or "")
+        live_text = (getattr(event, "text", None) or msg_text or "").strip()
+        merged = _coalesce_contact_inbound(buf_chat, live_text)
+        if merged is None:
+            return {"action": "skip", "reason": "inbound-coalesce"}
+        if merged and merged != live_text:
+            event.text = merged
+            if hasattr(event, "body"):
+                event.body = merged
+            logger.info(f"[inbound-buf] juntou {buf_chat!r}: {merged[:120]!r}")
+
     # Roteamento Dinâmico de Modelos (Dono vs Clientes)
     try:
         session_key = gateway._session_key_for_source(event.source)
@@ -7030,6 +7382,23 @@ def pre_llm_call(*args, **kwargs):
 
     # Buscar info de contato no JSON
     contact_info = personal_contacts.get(clean_jid) or personal_contacts.get(phone_number)
+    if contact_info is None:
+        contact_info = {}
+
+    user_msg_now = kwargs.get("user_message") or (context or {}).get("user_message") or ""
+    introduced = _extract_self_introduced_name(str(user_msg_now))
+    persist_key = clean_jid if clean_jid in personal_contacts or phone_number not in personal_contacts else phone_number
+    if introduced:
+        contact_info["spoken_name"] = introduced
+        _persist_spoken_name(persist_key, introduced, personal_contacts)
+        logger.info(f"[spoken-name] capturado {introduced!r} de {persist_key}")
+    elif not _resolve_lead_spoken_name(contact_info):
+        try:
+            bridge_name = _resolve_contact_name_from_bridge(sender_id or clean_jid)
+        except Exception:
+            bridge_name = None
+        if _is_usable_person_name(bridge_name):
+            contact_info["name"] = bridge_name.strip()
 
     # Verificar se precisa de classificação em tempo real
     needs_live_classify = False
@@ -7227,7 +7596,10 @@ _ACTION_CLAIM_PATTERNS = [
 ]
 # Prompt Mestre §17 — vazamento técnico/interno (filtro por linha).
 _INTERNAL_LEAK_PATTERNS = [
-    r"self[- ]?improvement\s+review",
+    r"self[- \u2010-\u2015]?improvement",
+    r"user\s+profile\s+updated",
+    r"profile\s+updated",
+    r"^💾",
     r"a\s+sess[aã]o\s+foi\s+restaurada",
     r"session\s+restored",
     r"context\s+updated",
@@ -7240,6 +7612,16 @@ _INTERNAL_LEAK_PATTERNS = [
     r"\bHermes\s+(Agent|v?\d|status|log|platform|session)\b",
     r"\bCodex\b",
 ]
+_SYSTEM_STATUS_RE = re.compile(
+    r"self[- \u2010-\u2015]?improvement|"
+    r"user\s+profile\s+updated|"
+    r"memory\s+updated|"
+    r"memory\s+update|"
+    r"profile\s+updated|"
+    r"context\s+updated|"
+    r"session\s+restored",
+    re.I,
+)
 _CNPJ_PATTERN = re.compile(r"\b\d{2}\.?\d{3}\.?\d{3}/\d{4}-?\d{2}\b")
 _PHONE_CANDIDATE_RE = re.compile(r"\(?\+?[\d][\d\s\-\.\(\)]{6,18}[\d]")
 
@@ -7357,17 +7739,6 @@ def _claim_contact_send(session_id: str, chat_id: str, preview: str) -> bool:
         local, domain = session_id.split("@", 1)
         session_clean = f"{local.split(':')[0]}@{domain}"
 
-    if session_id:
-        with _responded_sessions_lock:
-            if session_id in _responded_sessions:
-                logger.warning(f"[contact-send] Sessão já respondida — suprimindo (session={session_id!r})")
-                _log_suppressed("SESSION_DEDUP", session_id, chat_id, preview)
-                return False
-            _responded_sessions.add(session_id)
-            if len(_responded_sessions) > 2000:
-                _responded_sessions.clear()
-                _responded_sessions.add(session_id)
-
     with _turn_lock:
         tk = _turn_key.get(chat_id, "") or _turn_key.get(session_clean, "")
         logger.info(f"[contact-send] dedup: session={session_id!r} chat_id={chat_id!r} tk={tk!r} sent={tk in _turn_sent}")
@@ -7405,11 +7776,11 @@ def transform_llm_output(*args, **kwargs):
         return "\n"
 
     try:
-        _human_send(str(chat_id), clean_text)
+        _deliver_contact_reply(str(chat_id), clean_text)
     except Exception as err:
         logger.warning(f"[transform_llm_output] envio falhou, Hermes manda o bloco filtrado: {err}")
-        return clean_text
-    logger.info("[transform_llm_output] bolhas enviadas; suprimindo envio do Hermes")
+        return _strip_fish_cues(clean_text)
+    logger.info("[transform_llm_output] entrega feita; suprimindo envio do Hermes")
     return "\n"
 
 

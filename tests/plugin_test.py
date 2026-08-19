@@ -2987,6 +2987,51 @@ class TestBestContactName(BaseWhatsAppManagerTest):
         self.assertEqual(source, "fallback")
 
 
+class TestSpokenLeadName(unittest.TestCase):
+    def test_usable_whatsapp_name(self):
+        import whatsapp_manager as wm
+        self.assertTrue(wm._is_usable_person_name("Tony"))
+        self.assertTrue(wm._is_usable_person_name("Maria Silva"))
+        self.assertEqual(wm._resolve_lead_spoken_name({"name": "Tony"}), "Tony")
+
+    def test_rejects_blank_and_unclear(self):
+        import whatsapp_manager as wm
+        for raw in ("", None, "Contato 5511999", "55119998877", "111437255037108", ".", "You", "beleza"):
+            self.assertFalse(wm._is_usable_person_name(raw), raw)
+        self.assertIsNone(wm._resolve_lead_spoken_name({"name": "Contato 5511"}))
+
+    def test_spoken_name_wins_over_generic_whatsapp(self):
+        import whatsapp_manager as wm
+        self.assertEqual(
+            wm._resolve_lead_spoken_name({"spoken_name": "Marina", "name": "Contato 55"}),
+            "Marina",
+        )
+
+    def test_extracts_introduction(self):
+        import whatsapp_manager as wm
+        self.assertEqual(wm._extract_self_introduced_name("meu nome é Tony"), "Tony")
+        self.assertEqual(wm._extract_self_introduced_name("Me chamo Maria Silva"), "Maria")
+        self.assertEqual(wm._extract_self_introduced_name("Tony"), "Tony")
+        self.assertIsNone(wm._extract_self_introduced_name("Beleza"))
+        self.assertIsNone(wm._extract_self_introduced_name("ok"))
+
+    def test_prompt_asks_when_missing(self):
+        import whatsapp_manager as wm
+        missing = wm._lead_name_prompt_block(None)
+        self.assertIn("AUSENTE", missing)
+        self.assertIn("como posso te chamar", missing)
+        present = wm._lead_name_prompt_block("Tony")
+        self.assertIn("Nome para usar: Tony", present)
+        self.assertIn("Então Tony", present)
+
+    def test_support_prompt_includes_name_block(self):
+        import whatsapp_manager as wm
+        ctx = wm._build_support_prompt("soul", "rules", "", contact_info={"name": "Tony"})
+        self.assertIn("Nome para usar: Tony", ctx["context"])
+        ctx2 = wm._build_support_prompt("soul", "rules", "", contact_info={})
+        self.assertIn("Nome: AUSENTE", ctx2["context"])
+
+
 class TestCallLlmApi(BaseWhatsAppManagerTest):
     """Testes para _call_llm_api."""
 
@@ -5252,6 +5297,22 @@ class TestPrepareContactReply(BaseWhatsAppManagerTest):
         out = whatsapp_manager._prepare_contact_reply("Self-improvement review")
         self.assertEqual(out, "")
 
+    def test_user_profile_updated_suppressed(self):
+        import whatsapp_manager
+        out = whatsapp_manager._prepare_contact_reply(
+            "💾 Self-improvement review: User profile updated"
+        )
+        self.assertEqual(out, "")
+
+    def test_is_system_error_blocks_profile_status(self):
+        import whatsapp_manager
+        self.assertTrue(
+            whatsapp_manager.isSystemError("💾 Self-improvement review: User profile updated")
+        )
+        self.assertTrue(whatsapp_manager.isSystemError("Self-improvement review: Memory updated"))
+        self.assertFalse(whatsapp_manager.isSystemError("Oi, tudo bem?"))
+        self.assertFalse(whatsapp_manager.isSystemError("Quer fechar por Pix?"))
+
     def test_commercial_reply_preserved(self):
         import whatsapp_manager
         text = "Hoje são R$997 de implementação e R$397/mês. Quer fechar por Pix ou prefere uma call de 15 min?"
@@ -5279,8 +5340,12 @@ class TestTransformLlmOutput(BaseWhatsAppManagerTest):
         whatsapp_manager._turn_sent.clear()
         whatsapp_manager._sender_to_chat.clear()
         whatsapp_manager._responded_sessions.clear()
+        # Sem isso, um FISH_API_KEY no ambiente do dev tentaria TTS de verdade.
+        self._voice_patch = patch("whatsapp_manager._maybe_send_voice", return_value=False)
+        self._voice_patch.start()
 
     def tearDown(self):
+        self._voice_patch.stop()
         whatsapp_manager._turn_key.clear()
         whatsapp_manager._turn_sent.clear()
         whatsapp_manager._responded_sessions.clear()
@@ -5348,6 +5413,15 @@ class TestTransformLlmOutput(BaseWhatsAppManagerTest):
         self.assertNotIn("11999887766", sent)
 
     @patch("whatsapp_manager._human_send")
+    def test_same_session_allows_new_user_turn(self, mock_send):
+        session = "5511888888888@s.whatsapp.net"
+        whatsapp_manager._turn_key[session] = "turno-1"
+        self._call(session, "primeira")
+        whatsapp_manager._turn_key[session] = "turno-2"
+        self._call(session, "segunda, me chamo Anthony")
+        self.assertEqual(mock_send.call_count, 2)
+
+    @patch("whatsapp_manager._human_send")
     def test_turn_dedup_suppresses_second_call(self, mock_send):
         session = "5511888888888@s.whatsapp.net"
         whatsapp_manager._turn_key[session] = "turno-abc"
@@ -5393,6 +5467,127 @@ class TestTransformLlmOutput(BaseWhatsAppManagerTest):
         mock_send.assert_called_once_with("5511888888888@s.whatsapp.net", "opa")
 
 
+class TestVoiceReply(BaseWhatsAppManagerTest):
+    """Plugin manda PTT no Fish depois das bolhas — o Hermes auto-TTS nunca vê o texto."""
+
+    def setUp(self):
+        super().setUp()
+        whatsapp_manager._turn_key.clear()
+        whatsapp_manager._turn_sent.clear()
+        whatsapp_manager._sender_to_chat.clear()
+        whatsapp_manager._responded_sessions.clear()
+        whatsapp_manager._fish_tts_mod = None
+
+    def tearDown(self):
+        whatsapp_manager._turn_key.clear()
+        whatsapp_manager._turn_sent.clear()
+        whatsapp_manager._responded_sessions.clear()
+        whatsapp_manager._fish_tts_mod = None
+        super().tearDown()
+
+    def test_disabled_without_api_key(self):
+        with patch.dict(os.environ, {"FISH_API_KEY": "", "WHATSAPP_AUTO_TTS": "true"}, clear=False):
+            os.environ.pop("FISH_API_KEY", None)
+            self.assertFalse(whatsapp_manager._voice_reply_enabled())
+            self.assertFalse(whatsapp_manager._maybe_send_voice("5511888888888@s.whatsapp.net", "oi"))
+
+    def test_disabled_when_flag_off(self):
+        with patch.dict(os.environ, {"FISH_API_KEY": "sk-test", "WHATSAPP_AUTO_TTS": "false"}):
+            self.assertFalse(whatsapp_manager._voice_reply_enabled())
+
+    def test_skips_written_only_pix(self):
+        with patch.dict(os.environ, {"FISH_API_KEY": "sk-test", "WHATSAPP_AUTO_TTS": "true"}):
+            with patch("whatsapp_manager._send_bridge_media") as mock_media, \
+                 patch("whatsapp_manager.subprocess.run") as mock_run:
+                sent = whatsapp_manager._maybe_send_voice(
+                    "5511888888888@s.whatsapp.net",
+                    "A chave Pix é 44.249.819/0001-62",
+                )
+        self.assertFalse(sent)
+        mock_run.assert_not_called()
+        mock_media.assert_not_called()
+
+    def test_sends_ptt_when_fish_succeeds(self):
+        def fake_run(cmd, **kwargs):
+            out = Path(cmd[3])
+            out.write_bytes(b"OggS" + b"\x00" * 200)
+            return MagicMock(returncode=0, stderr="")
+
+        with patch.dict(os.environ, {"FISH_API_KEY": "sk-test", "WHATSAPP_AUTO_TTS": "true"}):
+            with patch("whatsapp_manager._send_bridge_media") as mock_media, \
+                 patch("whatsapp_manager.subprocess.run", side_effect=fake_run) as mock_run, \
+                 patch("urllib.request.urlopen"):
+                sent = whatsapp_manager._maybe_send_voice(
+                    "5511888888888@s.whatsapp.net",
+                    "Opa, fechamos então.",
+                )
+        self.assertTrue(sent)
+        mock_run.assert_called_once()
+        mock_media.assert_called_once()
+        self.assertEqual(mock_media.call_args[0][0], "5511888888888@s.whatsapp.net")
+        self.assertEqual(mock_media.call_args[0][2], "audio")
+
+    def _hook(self, text):
+        hook = self.ctx.hooks.get("transform_llm_output")
+        return hook(
+            "transform_llm_output",
+            platform="whatsapp",
+            session_id="5511888888888@s.whatsapp.net",
+            assistant_response=text,
+        )
+
+    @patch("whatsapp_manager._maybe_send_voice")
+    @patch("whatsapp_manager._human_send")
+    def test_transform_voice_only_when_speakable(self, mock_send, mock_voice):
+        mock_voice.return_value = True
+        result = self._hook("fechamos então")
+        self.assertEqual(result, "\n")
+        mock_send.assert_not_called()
+        mock_voice.assert_called_once_with("5511888888888@s.whatsapp.net", "fechamos então")
+
+    @patch("whatsapp_manager._maybe_send_voice")
+    @patch("whatsapp_manager._human_send")
+    def test_transform_pix_stays_text(self, mock_send, mock_voice):
+        result = self._hook("A chave Pix é 44.249.819/0001-62")
+        self.assertEqual(result, "\n")
+        mock_voice.assert_not_called()
+        mock_send.assert_called_once()
+        self.assertIn("44.249.819/0001-62", mock_send.call_args[0][1])
+
+    @patch("whatsapp_manager._maybe_send_voice")
+    @patch("whatsapp_manager._human_send")
+    def test_transform_intro_then_voice(self, mock_send, mock_voice):
+        mock_voice.return_value = True
+        result = self._hook("vou te enviar um audio explicando\n\n[happy] o fluxo é simples")
+        self.assertEqual(result, "\n")
+        mock_send.assert_called_once()
+        self.assertIn("audio", mock_send.call_args[0][1].lower())
+        mock_voice.assert_called_once()
+        self.assertIn("fluxo", mock_voice.call_args[0][1])
+
+    @patch("whatsapp_manager._maybe_send_voice")
+    @patch("whatsapp_manager._human_send")
+    def test_transform_voice_then_pix(self, mock_send, mock_voice):
+        mock_voice.return_value = True
+        result = self._hook("fechamos então\n\nA chave Pix é 44.249.819/0001-62")
+        self.assertEqual(result, "\n")
+        mock_voice.assert_called_once()
+        self.assertIn("fechamos", mock_voice.call_args[0][1])
+        mock_send.assert_called_once()
+        self.assertIn("44.249.819/0001-62", mock_send.call_args[0][1])
+
+    @patch("whatsapp_manager._maybe_send_voice")
+    @patch("whatsapp_manager._human_send")
+    def test_transform_strips_cues_from_fallback_text(self, mock_send, mock_voice):
+        mock_voice.return_value = False
+        result = self._hook("[warm and friendly] oi, tudo certo")
+        self.assertEqual(result, "\n")
+        mock_send.assert_called_once()
+        sent = mock_send.call_args[0][1]
+        self.assertNotIn("[warm and friendly]", sent)
+        self.assertIn("oi, tudo certo", sent)
+
+
 class TestWhatsAppAdapterWhitespace(unittest.TestCase):
     """Adapter não reenvia o whitespace que transform_llm_output devolve ao Hermes."""
 
@@ -5408,6 +5603,18 @@ class TestWhatsAppAdapterWhitespace(unittest.TestCase):
         from adapter import WhatsAppPlatformAdapter
         adapter = WhatsAppPlatformAdapter()
         self.assertTrue(adapter.send("5511888888888@s.whatsapp.net", "   "))
+        mock_urlopen.assert_not_called()
+
+    @patch("urllib.request.urlopen")
+    def test_self_improvement_status_is_blocked(self, mock_urlopen):
+        from adapter import WhatsAppPlatformAdapter
+        adapter = WhatsAppPlatformAdapter()
+        self.assertTrue(
+            adapter.send(
+                "5511888888888@s.whatsapp.net",
+                "💾 Self-improvement review: User profile updated",
+            )
+        )
         mock_urlopen.assert_not_called()
 
 

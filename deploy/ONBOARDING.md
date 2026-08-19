@@ -134,7 +134,21 @@ Sessão de teste suja o histórico. Apague a sessão Hermes daquele JID se for r
 
 ---
 
-## 8. Depois do ar
+## 8. Skills do Hermes (dono)
+
+O perfil `whatsapp` (cliente) já sobe com `skills.enabled: false`. O perfil do dono herda o catálogo bundled — dezenas de skills de studio, MLOps, GitHub e desktop. O `command:` do compose grava `skills.disabled` no `config.yaml` a cada boot.
+
+Ficam ligadas só as úteis nesta operação: `session-librarian`, OCR/PDF/DOCX, Google Workspace / e-mail, Notion (onboarding de clientes), mapas, atas, `plan`, `hermes-agent`, `grounded-citations`.
+
+Para ver: `docker compose exec hermes hermes skills list`.
+
+Áudio: o Hermes 0.20+ transcreve com Whisper local e, sem idioma, assume inglês. O compose grava `stt.language: pt` (e `HERMES_LOCAL_STT_LANGUAGE=pt`). Sem isso o PTT em português vira tradução zoada. `stt.echo_transcripts: false` — a transcrição fica só no contexto do agente; o cliente não vê a bolha `🎙️ "..."`.
+
+Voz de resposta: Fish Audio, modelo `s2.1-pro-free` (campanha grátis até 31/08/2026; no dia 30 o cron avisa o dono para trocar para `s2.1-pro`). Gere a chave em https://fish.audio/app/api-keys/ e coloque `FISH_API_KEY` no `.env`. Opcional: `FISH_REFERENCE_ID`, `FISH_TTS_MODEL` e `FISH_TTS_VOLUME` (padrão `4`). Resposta falável vai **só em nota de voz**. PIX, endereço, link, e-mail, código e intro do tipo “vou te enviar um audio” ficam **texto**. Sem chave, o texto continua indo. Tags `[happy]` / `[warm and friendly]` entoam a voz e não aparecem no chat. Preço no áudio vai por extenso (`997 reais`). Duas mensagens seguidas esperam 2,5s e entram no mesmo lote (`WHATSAPP_DEBOUNCE_INITIAL_MS=2500`).
+
+---
+
+## 9. Depois do ar
 
 - Atualizar plugin: push neste repo → restart. Confira no log `bridge.js atualizado` / `whatsapp-manager`.
 - Mudar só persona/catálogo: edite `/opt/data/SOUL_WHATSAPP.md` e `support_rules.md` (ou o `CONFIG_REPO`) e reinicie.

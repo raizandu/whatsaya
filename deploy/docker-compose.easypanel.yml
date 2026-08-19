@@ -98,8 +98,8 @@
 #   WHATSAPP_CONNECTION_NAME Nome da conexão exibido no Dashboard (padrão: EmpreendedorSerial)
 #
 # ⏳ DEBOUNCE DE MENSAGENS (agrupa fragmentos de texto antes de processar)
-#   WHATSAPP_DEBOUNCE_INITIAL_MS      Espera inicial em ms antes de processar (padrão: 15000)
-#   WHATSAPP_DEBOUNCE_MIN_MS          Piso do decaimento progressivo em ms (padrão: 2000)
+#   WHATSAPP_DEBOUNCE_INITIAL_MS      Espera inicial em ms antes de processar (padrão: 2500)
+#   WHATSAPP_DEBOUNCE_MIN_MS          Piso do decaimento progressivo em ms (padrão: 1500)
 #   WHATSAPP_DEBOUNCE_DECAY           Fator de decaimento a cada fragmento novo (padrão: 0.6)
 #   WHATSAPP_DEBOUNCE_SKIP_SELF_CHAT  Pular debounce no self-chat do dono (padrão: true)
 #
@@ -252,6 +252,45 @@ services:
                          'platforms': {'whatsapp': {'tool_progress': 'off'}}})
             cfg['display'] = disp
             cfg['model'] = {'default': owner_model, 'provider': owner_provider}
+            sk = cfg.get('skills') if isinstance(cfg.get('skills'), dict) else {}
+            off = ['architecture-diagram', 'ascii-art', 'ascii-video', 'baoyu-infographic', 'claude-design', 'comfyui', 'design-md', 'excalidraw', 'humanizer', 'manim-video', 'p5js', 'popular-web-designs', 'pretext', 'sketch', 'songwriting-and-ai-music', 'touchdesigner-mcp', 'gif-search', 'heartmula', 'songsee', 'youtube-content', 'claude-code', 'codex', 'computer-use', 'merge-reconciler', 'opencode', 'yuanbao', 'hermes-desktop-plugins', 'audiocraft-audio-generation', 'evaluating-llms-harness', 'huggingface-hub', 'llama-cpp', 'segment-anything-model', 'serving-llms-vllm', 'weights-and-biases', 'jupyter-live-kernel', 'openhue', 'xurl', 'obsidian', 'polymarket', 'petdex', 'airtable', 'box', 'teams-meeting-pipeline', 'product-price-monitor', 'powerpoint', 'xlsx', 'arxiv', 'llm-wiki', 'research-paper-writing', 'blocked-page-recovery', 'blogwatcher', 'competitor-news-monitor', 'codebase-inspection', 'github-auth', 'github-code-review', 'github-issue-to-pr', 'github-issues', 'github-pr-workflow', 'github-repo-management', 'dogfood', 'hermes-agent-skill-authoring', 'inspecting-hermes-desktop-dom', 'node-inspect-debugger', 'python-debugpy', 'requesting-code-review', 'simplify-code', 'spike', 'systematic-debugging', 'test-driven-development']
+            sk['disabled'] = sorted(set(sk.get('disabled') or []) | set(off))
+            cfg['skills'] = sk
+            stt = cfg.get('stt') if isinstance(cfg.get('stt'), dict) else {}
+            local = stt.get('local') if isinstance(stt.get('local'), dict) else {}
+            stt['enabled'] = True
+            stt['echo_transcripts'] = False
+            stt['provider'] = 'local'
+            stt['language'] = 'pt'
+            local['language'] = 'pt'
+            local.setdefault('model', 'base')
+            stt['local'] = local
+            openai = stt.get('openai') if isinstance(stt.get('openai'), dict) else {}
+            openai['language'] = 'pt'
+            openai.setdefault('model', 'whisper-1')
+            stt['openai'] = openai
+            cfg['stt'] = stt
+            tts = cfg.get('tts') if isinstance(cfg.get('tts'), dict) else {}
+            tts['provider'] = 'fishaudio'
+            providers = tts.get('providers') if isinstance(tts.get('providers'), dict) else {}
+            providers['fishaudio'] = {
+                'type': 'command',
+                'command': 'python3 /opt/data/.hermes/scripts/fish_tts.py {input_path} {output_path} {format}',
+                'timeout': 60,
+            }
+            tts['providers'] = providers
+            cfg['tts'] = tts
+            voice = cfg.get('voice') if isinstance(cfg.get('voice'), dict) else {}
+            voice['auto_tts'] = True
+            cfg['voice'] = voice
+            mem = cfg.get('memory') if isinstance(cfg.get('memory'), dict) else {}
+            mem['user_profile_enabled'] = False
+            cfg['memory'] = mem
+            pt = cfg.get('platform_toolsets') if isinstance(cfg.get('platform_toolsets'), dict) else {}
+            wa_tools = [t for t in (pt.get('whatsapp') or []) if t != 'memory']
+            if 'whatsapp' in pt or wa_tools:
+                pt['whatsapp'] = wa_tools
+                cfg['platform_toolsets'] = pt
             with open(path, 'w') as f:
                 yaml.dump(cfg, f, default_flow_style=False)
 
@@ -326,8 +365,8 @@ services:
       - WHATSAPP_CONNECTION_NAME=${WHATSAPP_CONNECTION_NAME:-EmpreendedorSerial}
 
       # Debounce de mensagens (agrupa fragmentos de texto antes de processar)
-      - WHATSAPP_DEBOUNCE_INITIAL_MS=${WHATSAPP_DEBOUNCE_INITIAL_MS:-15000}
-      - WHATSAPP_DEBOUNCE_MIN_MS=${WHATSAPP_DEBOUNCE_MIN_MS:-2000}
+      - WHATSAPP_DEBOUNCE_INITIAL_MS=${WHATSAPP_DEBOUNCE_INITIAL_MS:-2500}
+      - WHATSAPP_DEBOUNCE_MIN_MS=${WHATSAPP_DEBOUNCE_MIN_MS:-1500}
       - WHATSAPP_DEBOUNCE_DECAY=${WHATSAPP_DEBOUNCE_DECAY:-0.6}
       - WHATSAPP_DEBOUNCE_SKIP_SELF_CHAT=${WHATSAPP_DEBOUNCE_SKIP_SELF_CHAT:-true}
 
@@ -372,6 +411,12 @@ services:
       - HERMES_SETUP_GITHUB_USER=${HERMES_SETUP_GITHUB_USER:-raizandu}
       - HERMES_SETUP_GITHUB_REPO=${HERMES_SETUP_GITHUB_REPO:-whatsaya}
       - KEEP_LOCAL_PLUGIN=${KEEP_LOCAL_PLUGIN:-}
+      - HERMES_LOCAL_STT_LANGUAGE=${HERMES_LOCAL_STT_LANGUAGE:-pt}
+      - FISH_API_KEY=${FISH_API_KEY:-}
+      - FISH_REFERENCE_ID=${FISH_REFERENCE_ID:-}
+      - FISH_TTS_MODEL=${FISH_TTS_MODEL:-s2.1-pro-free}
+      - FISH_TTS_VOLUME=${FISH_TTS_VOLUME:-4}
+      - WHATSAPP_INBOUND_BUFFER_S=${WHATSAPP_INBOUND_BUFFER_S:-0}
       - CONFIG_REPO=${CONFIG_REPO:-hermes_agent_context_contatcs}
       - CONFIG_GITHUB_TOKEN=${CONFIG_GITHUB_TOKEN:-}
 
