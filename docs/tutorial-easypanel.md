@@ -1,5 +1,7 @@
 # Como instalar o Hermes WhatsApp no Easypanel (do zero ao bot funcionando)
 
+> **Caminho oficial:** [ONBOARDING.md](../deploy/ONBOARDING.md) (VPS + Compose + IP, sem domínio obrigatório). Este tutorial é o extra EasyPanel.
+>
 > **Nível:** iniciante · **Tempo estimado:** 20–30 minutos  
 > **O que você vai ter no final:** um assistente pessoal no WhatsApp que atende clientes, transcreve áudios, aprende o seu estilo e obedece instruções por contato.
 
@@ -22,8 +24,8 @@ Antes de começar, você precisa ter:
 
 - **Easypanel** instalado em um VPS (Ubuntu 22.04+ recomendado, mínimo 2GB RAM)
 - **Domínio** com DNS apontado para o seu servidor
-- **Chave da Google AI Studio** — [crie aqui gratuitamente](https://aistudio.google.com) (usada pelo Gemini, que é o modelo padrão)
-- **Token GitHub (PAT)** com leitura a um repositório privado onde ficam seus contatos e persona
+- **Um** provider de modelo (OpenRouter, Gemini ou Codex no dashboard). Não preencha duas chaves da cadeia Google → OpenAI → OpenRouter
+- **Token GitHub (PAT)** só se for versionar contatos/persona num repo privado (`CONFIG_REPO`) — opcional
 - **Número do WhatsApp** que será conectado ao bot
 
 ---
@@ -96,7 +98,7 @@ O warning é esperado — ainda não pareamos o WhatsApp.
 Abra o **Console** do serviço `hermes` no Easypanel e execute:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/leoalvesia/whatsappkit/main/deploy/setup.sh | bash -s leoalvesia
+curl -sSL https://raw.githubusercontent.com/raizandu/whatsaya/main/deploy/setup.sh | bash -s raizandu
 ```
 
 O script vai:
@@ -198,8 +200,8 @@ Envie para **você mesmo** (self-chat). Todos os comandos funcionam exclusivamen
 Quando houver uma nova versão do plugin, atualize assim no console do container:
 
 ```bash
-cd /opt/data/workspace/whatsappkit && git pull origin main
-cp whatsapp_manager.py /opt/data/.hermes/plugins/whatsapp-manager/whatsapp_manager.py
+# Sem KEEP_LOCAL_PLUGIN, um restart já faz fetch da main de raizandu/whatsaya.
+# Patch temporário no volume: KEEP_LOCAL_PLUGIN=true. Correção definitiva = PR neste repo.
 ```
 
 Depois reinicie o container pelo Easypanel.
@@ -239,4 +241,4 @@ Edite diretamente no GitHub (no seu repositório privado de configuração) e ro
 
 ---
 
-*Desenvolvido por [André Alencar](https://aalencar.com.br) — [Repositório no GitHub](https://github.com/leoalvesia/whatsappkit)*
+Repo do plugin: [raizandu/whatsaya](https://github.com/raizandu/whatsaya).
