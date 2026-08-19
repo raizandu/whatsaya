@@ -31,6 +31,12 @@ import { tmpdir } from 'os';
 import qrcode from 'qrcode';
 import qrcodeTerminal from 'qrcode-terminal';
 import { matchesAllowedUser, parseAllowedUsers } from './allowlist.js';
+import {
+  getStoredMessage,
+  initHistoryStore,
+  persistHistoryBatch,
+  persistLiveMessage,
+} from './history_bridge.js';
 
 // Load .env files if present (custom dotenv implementation)
 function loadEnv() {
@@ -548,6 +554,7 @@ let onMessagesUpsert = async ({ messages, type }) => {
     if (chatId === 'status@broadcast' || (chatId && chatId.includes('status'))) {
       continue;
     }
+    persistLiveMessage(msg);
     if (WHATSAPP_DEBUG) {
       try {
         console.log(JSON.stringify({
@@ -1049,7 +1056,7 @@ function handleContactsUpdate(updates) {
   }
 }
 
-function handleMessagingHistorySet({ contacts }) {
+async function handleMessagingHistorySet({ contacts, messages, syncType }) {
   if (contacts) {
     for (const contact of contacts) {
       if (!contact.id) continue;
@@ -1060,6 +1067,14 @@ function handleMessagingHistorySet({ contacts }) {
         const phone = _phoneFromLidContact(cleanJid, contacts);
         if (phone) _persistLidMapping(cleanJid, phone);
       }
+    }
+  }
+  if (messages?.length) {
+    try {
+      const result = await persistHistoryBatch(messages, syncType);
+      console.log(`[history] lote histórico salvo: recebido=${result.received} inserido=${result.inserted} ignorado=${result.skipped} tipo=${syncType ?? 'unknown'}`);
+    } catch (err) {
+      console.error(`[history] falha ao salvar lote histórico: ${err.message}`);
     }
   }
 }
@@ -1117,6 +1132,12 @@ function handleConnectionUpdate(update) {
 }
 
 async function startSocket() {
+  try {
+    await initHistoryStore();
+    console.log(`[history] SQLite pronto: ${process.env.WHATSAPP_HISTORY_DB_PATH || '/opt/data/.hermes/whatsapp_messages.db'}`);
+  } catch (err) {
+    console.error(`[history] não foi possível inicializar o SQLite: ${err.message}`);
+  }
   const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
   const { version } = await fetchLatestBaileysVersion();
 
@@ -1126,10 +1147,12 @@ async function startSocket() {
     logger,
     printQRInTerminal: false,
     browser: [WHATSAPP_CONNECTION_NAME, 'Chrome', '120.0'],
-    syncFullHistory: false,
+    syncFullHistory: true,
+    shouldSyncHistoryMessage: () => true,
     markOnlineOnConnect: false,
     getMessage: async (key) => {
-      return { conversation: '' };
+      const stored = await getStoredMessage(key);
+      return stored || { conversation: '' };
     },
   });
 

@@ -8068,7 +8068,60 @@ def register(ctx):
             if not target_bridge.exists() or source_bridge.read_bytes() != target_bridge.read_bytes():
                 shutil.copy2(source_bridge, target_bridge)
                 logger.info(f"bridge.js atualizado em {target_bridge}")
+            # Hermes 0.20 starts the core copy under scripts/whatsapp-bridge,
+            # not platforms/whatsapp/bridge. Keep both identical so the
+            # dashboard and the plugin share one paired session.
+            source_allow = plugin_dir / "allowlist.js"
+            if not source_allow.exists():
+                source_allow = plugin_dir / "whatsapp-manager" / "allowlist.js"
+            for core_bridge_dir in (
+                Path("/opt/data/.hermes/scripts/whatsapp-bridge"),
+                Path("/opt/data/.hermes/profiles/whatsapp/scripts/whatsapp-bridge"),
+            ):
+                if not core_bridge_dir.is_dir():
+                    continue
+                core_bridge = core_bridge_dir / "bridge.js"
+                if not core_bridge.exists() or source_bridge.read_bytes() != core_bridge.read_bytes():
+                    shutil.copy2(source_bridge, core_bridge)
+                    logger.info(f"bridge.js atualizado em {core_bridge}")
+                if source_allow.exists():
+                    dest_allow = core_bridge_dir / "allowlist.js"
+                    if not dest_allow.exists() or source_allow.read_bytes() != dest_allow.read_bytes():
+                        shutil.copy2(source_allow, dest_allow)
+            # Hermes writes bridge.log next to the profile session symlink.
+            for log_dir in (
+                Path("/opt/data/.hermes/platforms/whatsapp"),
+                Path("/opt/data/.hermes/profiles/whatsapp/platforms/whatsapp"),
+            ):
+                try:
+                    log_dir.mkdir(parents=True, exist_ok=True)
+                    (log_dir / "bridge.log").touch(exist_ok=True)
+                except OSError:
+                    pass
         _patch_core_bridge_status_filter()
+
+        # 1b. Sidecar do fullsync: o bridge.js ativo importa history_bridge.js
+        #     e chama history_store.py. Sem esses arquivos ao lado da cópia
+        #     que o Hermes executa, o lote histórico não grava no SQLite.
+        for sidecar_name in ("history_bridge.js", "history_store.py"):
+            source_sidecar = plugin_dir / sidecar_name
+            if not source_sidecar.exists():
+                source_sidecar = plugin_dir / "whatsapp-manager" / sidecar_name
+            if not source_sidecar.exists():
+                continue
+            dest_dirs = [target_bridge_dir]
+            dest_dirs.extend(
+                path for path in (
+                    Path("/opt/data/.hermes/scripts/whatsapp-bridge"),
+                    Path("/opt/data/.hermes/profiles/whatsapp/scripts/whatsapp-bridge"),
+                )
+                if path.is_dir()
+            )
+            for dest_dir in dest_dirs:
+                dest = dest_dir / sidecar_name
+                if not dest.exists() or source_sidecar.read_bytes() != dest.read_bytes():
+                    shutil.copy2(source_sidecar, dest)
+                    logger.info(f"{sidecar_name} atualizado em {dest}")
 
         # 2. Copiar package.json do plugin para o volume
         source_pkg = plugin_dir / "package.json"

@@ -134,7 +134,31 @@ Sessão de teste suja o histórico. Apague a sessão Hermes daquele JID se for r
 
 ---
 
-## 8. Skills do Hermes (dono)
+## 8. Fullsync e triagem inicial
+
+Depois do primeiro pareamento e de `/whatsapp/status` ficar `connected`, rode o pipeline em [`WHATSAPP_HISTORY_TRIAGE.md`](WHATSAPP_HISTORY_TRIAGE.md). Mensagens históricas vão para o SQLite e **não entram na fila do LLM**.
+
+```bash
+python3 deploy/scripts/whatsapp_history_triage.py \
+  --config deploy/scripts/whatsapp_history_triage.yaml run
+```
+
+Isso espera o lote estabilizar e grava snapshot, CSV e o prompt da skill `whatsapp-client-triage`. Depois da classificação:
+
+```bash
+python3 deploy/scripts/whatsapp_history_triage.py \
+  --config deploy/scripts/whatsapp_history_triage.yaml report \
+  --snapshot /opt/data/.hermes/workspace/whatsapp_fullsync_YYYY-MM-DD.json \
+  --classification /opt/data/.hermes/workspace/whatsapp_classification.json
+```
+
+O Markdown de revisão sai em `/opt/data/.hermes/workspace/whatsapp_triagem_revisao_cliente_YYYY-MM-DD.md`. O dono valida antes de qualquer flag ir para `personal_contacts.json`. Envio ao self-chat é explícito (`send`) e exige `--chat-id` do dono.
+
+Não envie o snapshot bruto. Não declare o onboarding completo sem conferir `historical > 0` quando o número tem histórico.
+
+---
+
+## 9. Skills do Hermes (dono)
 
 O perfil `whatsapp` (cliente) já sobe com `skills.enabled: false`. O perfil do dono herda o catálogo bundled — dezenas de skills de studio, MLOps, GitHub e desktop. O `command:` do compose grava `skills.disabled` no `config.yaml` a cada boot.
 
@@ -150,7 +174,7 @@ Voz de resposta: Fish Audio, modelo `s2.1-pro-free` (campanha grátis até 31/08
 
 ---
 
-## 9. Depois do ar
+## 10. Depois do ar
 
 - Atualizar plugin: push neste repo → restart. Confira no log `bridge.js atualizado` / `whatsapp-manager`.
 - Mudar só persona/catálogo: edite `/opt/data/SOUL_WHATSAPP.md` e `support_rules.md` (ou o `CONFIG_REPO`) e reinicie.

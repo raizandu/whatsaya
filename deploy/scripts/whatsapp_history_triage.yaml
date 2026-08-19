@@ -1,0 +1,29 @@
+# Configuração do pipeline de fullsync e triagem WhatsAYA.
+# Copie para o volume do cliente e ajuste apenas os caminhos/owner_chat_id.
+version: 1
+
+paths:
+  hermes_home: /opt/data/.hermes
+  history_db: /opt/data/.hermes/whatsapp_messages.db
+  workspace: /opt/data/.hermes/workspace
+  contacts: /opt/data/personal_contacts.json
+
+bridge:
+  health_url: http://127.0.0.1:3000/health
+  wait_timeout_seconds: 900
+  poll_seconds: 10
+  settle_seconds: 20
+  require_connected: true
+
+classification:
+  review_automations:
+    - revisao
+    - review
+  review_flags:
+    - Revisar
+  max_evidence: 3
+
+# O envio é explícito: use o subcomando `send` depois de revisar o Markdown.
+delivery:
+  owner_chat_id: ""
+  bridge_send_url: http://127.0.0.1:3000/send
