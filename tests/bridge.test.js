@@ -516,10 +516,15 @@ test('WhatsApp Bridge Regression Tests', async (t) => {
     assert.ok(isSystemError("waiting for provider response"), 'Should block waiting for provider message');
     assert.ok(isSystemError("⚠️ Iteration budget exhausted (60/60) — asking model to summarise"), 'Should block iteration budget alerts');
     assert.ok(isSystemError("asking model to summarise"), 'Should block summarization request messages');
+    assert.ok(isSystemError("⚡ Interrupting current task (iteration 1/60). I'll respond to your message shortly."), 'Should block interrupt ack');
+    assert.ok(isSystemError("⏳ Working — 6 min — iteration 1/60"), 'Should block working heartbeat');
+    assert.ok(isSystemError("⏳ Queued for the next turn (iteration 1/60). I'll respond once the current task finishes."), 'Should block queue ack');
+    assert.ok(isSystemError("⏳ Subagent working — your message is queued for when it finishes"), 'Should block subagent busy ack');
 
     // Normal questions or sentences
     assert.ok(!isSystemError('Como resolver o problema de conexão?'), 'Should allow Portuguese question about connection');
     assert.ok(!isSystemError('Esta taxa limite é mensal ou anual?'), 'Should allow credit/rate related discussion');
+    assert.ok(!isSystemError('Para personalizar a proposta em PDF, qual é seu nome completo?'), 'Should allow commercial PDF question');
   });
 
   await t.test('19. loadEnv should parse .env files correctly', () => {

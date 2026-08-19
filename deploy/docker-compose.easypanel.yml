@@ -248,8 +248,25 @@ services:
             disp = cfg.get('display')
             if not isinstance(disp, dict):
                 disp = {}
-            disp.update({'show_system_header': False, 'tool_progress': 'off',
-                         'platforms': {'whatsapp': {'tool_progress': 'off'}}})
+            disp.update({
+                'show_system_header': False,
+                'tool_progress': 'off',
+                'busy_ack_enabled': False,
+                'busy_ack_detail': False,
+                'busy_input_mode': 'queue',
+                'interim_assistant_messages': False,
+                'long_running_notifications': False,
+                'cleanup_progress': True,
+                'platforms': {
+                    'whatsapp': {
+                        'tool_progress': 'off',
+                        'interim_assistant_messages': False,
+                        'long_running_notifications': False,
+                        'busy_ack_detail': False,
+                        'busy_steer_ack_enabled': False,
+                    }
+                },
+            })
             cfg['display'] = disp
             cfg['model'] = {'default': owner_model, 'provider': owner_provider}
             sk = cfg.get('skills') if isinstance(cfg.get('skills'), dict) else {}
@@ -287,10 +304,16 @@ services:
             mem['user_profile_enabled'] = False
             cfg['memory'] = mem
             pt = cfg.get('platform_toolsets') if isinstance(cfg.get('platform_toolsets'), dict) else {}
-            wa_tools = [t for t in (pt.get('whatsapp') or []) if t != 'memory']
-            if 'whatsapp' in pt or wa_tools:
-                pt['whatsapp'] = wa_tools
-                cfg['platform_toolsets'] = pt
+            wa_strip = {
+                'clarify', 'clarifying_questions', 'memory', 'kanban', 'todo',
+                'session_search',
+            }
+            wa_tools = [t for t in (pt.get('whatsapp') or []) if t not in wa_strip]
+            for extra in ('delegate_task', 'task_delegation'):
+                if extra not in wa_tools:
+                    wa_tools.append(extra)
+            pt['whatsapp'] = wa_tools
+            cfg['platform_toolsets'] = pt
             with open(path, 'w') as f:
                 yaml.dump(cfg, f, default_flow_style=False)
 
@@ -312,7 +335,15 @@ services:
                 'toolsets': [], 'disabled_toolsets': disabled, 'tools': [],
                 'skills': {'enabled': False},
                 'terminal': {'backend': 'disabled'},
-                'display': {'show_system_header': False, 'tool_progress': 'off'},
+                'display': {
+                    'show_system_header': False,
+                    'tool_progress': 'off',
+                    'busy_ack_enabled': False,
+                    'busy_ack_detail': False,
+                    'busy_input_mode': 'queue',
+                    'interim_assistant_messages': False,
+                    'long_running_notifications': False,
+                },
             }, f, default_flow_style=False)
         print('[setup] config.yaml e perfil whatsapp escritos (modelo cliente: %s via %s)'
               % (client_model, client_provider))

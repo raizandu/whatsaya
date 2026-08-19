@@ -1477,8 +1477,18 @@ function isSystemError(message) {
       lowercaseMsg.includes('iteration budget') ||
       lowercaseMsg.includes('asking model to') ||
       lowercaseMsg.includes('budget exhausted') ||
+      lowercaseMsg.includes('interrupting current task') ||
+      lowercaseMsg.includes("i'll respond to your message shortly") ||
+      lowercaseMsg.includes('i will respond to your message shortly') ||
+      lowercaseMsg.includes('queued for the next turn') ||
+      lowercaseMsg.includes('steered into current run') ||
+      lowercaseMsg.includes('redirected current run') ||
+      lowercaseMsg.includes('subagent working') ||
       lowercaseMsg.includes('session automatically reset') ||
       lowercaseMsg.includes('conversation history cleared') ||
+      /⏳\s*working/.test(lowercaseMsg) ||
+      /working\s+[—–-]\s*\d+\s*min/.test(lowercaseMsg) ||
+      /iteration\s+\d+\s*\/\s*\d+/.test(lowercaseMsg) ||
       trimmedMessage.includes('◆ Model:') ||
       trimmedMessage.includes('◆ Provider:') ||
       trimmedMessage.includes('◆ Context:')) {

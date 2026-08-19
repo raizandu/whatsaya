@@ -809,6 +809,8 @@ def isSystemError(message: str) -> bool:
     blob = message.strip()
     if not blob:
         return False
+    if _HERMES_STATUS_RE.search(blob):
+        return True
     if "💾" in blob and _SYSTEM_STATUS_RE.search(blob):
         return True
     if blob.startswith("💾") and len(blob) < 160:
@@ -1023,13 +1025,40 @@ def _normalize_brazilian_phone(phone: str) -> str:
     return clean
 
 
+_WA_DM_SESSION_RE = re.compile(r"whatsapp:dm:(\d{10,15})", re.I)
+
+
+def _whatsapp_digits_from_session(session_id: str) -> str:
+    """Extrai o número de um JID, de agent:main:whatsapp:dm:NUM ou do mapa sender→chat."""
+    if not session_id:
+        return ""
+    candidates = [str(session_id)]
+    mapped = _sender_to_chat.get(str(session_id))
+    if mapped and str(mapped) not in candidates:
+        candidates.append(str(mapped))
+    for text in candidates:
+        dm = _WA_DM_SESSION_RE.search(text)
+        if dm:
+            return dm.group(1)
+        if "@" in text:
+            local = text.split("@", 1)[0].split(":")[0]
+            digits = "".join(c for c in local if c.isdigit())
+            if 10 <= len(digits) <= 15:
+                return digits
+        if "whatsapp" in text.lower():
+            found = re.search(r"(\d{10,15})", text)
+            if found:
+                return found.group(1)
+    return ""
+
+
 def _session_is_owner(session_id: str) -> bool:
     """True se o session_id do Hermes é o WhatsApp do dono."""
     owner_number = config.whatsapp_owner_number
     if not owner_number or not session_id:
         return False
-    clean_session = "".join(c for c in session_id.split("@")[0].split(":")[0] if c.isdigit())
-    clean_owner = "".join(c for c in owner_number.split("@")[0].split(":")[0] if c.isdigit())
+    clean_session = _whatsapp_digits_from_session(session_id)
+    clean_owner = "".join(c for c in owner_number.split("@")[0] if c.isdigit())
     if clean_session and clean_owner:
         return _normalize_brazilian_phone(clean_session) == _normalize_brazilian_phone(clean_owner)
     return False
@@ -7551,29 +7580,69 @@ def _run_periodic_sync():
         time.sleep(60)
 
 
+_CONTACT_BLOCKED_TOOLS = frozenset({
+    "clarify",
+    "clarifying_questions",
+})
+_CONTACT_ALLOWED_TOOLS = frozenset({
+    "delegate_task",
+})
+_CONTACT_BLOCK_MESSAGE = (
+    "Não use a ferramenta clarify. Se faltar um dado, pergunte no chat "
+    "em uma frase curta. Para PDF ou proposta, use subagentes em paralelo "
+    "com o que já sabe — sem narrar iteração, working ou interrupt."
+)
+
+
+def _pre_tool_block(message: str) -> dict:
+    """Hermes só honra dict {action: block}. String solta é ignorada."""
+    return {"action": "block", "message": message}
+
+
 def pre_tool_call(*args, **kwargs):
-    """Bloqueia execução de tools para sessões de contato (não-owner).
+    """Bloqueia clarify e tools de sistema em sessões de contato.
 
-    Contatos só recebem respostas de status — não precisam de tools.
-    Bloquear aqui evita o segundo ciclo pre_llm_call → post_llm_call
-    que causava respostas duplicadas.
+    O Hermes chama este hook com tool_name/session_id — sem platform.
+    Session do gateway vem como hash (20260818_...) ou
+    agent:main:whatsapp:dm:NUMERO; o mapa _sender_to_chat resolve o JID.
+    Retorno tem de ser dict action=block, senão o core ignora.
     """
-    platform = kwargs.get("platform", "")
-    session_id = kwargs.get("session_id", "")
-    if platform != "whatsapp" or not session_id:
+    tool_name = str(kwargs.get("tool_name") or "").strip().lower()
+    session_id = kwargs.get("session_id") or ""
+    platform = kwargs.get("platform") or ""
+
+    if platform and platform != "whatsapp":
         return None
 
-    owner_number = config.whatsapp_owner_number
-    if not owner_number:
+    chat_id = _sender_to_chat.get(session_id) or session_id
+    digits = _whatsapp_digits_from_session(str(chat_id)) or _whatsapp_digits_from_session(session_id)
+    looks_whatsapp = (
+        platform == "whatsapp"
+        or "whatsapp" in str(session_id).lower()
+        or "whatsapp" in str(chat_id).lower()
+        or "@s.whatsapp.net" in str(chat_id)
+        or "@lid" in str(chat_id)
+        or session_id in _sender_to_chat
+        or bool(digits)
+    )
+    if not looks_whatsapp:
         return None
 
-    clean_session = "".join(c for c in session_id.split("@")[0].split(":")[0] if c.isdigit())
-    clean_owner = "".join(c for c in owner_number.split("@")[0].split(":")[0] if c.isdigit())
-    if _normalize_brazilian_phone(clean_session) == _normalize_brazilian_phone(clean_owner):
-        return None  # owner pode usar tools normalmente
+    if _session_is_owner(session_id) or _session_is_owner(str(chat_id)):
+        return None
 
-    logger.info(f"[pre_tool_call] Bloqueando tool para contato session={session_id!r}")
-    return "Ferramentas não disponíveis para sessões de contato."
+    if tool_name in _CONTACT_BLOCKED_TOOLS:
+        logger.info(
+            f"[pre_tool_call] bloqueando {tool_name} "
+            f"session={session_id!r} chat={chat_id!r}"
+        )
+        return _pre_tool_block(_CONTACT_BLOCK_MESSAGE)
+
+    if tool_name in _CONTACT_ALLOWED_TOOLS:
+        return None
+
+    logger.info(f"[pre_tool_call] Bloqueando tool para contato session={session_id!r} tool={tool_name!r}")
+    return _pre_tool_block("Ferramentas não disponíveis para sessões de contato.")
 
 
 _EXEC_PATTERN = re.compile(
@@ -7611,6 +7680,18 @@ _INTERNAL_LEAK_PATTERNS = [
     r"◆\s*Model\s*:",
     r"\bHermes\s+(Agent|v?\d|status|log|platform|session)\b",
     r"\bCodex\b",
+    r"interrupting current task",
+    r"i['’]?ll respond to your message shortly",
+    r"queued for the next turn",
+    r"steered into current run",
+    r"redirected current run",
+    r"subagent working",
+    r"still working",
+    r"waiting for (?:provider|model) response",
+    r"iteration budget",
+    r"⏳\s*working",
+    r"working\s+[—–-]\s*\d+\s*min",
+    r"iteration\s+\d+\s*/\s*\d+",
 ]
 _SYSTEM_STATUS_RE = re.compile(
     r"self[- \u2010-\u2015]?improvement|"
@@ -7620,6 +7701,24 @@ _SYSTEM_STATUS_RE = re.compile(
     r"profile\s+updated|"
     r"context\s+updated|"
     r"session\s+restored",
+    re.I,
+)
+_HERMES_STATUS_RE = re.compile(
+    r"interrupting current task|"
+    r"i['’]?ll respond to your message shortly|"
+    r"i will respond to your message shortly|"
+    r"queued for the next turn|"
+    r"steered into current run|"
+    r"redirected current run|"
+    r"subagent working|"
+    r"still working|"
+    r"waiting for (?:provider|model) response|"
+    r"iteration budget|"
+    r"budget exhausted|"
+    r"asking model to|"
+    r"⏳\s*working|"
+    r"working\s+[—–-]\s*\d+\s*min|"
+    r"iteration\s+\d+\s*/\s*\d+",
     re.I,
 )
 _CNPJ_PATTERN = re.compile(r"\b\d{2}\.?\d{3}\.?\d{3}/\d{4}-?\d{2}\b")
@@ -7858,6 +7957,60 @@ def post_llm_call(*args, **kwargs):
 # Helpers extraídos acima são testáveis diretamente sem instanciar register().
 # ────────────────────────────────────────────────────────────────────────────
 
+_CORE_BRIDGE_STATUS_FN = r'''
+function isHermesStatusLeak(message) {
+  if (!message || typeof message !== "string") return false;
+  const m = message.trim().toLowerCase();
+  return (
+    m.includes("interrupting current task") ||
+    m.includes("i'll respond to your message shortly") ||
+    m.includes("i will respond to your message shortly") ||
+    m.includes("queued for the next turn") ||
+    m.includes("steered into current run") ||
+    m.includes("redirected current run") ||
+    m.includes("subagent working") ||
+    m.includes("still working") ||
+    m.includes("waiting for provider response") ||
+    m.includes("iteration budget") ||
+    /⏳\s*working/.test(m) ||
+    /working\s+[—–-]\s*\d+\s*min/.test(m) ||
+    /iteration\s+\d+\s*\/\s*\d+/.test(m)
+  );
+}
+'''
+
+
+def _patch_core_bridge_status_filter() -> None:
+    """O gateway usa scripts/whatsapp-bridge/bridge.js, não a cópia do plugin."""
+    path = Path("/opt/data/.hermes/scripts/whatsapp-bridge/bridge.js")
+    if not path.is_file():
+        return
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return
+    if "function isHermesStatusLeak(message)" in text:
+        return
+    needle = "// Send a message\napp.post('/send'"
+    if needle not in text:
+        return
+    updated = text.replace(needle, _CORE_BRIDGE_STATUS_FN + "\n" + needle, 1)
+    old = "  try {\n    const chunks = splitLongMessage(formatOutgoingMessage(message));"
+    new = (
+        "  try {\n"
+        "    if (isHermesStatusLeak(message)) {\n"
+        '      console.log("[bridge] hermes status blocked for", chatId, String(message).slice(0, 120));\n'
+        "      return res.json({ success: true, info: \"system status blocked\" });\n"
+        "    }\n"
+        "    const chunks = splitLongMessage(formatOutgoingMessage(message));"
+    )
+    if old in updated:
+        updated = updated.replace(old, new, 1)
+    if updated != text:
+        path.write_text(updated, encoding="utf-8")
+        logger.info(f"filtro de status injetado em {path}")
+
+
 def register(ctx):
 
     # Auto-inicialização e cópia dos arquivos da ponte
@@ -7900,6 +8053,7 @@ def register(ctx):
             if not target_bridge.exists() or source_bridge.read_bytes() != target_bridge.read_bytes():
                 shutil.copy2(source_bridge, target_bridge)
                 logger.info(f"bridge.js atualizado em {target_bridge}")
+        _patch_core_bridge_status_filter()
 
         # 2. Copiar package.json do plugin para o volume
         source_pkg = plugin_dir / "package.json"

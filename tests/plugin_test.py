@@ -5313,6 +5313,23 @@ class TestPrepareContactReply(BaseWhatsAppManagerTest):
         self.assertFalse(whatsapp_manager.isSystemError("Oi, tudo bem?"))
         self.assertFalse(whatsapp_manager.isSystemError("Quer fechar por Pix?"))
 
+    def test_is_system_error_blocks_hermes_progress(self):
+        import whatsapp_manager
+        blocked = [
+            "⚡ Interrupting current task (iteration 1/60). I'll respond to your message shortly.",
+            "⏳ Working — 6 min — iteration 1/60",
+            "⏳ Queued for the next turn. I'll respond once the current task finishes.",
+            "⏳ Subagent working — your message is queued for when it finishes",
+            "⏳ Still working... (3 min elapsed — iteration 31/60, waiting for provider response (streaming))",
+        ]
+        for sample in blocked:
+            self.assertTrue(whatsapp_manager.isSystemError(sample), sample)
+            self.assertEqual(whatsapp_manager._prepare_contact_reply(sample), "", sample)
+        self.assertFalse(whatsapp_manager.isSystemError(
+            "Para personalizar a proposta em PDF, qual é seu nome completo?"
+        ))
+        self.assertFalse(whatsapp_manager.isSystemError("Quer fechar por Pix?"))
+
     def test_commercial_reply_preserved(self):
         import whatsapp_manager
         text = "Hoje são R$997 de implementação e R$397/mês. Quer fechar por Pix ou prefere uma call de 15 min?"
@@ -5621,15 +5638,26 @@ class TestWhatsAppAdapterWhitespace(unittest.TestCase):
 class TestPreToolCall(BaseWhatsAppManagerTest):
     """Testes para o hook pre_tool_call — bloqueio de tools para contatos."""
 
-    def _call(self, session_id, platform="whatsapp"):
+    def _call(self, session_id, platform="whatsapp", tool_name="web_search"):
         pre_tool = self.ctx.hooks.get("pre_tool_call")
-        return pre_tool("pre_tool_call", platform=platform, session_id=session_id)
+        return pre_tool(
+            "pre_tool_call",
+            platform=platform,
+            session_id=session_id,
+            tool_name=tool_name,
+        )
+
+    def _block_message(self, result):
+        if isinstance(result, dict):
+            self.assertEqual(result.get("action"), "block")
+            return result.get("message") or ""
+        return result or ""
 
     def test_contact_session_blocked(self):
         """Contato não pode usar tools."""
         result = self._call("5511888888888@s.whatsapp.net")
         self.assertIsNotNone(result)
-        self.assertIn("Ferramentas não disponíveis", result)
+        self.assertIn("Ferramentas não disponíveis", self._block_message(result))
 
     def test_owner_session_allowed(self):
         """Owner pode usar tools (retorna None = permitir)."""
@@ -5647,14 +5675,15 @@ class TestPreToolCall(BaseWhatsAppManagerTest):
         self.assertIsNone(result)
 
     def test_empty_session_allowed(self):
-        """Session vazia passa (não há como identificar)."""
-        result = self._call("")
+        """Sem platform e sem session, não há como identificar — passa."""
+        result = self._call("", platform="")
         self.assertIsNone(result)
 
     def test_contact_with_device_suffix_blocked(self):
         """Contato com device suffix é bloqueado corretamente."""
         result = self._call("5511888888888:1@s.whatsapp.net")
         self.assertIsNotNone(result)
+        self.assertEqual(result.get("action"), "block")
 
     def test_brazilian_normalization_owner(self):
         """Número do owner com 8 dígitos local vs 9 dígitos ainda é reconhecido."""
@@ -5664,7 +5693,49 @@ class TestPreToolCall(BaseWhatsAppManagerTest):
         result = self._call("551199999999@s.whatsapp.net")
         # Pode ser None (reconhecido como owner) ou bloqueado dependendo da normalização
         # O importante é não lançar exceção
-        self.assertIn(result, [None, "Ferramentas não disponíveis para sessões de contato."])
+        if result is not None:
+            self.assertEqual(result.get("action"), "block")
+
+    def test_clarify_blocked_for_contact(self):
+        """Clarify em contato tem de voltar action=block — string solta o Hermes ignora."""
+        result = self._call("5511888888888@s.whatsapp.net", tool_name="clarify")
+        self.assertIsInstance(result, dict)
+        self.assertEqual(result.get("action"), "block")
+        self.assertIn("clarify", result.get("message", "").lower())
+
+    def test_clarify_blocked_on_gateway_session_key(self):
+        """Session do gateway (agent:main:whatsapp:dm:NUM) ainda bloqueia clarify."""
+        result = self._call(
+            "agent:main:whatsapp:dm:5511888888888",
+            platform="",
+            tool_name="clarify",
+        )
+        self.assertEqual(result.get("action"), "block")
+
+    def test_clarify_blocked_via_sender_map(self):
+        """Hash de sessão Hermes resolve o JID pelo mapa e bloqueia clarify."""
+        import whatsapp_manager
+        whatsapp_manager._sender_to_chat["20260818_224536_896b2ba3"] = (
+            "5511888888888@s.whatsapp.net"
+        )
+        try:
+            result = self._call(
+                "20260818_224536_896b2ba3",
+                platform="",
+                tool_name="clarify",
+            )
+            self.assertEqual(result.get("action"), "block")
+        finally:
+            whatsapp_manager._sender_to_chat.pop("20260818_224536_896b2ba3", None)
+
+    def test_delegate_task_allowed_for_contact(self):
+        """PDF/proposta: contato pode disparar subagentes em paralelo."""
+        result = self._call("5511888888888@s.whatsapp.net", tool_name="delegate_task")
+        self.assertIsNone(result)
+
+    def test_owner_can_use_clarify(self):
+        result = self._call("5511999999999@s.whatsapp.net", tool_name="clarify")
+        self.assertIsNone(result)
 
 
 if __name__ == "__main__":
