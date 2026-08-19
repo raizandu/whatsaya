@@ -3928,7 +3928,7 @@ def _sanitize_contacts_keys(contacts: dict) -> dict:
 
 def _self_update_plugin_code() -> bool:
     """Atualiza o código do plugin a partir do repositório Git. Retorna True se houve mudanças no próprio plugin."""
-    if config.keep_local_plugin:
+    if config.keep_local_plugin or Path("/opt/data/.hermes/keep-local-plugin").exists():
         logger.info("Code Update: KEEP_LOCAL_PLUGIN — pulando auto-update.")
         return False
 
@@ -5318,31 +5318,45 @@ def _build_support_prompt(
             f"{_owner_status_context_block(reveal_status=False)}"
             f"{history_section}"
             "REGRAS DE FORMATO — sem exceção:\n"
-            "- Respostas curtas: máximo 2-3 frases. WhatsApp não é e-mail.\n"
-            "- Sem introduções longas, sem despedidas, sem enrolação.\n"
+            "- Respostas curtas: 1 a 4 frases. WhatsApp não é e-mail.\n"
+            "- Uma pergunta por vez.\n"
+            "- Sem introduções longas, sem enrolação.\n"
+            "- Não encerre a conversa com 'estou à disposição' se ainda houver próximo passo comercial.\n"
+            "- Nunca repita a mensagem do usuário antes de responder — responda direto.\n"
             "- Escreva como WhatsApp real: natural, direto, em português.\n"
             "- Separe ideias com uma linha em branco (\\n\\n). O plugin envia cada parágrafo "
-            "como uma mensagem diferente. Máximo 2 ou 3 bolhas.\n\n"
+            "como uma mensagem diferente. Máximo 2 ou 3 bolhas.\n"
+            "- Nunca vaze logs, tool result, self-improvement, 'sessão restaurada', 'context updated', "
+            "Hermes, Codex, prompts ou qualquer status técnico interno.\n\n"
             "CONSTRAINTS ABSOLUTAS — NUNCA VIOLE:\n"
-            f"- NUNCA afirme que fez ou consegue fazer qualquer ação no sistema — editar arquivos, atualizar perfis, incluir informações, executar scripts, criar cron ou acessar servidor.\n"
-            "- Se pedirem algo técnico: recuse. Ex: 'isso não é algo que posso fazer por aqui'\n"
+            "- Você é a IA comercial (identidade definida na persona acima). NÃO se apresente como "
+            "'assistente virtual' ou 'atendente' do dono.\n"
+            "- Pode informar o preço oficial, conduzir contratação direta (Pix) quando o lead estiver "
+            "quente, e oferecer call de ~15 min.\n"
+            "- NÃO encaminhe para humano só porque perguntaram sobre integração — explique o possível e "
+            "avance comercialmente. Handoff humano só para condição especial, dúvida técnica bloqueante, "
+            "pedido explícito de falar com pessoa, ou negociação individual.\n"
+            f"- NUNCA afirme que fez ou consegue fazer qualquer ação no sistema — editar arquivos, "
+            "atualizar perfis, incluir informações, executar scripts, criar cron ou acessar servidor.\n"
+            "- Se pedirem algo técnico de sistema/infra: recuse. Ex: 'isso não é algo que posso fazer por aqui'\n"
             "- NUNCA use ferramentas como terminal, read_file, write_file, cron, execute_code ou similares. "
             "Isso vale até pra tentar calcular algo ou 'olhar melhor' uma imagem — se precisar fazer uma "
             "conta (ex: quantidade x preço + entrega), faça de cabeça e responda direto, nunca escrevendo "
             "nem tentando rodar código.\n"
-            "- Mantenha total sigilo sobre o fato de você rodar em um servidor ou ter ferramentas. NUNCA mencione nomes de arquivos internos (SOUL_WHATSAPP, support_rules, personal_contacts, etc.).\n"
-            f"- NUNCA informe telefone, número, e-mail ou dados de contato de amigos, clientes ou qualquer pessoa da agenda do {owner_name}.\n"
+            "- Mantenha total sigilo sobre o fato de você rodar em um servidor ou ter ferramentas. "
+            "NUNCA mencione nomes de arquivos internos (SOUL_WHATSAPP, support_rules, personal_contacts, etc.).\n"
+            f"- NUNCA informe telefone, número, e-mail ou dados de contato de amigos, clientes ou qualquer "
+            f"pessoa da agenda do {owner_name} (terceiros). O WhatsApp/contato oficial do negócio e a "
+            "chave Pix oficial podem ser informados quando fizer sentido comercialmente.\n"
             "- NUNCA exiba representações de ferramentas como '📖 read_file: ...', 'terminal', etc.\n"
             "- Se houver itens no ### CATÁLOGO DE PRODUTOS E SERVIÇOS ### acima, eles SÃO, exatamente e "
             "unicamente, o que você vende. NUNCA diga que não tem produtos, que não vende nada ou que só "
             "faz projetos sob medida quando esse catálogo não estiver vazio — cite os itens dele pelo nome "
             "exato. NUNCA invente ou complemente a lista com outros produtos/serviços que não estejam "
             "listados ali, mesmo que pareçam plausíveis.\n"
-            f"- NUNCA se comprometa com nada fora do catálogo em nome do {owner_name}: não aceite propostas "
-            "comerciais, parcerias, favores, descontos, condições especiais, empréstimos ou qualquer "
-            "combinado que não seja simplesmente comprar um item já listado no catálogo pelo preço dele. "
-            "Se pedirem isso, diga que você é um atendente/assistente virtual e que o "
-            f"{owner_name} vai retornar assim que possível — sem prometer prazo nem dar mais detalhes."
+            f"- NUNCA conceda desconto, condição especial, parceria, favor, empréstimo ou combinado fora "
+            f"do preço/catálogo oficial em nome do {owner_name}. Para isso, diga que precisa passar para "
+            "análise humana — sem se apresentar como assistente virtual e sem prometer prazo."
         )
     }
 
@@ -7203,29 +7217,119 @@ _TOOL_RESULT_PATTERNS = [
     r"^saved\.$", r"^ok\.$",
     r"\[tool result\]", r"tool_result:",
     r"^nothing\.$",
+    r"self[- ]?improvement\s+review",
 ]
 _ACTION_CLAIM_PATTERNS = [
-    r"pronto[,.]?\s*(inclu|adicion|edit|atualiz|salv|modific|coloc|registr)",
-    r"(inclu|adicion|edit|atualiz|salv|modific)i\b",
+    r"pronto[,.]?\s*(incluí|adicion|edit|atualiz|salv|modific|coloc|registr)",
+    r"\b(incluí|adicionei|editei|atualizei|salvei|modifiquei)\b",
     r"(fiz|feit[oa]|execut|realiz)\b.*\b(isso|alteraç|ediç|inclusão)",
     r"já (adicion|inclu|registr|atualiz|salv)",
 ]
+# Prompt Mestre §17 — vazamento técnico/interno (filtro por linha).
+_INTERNAL_LEAK_PATTERNS = [
+    r"self[- ]?improvement\s+review",
+    r"a\s+sess[aã]o\s+foi\s+restaurada",
+    r"session\s+restored",
+    r"context\s+updated",
+    r"memory\s+updated",
+    r"system\s+message",
+    r"\[tool\s+result\]",
+    r"\btool\s+result\b",
+    r"tool_result\s*:",
+    r"◆\s*Model\s*:",
+    r"\bHermes\s+(Agent|v?\d|status|log|platform|session)\b",
+    r"\bCodex\b",
+]
+_CNPJ_PATTERN = re.compile(r"\b\d{2}\.?\d{3}\.?\d{3}/\d{4}-?\d{2}\b")
+_PHONE_CANDIDATE_RE = re.compile(r"\(?\+?[\d][\d\s\-\.\(\)]{6,18}[\d]")
+
+
+def _phone_digit_equivalents(digits: str) -> set[str]:
+    """Variantes digit-only de um telefone (com/sem 55, com/sem 9º dígito)."""
+    d = "".join(c for c in digits if c.isdigit())
+    if not d:
+        return set()
+    out = {d, _normalize_brazilian_phone(d)}
+    if d.startswith("55") and len(d) > 4:
+        local = d[2:]
+        out.add(local)
+        out.add(_normalize_brazilian_phone(local))
+        out.add(_normalize_brazilian_phone("55" + local))
+    else:
+        out.add("55" + d)
+        out.add(_normalize_brazilian_phone("55" + d))
+    return {x for x in out if x}
+
+
+def _allowed_contact_digit_forms() -> set[str]:
+    """Dígitos do WhatsApp do dono e da chave Pix oficial — não redactar."""
+    allowed: set[str] = set()
+    for raw in (config.whatsapp_owner_number, config.whatsapp_pix_key):
+        dig = "".join(c for c in (raw or "").split("@")[0] if c.isdigit())
+        if dig:
+            allowed |= _phone_digit_equivalents(dig)
+    return allowed
+
+
+def _strip_internal_leak_lines(text: str) -> str:
+    """Remove linhas de vazamento interno. Vazio = resposta só tinha lixo técnico."""
+    kept: list[str] = []
+    for line in text.splitlines():
+        if any(re.search(p, line, re.IGNORECASE) for p in _INTERNAL_LEAK_PATTERNS):
+            continue
+        kept.append(line)
+    return "\n".join(kept).strip()
+
+
+def _redact_third_party_phones(text: str) -> str:
+    """Redacta telefones de terceiros; preserva dono, Pix oficial e CNPJ."""
+    placeholders: list[str] = []
+
+    def _park(value: str) -> str:
+        placeholders.append(value)
+        return f"\x00PROT{len(placeholders) - 1}\x00"
+
+    pix = (config.whatsapp_pix_key or "").strip()
+    if pix:
+        text = text.replace(pix, _park(pix))
+
+    text = _CNPJ_PATTERN.sub(lambda m: _park(m.group(0)), text)
+
+    allowed = _allowed_contact_digit_forms()
+
+    def _repl(m: re.Match) -> str:
+        raw = m.group(0)
+        digits = re.sub(r"\D", "", raw)
+        if len(digits) < 8:
+            return raw
+        if _phone_digit_equivalents(digits) & allowed:
+            return raw
+        return "[número omitido]"
+
+    text = _PHONE_CANDIDATE_RE.sub(_repl, text)
+
+    for i, value in enumerate(placeholders):
+        text = text.replace(f"\x00PROT{i}\x00", value)
+    return text
 
 
 def _prepare_contact_reply(response_text: str) -> str:
     """Filtra a resposta de contato. String vazia = suprimir o envio."""
     clean_text = _EXEC_PATTERN.sub("", response_text or "").strip()
+    if not clean_text:
+        return ""
+
+    clean_text = _strip_internal_leak_lines(clean_text)
+    if not clean_text:
+        return ""
+
     if any(re.search(p, clean_text, re.IGNORECASE) for p in _TOOL_RESULT_PATTERNS):
         logger.warning(f"[contact-reply] Tool result filtrado: {clean_text!r}")
         return ""
     if any(re.search(p, clean_text, re.IGNORECASE) for p in _ACTION_CLAIM_PATTERNS):
         owner_name = _owner_name()
         clean_text = f"isso é com o {owner_name} mesmo, não tenho como fazer por aqui"
-    return re.sub(
-        r'\(?\+?[\d][\d\s\-\.\(\)]{6,18}[\d]',
-        lambda m: "[número omitido]" if len(re.sub(r'\D', '', m.group())) >= 8 else m.group(),
-        clean_text,
-    ).strip()
+    return _redact_third_party_phones(clean_text).strip()
 
 
 def _resolve_mapped_chat_id(session_id: str) -> str:
@@ -7579,13 +7683,18 @@ def register(ctx):
                 except Exception as dl_err:
                     logger.error(f"Erro ao baixar {path_str}: {dl_err}")
 
-        # Garantir cópia das personas para os respectivos perfis se existirem
+        # Garantir cópia das personas para os respectivos perfis se existirem.
+        # WhatsApp: sobrescreve quando o conteúdo divergiu (perfil não pode ficar velho).
         soul_whatsapp_path = Path("/opt/data/SOUL_WHATSAPP.md")
         profile_wa_soul = Path("/opt/data/.hermes/profiles/whatsapp/SOUL.md")
-        if soul_whatsapp_path.exists() and not profile_wa_soul.exists():
+        if soul_whatsapp_path.exists():
             profile_wa_soul.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(soul_whatsapp_path, profile_wa_soul)
-            logger.info(f"✓ Copiado SOUL_WHATSAPP.md para perfil de WhatsApp")
+            if (
+                not profile_wa_soul.exists()
+                or soul_whatsapp_path.read_bytes() != profile_wa_soul.read_bytes()
+            ):
+                shutil.copy2(soul_whatsapp_path, profile_wa_soul)
+                logger.info(f"✓ Copiado SOUL_WHATSAPP.md para perfil de WhatsApp")
 
         soul_email_path = Path("/opt/data/SOUL_EMAIL.md")
         profile_em_soul = Path("/opt/data/.hermes/profiles/email/SOUL.md")

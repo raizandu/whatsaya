@@ -587,6 +587,16 @@ class TestLLMContextAndPrompting(BaseWhatsAppManagerTest):
         self.assertIn("custom soul", ctx)
         self.assertIn("custom rules", ctx)
         self.assertIn("History content", ctx)
+        # Prompt Mestre: AYA comercial — sem identidade de "assistente virtual" padrão
+        self.assertNotRegex(ctx, r"diga que você é um atendente/assistente virtual")
+        self.assertIn("NÃO se apresente como 'assistente virtual'", ctx)
+        # Pode conduzir call curta e/ou contratação direta
+        has_call = "15 min" in ctx or "call de" in ctx
+        has_pix_hire = "contratação direta" in ctx or "Pix" in ctx
+        self.assertTrue(has_call or has_pix_hire, "prompt deve mencionar call de 15 min ou contratação direta")
+        # Não forçar handoff só por pergunta de integração
+        self.assertIn("NÃO encaminhe para humano só porque perguntaram sobre integração", ctx)
+        self.assertIn("1 a 4 frases", ctx)
 
 
 class TestContactManagementAndSync(BaseWhatsAppManagerTest):
@@ -5202,6 +5212,62 @@ class TestPostLlmCall(BaseWhatsAppManagerTest):
         self.assertIsNotNone(result)
         mock_update.assert_called_once()
         self.assertNotIn("EXEC:", result["assistant_response"])
+
+
+class TestPrepareContactReply(BaseWhatsAppManagerTest):
+    """Filtro de resposta a contatos: redação seletiva + vazamento interno (§17)."""
+
+    def test_third_party_phone_redacted(self):
+        import whatsapp_manager
+        out = whatsapp_manager._prepare_contact_reply("ligue para 11999887766 ok?")
+        self.assertIn("[número omitido]", out)
+        self.assertNotIn("11999887766", out)
+
+    def test_owner_whatsapp_number_preserved(self):
+        import whatsapp_manager
+        with patch.dict(os.environ, {"WHATSAPP_OWNER_NUMBER": "5562936180895"}):
+            for sample in (
+                "Chama no WhatsApp: 62936180895",
+                "WhatsApp oficial: 62 93618-0895",
+                "Fala com a gente: 5562936180895",
+            ):
+                out = whatsapp_manager._prepare_contact_reply(sample)
+                self.assertNotIn("[número omitido]", out, sample)
+                self.assertTrue(
+                    "62936180895" in out.replace(" ", "").replace("-", "")
+                    or "5562936180895" in out.replace(" ", "").replace("-", ""),
+                    sample,
+                )
+
+    def test_pix_cnpj_preserved(self):
+        import whatsapp_manager
+        cnpj = "44.249.819/0001-62"
+        with patch.dict(os.environ, {"WHATSAPP_PIX_KEY": cnpj}):
+            out = whatsapp_manager._prepare_contact_reply(f"Pix CNPJ: {cnpj}")
+            self.assertIn(cnpj, out)
+            self.assertNotIn("[número omitido]", out)
+
+    def test_self_improvement_alone_suppressed(self):
+        import whatsapp_manager
+        out = whatsapp_manager._prepare_contact_reply("Self-improvement review")
+        self.assertEqual(out, "")
+
+    def test_commercial_reply_preserved(self):
+        import whatsapp_manager
+        text = "Hoje são R$997 de implementação e R$397/mês. Quer fechar por Pix ou prefere uma call de 15 min?"
+        out = whatsapp_manager._prepare_contact_reply(text)
+        self.assertEqual(out, text)
+
+    def test_implementacao_inclui_not_treated_as_action_claim(self):
+        """'inclui' (presente) é texto comercial; não confundir com 'incluí' (pretérito)."""
+        import whatsapp_manager
+        text = (
+            "A implementação inclui a configuração personalizada da IA, "
+            "regras, serviços, testes e a primeira versão para validação."
+        )
+        out = whatsapp_manager._prepare_contact_reply(text)
+        self.assertEqual(out, text)
+        self.assertNotIn("não tenho como fazer", out)
 
 
 class TestTransformLlmOutput(BaseWhatsAppManagerTest):
