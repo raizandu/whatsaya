@@ -1,5 +1,7 @@
 # 🤖 Hermes Agent - Modo Misto Híbrido (WhatsApp + Gmail)
 
+**Caminho oficial do operador:** [ONBOARDING.md](ONBOARDING.md) (VPS + Compose + IP). O que está abaixo é o caminho extra Portainer / EasyPanel. Não clone o kit antigo `whatsappkit`.
+
 Este repositório contém os arquivos de configuração, templates e scripts necessários para implantar o **Hermes Agent** em modo híbrido (Dual-Mode) via **Portainer** ou **Easypanel**. 
 
 Esse modo permite que seu agente desempenhe duas funções ao mesmo tempo:
@@ -30,7 +32,7 @@ Esse modo permite que seu agente desempenhe duas funções ao mesmo tempo:
 
 Em vez de editar arquivos complexos no terminal do seu servidor, você vai usar o próprio **GitHub como seu gerenciador visual (CMS)**!
 
-1. Na parte superior desta página, clique no botão **Fork** para criar uma cópia deste repositório na sua própria conta do GitHub (ex: `github.com/SEU_USUARIO_GITHUB/whatsappkit`).
+1. Na parte superior desta página, clique no botão **Fork** para criar uma cópia deste repositório na sua própria conta do GitHub (ex: `github.com/SEU_USUARIO_GITHUB/whatsaya`).
 2. Dentro do seu repositório pessoal recém-criado, edite os arquivos diretamente pelo seu navegador:
    * **`support_rules.md`**: Preencha o documento com as informações do seu negócio, preços, links de checkout (Kiwify, Hotmart, etc.) e formas de suporte. Clique em **Commit changes** para salvar.
    * **`SOUL_WHATSAPP.md`**: Ajuste os exemplos práticos de saudação ou personalize a abordagem humana do suporte de WhatsApp. Salve.
@@ -71,7 +73,7 @@ Agora, vamos fazer com que o seu servidor baixe automaticamente os arquivos que 
 3. Substitua `SEU_USUARIO_GITHUB` pelo seu usuário real do GitHub no comando abaixo, cole-o no console e aperte Enter:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/SEU_USUARIO_GITHUB/whatsappkit/main/deploy/setup.sh | bash -s SEU_USUARIO_GITHUB
+curl -sSL https://raw.githubusercontent.com/SEU_USUARIO_GITHUB/whatsaya/main/deploy/setup.sh | bash -s SEU_USUARIO_GITHUB
 ```
 
 > **O que o script fez por você?** Ele baixou a persona global (`SOUL.md`), as personas isoladas (`SOUL_WHATSAPP.md` e `SOUL_EMAIL.md`), a base de conhecimento (`support_rules.md`) diretamente do seu GitHub Fork pessoal, configurou as otimizações no `config.yaml` e aplicou a inteligência do WhatsApp. Os plugins ficam para o dashboard do Hermes.
@@ -82,7 +84,7 @@ curl -sSL https://raw.githubusercontent.com/SEU_USUARIO_GITHUB/whatsappkit/main/
 
 Para manter seus contatos pessoais (`personal_contacts.json`) ou suas personas totalmente privados (sem expor em repositórios públicos):
 1. Crie um repositório **privado** no GitHub (ex: `hermes-config-privado`).
-2. Adicione nele o arquivo `personal_contacts.json` (veja o formato em [personal_contacts.json.example](file:///Users/andrealencar/GoogleAntigravity/whatsappkit/deploy/personal_contacts.json.example)). Você também pode mover seus arquivos `.md` (personas/regras) para lá se quiser mantê-los privados.
+2. Adicione nele o arquivo `personal_contacts.json` (veja o formato em [personal_contacts.json.example](personal_contacts.json.example)). Você também pode mover seus arquivos `.md` (personas/regras) para lá se quiser mantê-los privados.
 3. Crie um **Personal Access Token (PAT)** no GitHub com permissão de leitura de repositório (`repo`).
 4. Configure as chaves diferenciadas:
    * **Na Stack do Portainer (Cliente):**
@@ -94,7 +96,7 @@ Para manter seus contatos pessoais (`personal_contacts.json`) ou suas personas t
      * `DEV_GITHUB_TOKEN` = Token do desenvolvedor (caso o repositório de código base seja privado).
 5. Execute o setup no console do container:
    ```bash
-   curl -sSL https://raw.githubusercontent.com/SEU_USUARIO_GITHUB/whatsappkit/main/deploy/setup.sh | bash -s SEU_USUARIO_GITHUB
+   curl -sSL https://raw.githubusercontent.com/SEU_USUARIO_GITHUB/whatsaya/main/deploy/setup.sh | bash -s SEU_USUARIO_GITHUB
    ```
 
 
@@ -231,12 +233,12 @@ O Hermes expõe **duas portas** que precisam de subdomínios separados:
 3. Cole o comando abaixo e pressione Enter (substitua `SEU_USUARIO_GITHUB` pelo seu usuário):
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/SEU_USUARIO_GITHUB/whatsappkit/main/deploy/setup.sh | bash -s SEU_USUARIO_GITHUB
+curl -sSL https://raw.githubusercontent.com/SEU_USUARIO_GITHUB/whatsaya/main/deploy/setup.sh | bash -s SEU_USUARIO_GITHUB
 ```
 
 > 🔒 **Dica de Sincronização Privada (Opção A):** Caso queira utilizar um repositório privado para contatos e personas (para mantê-los seguros), passe o seu token do GitHub e o repositório como argumentos adicionais:
 > ```bash
-> curl -sSL https://raw.githubusercontent.com/SEU_USUARIO_GITHUB/whatsappkit/main/deploy/setup.sh | bash -s SEU_USUARIO_GITHUB <SEU_TOKEN_PAT_GITHUB> <SEU_USUARIO_GITHUB/NOME_DO_REPO_PRIVADO>
+> curl -sSL https://raw.githubusercontent.com/SEU_USUARIO_GITHUB/whatsaya/main/deploy/setup.sh | bash -s SEU_USUARIO_GITHUB <SEU_TOKEN_PAT_GITHUB> <SEU_USUARIO_GITHUB/NOME_DO_REPO_PRIVADO>
 > ```
 
 **O setup irá:**
@@ -332,12 +334,12 @@ Siga os passos abaixo usando suas ferramentas de terminal:
 Antes de começar, me pergunte:
 
 > "Para baixar os arquivos do setup, você prefere usar:
-> **(1) Repositório oficial** → https://github.com/leoalvesia/whatsappkit
-> **(2) Meu próprio fork** → me informe a URL do seu repositório no GitHub (ex: https://github.com/SEU_USUARIO/whatsappkit)"
+> **(1) Repositório oficial** → https://github.com/raizandu/whatsaya
+> **(2) Meu próprio fork** → me informe a URL do seu repositório no GitHub (ex: https://github.com/SEU_USUARIO/whatsaya)"
 
 Aguarde minha resposta antes de continuar.
-- Se eu escolher **(1)**, use `REPO_BASE=https://raw.githubusercontent.com/leoalvesia/whatsappkit/main` em todos os comandos curl dos próximos passos.
-- Se eu escolher **(2)**, extraia o usuário e repositório da URL que eu informar e monte o `REPO_BASE` correspondente (ex: `https://raw.githubusercontent.com/MEU_USUARIO/whatsappkit/main`).
+- Se eu escolher **(1)**, use `REPO_BASE=https://raw.githubusercontent.com/raizandu/whatsaya/main` em todos os comandos curl dos próximos passos.
+- Se eu escolher **(2)**, extraia o usuário e repositório da URL que eu informar e monte o `REPO_BASE` correspondente (ex: `https://raw.githubusercontent.com/MEU_USUARIO/whatsaya/main`).
 
 **PASSO 1 — Auto-descoberta de caminhos**
 Execute e me mostre os resultados:
@@ -414,7 +416,7 @@ Me mostre a lista de arquivos criados em $HERMES_HOME, em $HERMES_HOME/plugins/w
 Execute cada passo em sequência, pare se houver erro e me explique o que aconteceu.
 ```
 
-> 💡 **No PASSO 0**, o Hermes vai perguntar se você quer usar o repositório oficial (`leoalvesia`) ou o seu próprio fork. Basta responder com **(1)** ou colar a URL do seu fork — sem precisar editar nenhum comando manualmente.
+> 💡 **No PASSO 0**, o Hermes vai perguntar se você quer usar o repositório oficial (`raizandu`) ou o seu próprio fork. Basta responder com **(1)** ou colar a URL do seu fork — sem precisar editar nenhum comando manualmente.
 
 ### Por que funciona em qualquer ambiente?
 
@@ -611,4 +613,4 @@ Toda vez que você rodar o script de setup para sincronizar novas regras ou atua
 *💡 Dica técnica: Evite usar comandos de kill (como pkill -f bridge.js) diretamente de dentro do console do container. Deixar o Portainer gerenciar o ciclo de vida do container previne o travamento de portas e a criação de processos zumbis de Node.js no seu servidor!*
 
 ---
-*Desenvolvido e disponibilizado pela Comunidade Empreendedor Serial (André Alencar).*
+Repo do plugin: [raizandu/whatsaya](https://github.com/raizandu/whatsaya). Caminho oficial: [ONBOARDING.md](ONBOARDING.md).

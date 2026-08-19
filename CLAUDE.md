@@ -110,7 +110,7 @@ Tudo o que muda por cliente é **variável de ambiente** + os templates em `depl
 
 Fora as envs, só os arquivos de conteúdo: `deploy/SOUL.md`, `SOUL_WHATSAPP.md`, `SOUL_EMAIL.md` e `support_rules.md` são **templates com placeholders `{{...}}`**. Preencha antes de subir — placeholder não substituído vai literal para o cliente, e um `support_rules.md` com produto errado faz o bot inventar oferta que não existe.
 
-URL do plugin: `config.plugin_git_url` / `config.plugin_raw_root` (não há mais `whatsappkit` hardcoded). `PASSO_A_PASSO.md` e `deploy/README.md` ainda falam do fork antigo — o caminho oficial é [`deploy/ONBOARDING.md`](deploy/ONBOARDING.md).
+URL do plugin: `config.plugin_git_url` / `config.plugin_raw_root`. Caminho oficial: [`deploy/ONBOARDING.md`](deploy/ONBOARDING.md). `PASSO_A_PASSO.md` e `deploy/README.md` apontam para lá; Portainer/EasyPanel são extra.
 
 ## Como o código chega na VPS
 
