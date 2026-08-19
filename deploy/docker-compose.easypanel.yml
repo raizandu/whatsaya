@@ -246,6 +246,18 @@ services:
             dash.update({'enabled': True, 'host': '0.0.0.0', 'port': 9119,
                          'basic_auth': {'username': usr, 'password_hash': hash_password(pwd)}})
             cfg['dashboard'] = dash
+            owner_jid = ''.join(c for c in (os.environ.get('WHATSAPP_OWNER_NUMBER') or '') if c.isdigit())
+            if owner_jid:
+                plats = cfg.get('platforms') if isinstance(cfg.get('platforms'), dict) else {}
+                wa = plats.get('whatsapp') if isinstance(plats.get('whatsapp'), dict) else {}
+                wa['enabled'] = True
+                wa['home_channel'] = {
+                    'platform': 'whatsapp',
+                    'chat_id': owner_jid + '@s.whatsapp.net',
+                    'name': 'Home',
+                }
+                plats['whatsapp'] = wa
+                cfg['platforms'] = plats
             cfg['session_reset'] = {'notify_user': False}
             comp = cfg.get('compression') if isinstance(cfg.get('compression'), dict) else {}
             comp['codex_gpt55_autoraise'] = False
@@ -368,6 +380,9 @@ services:
             'WHATSAPP_FOLLOWUP_ENABLED': os.environ.get('WHATSAPP_FOLLOWUP_ENABLED') or 'true',
             'WHATSAPP_FOLLOWUP_SILENCE_MIN': os.environ.get('WHATSAPP_FOLLOWUP_SILENCE_MIN') or '30',
         }
+        _home = ''.join(c for c in (os.environ.get('WHATSAPP_OWNER_NUMBER') or '') if c.isdigit())
+        if _home:
+            env_updates['WHATSAPP_HOME_CHANNEL'] = _home + '@s.whatsapp.net'
         for env_path in ['/opt/data/.hermes/.env',
                          '/opt/data/.hermes/profiles/whatsapp/.env']:
             _upsert_env(env_path, env_updates)
@@ -508,6 +523,7 @@ services:
       - WHATSAPP_INBOUND_BUFFER_S=${WHATSAPP_INBOUND_BUFFER_S:-0}
       - WHATSAPP_FOLLOWUP_ENABLED=${WHATSAPP_FOLLOWUP_ENABLED:-true}
       - WHATSAPP_FOLLOWUP_SILENCE_MIN=${WHATSAPP_FOLLOWUP_SILENCE_MIN:-30}
+      - WHATSAPP_HOME_CHANNEL=${WHATSAPP_HOME_CHANNEL:-}
       - CONFIG_REPO=${CONFIG_REPO:-hermes_agent_context_contatcs}
       - CONFIG_GITHUB_TOKEN=${CONFIG_GITHUB_TOKEN:-}
 

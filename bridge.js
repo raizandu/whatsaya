@@ -1510,6 +1510,10 @@ function isSystemError(message) {
       lowercaseMsg.includes('hermes config set') ||
       lowercaseMsg.includes('codex_gpt55') ||
       lowercaseMsg.includes('compaction was raised') ||
+      lowercaseMsg.includes('/sethome') ||
+      lowercaseMsg.includes('no home channel is set') ||
+      lowercaseMsg.includes('home channel is where hermes') ||
+      lowercaseMsg.includes('type /sethome') ||
       lowercaseMsg.includes('still working') ||
       lowercaseMsg.includes('waiting for provider response') ||
       lowercaseMsg.includes('waiting for model response') ||

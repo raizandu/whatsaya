@@ -5360,6 +5360,16 @@ class TestPrepareContactReply(BaseWhatsAppManagerTest):
         self.assertTrue(whatsapp_manager.isSystemError(sample))
         self.assertEqual(whatsapp_manager._prepare_contact_reply(sample), "")
 
+    def test_is_system_error_blocks_sethome_prompt(self):
+        import whatsapp_manager
+        sample = (
+            "📬 No home channel is set for Whatsapp. A home channel is where Hermes "
+            "delivers cron job results and cross-platform messages.\n\n"
+            "Type /sethome to make this chat your home channel, or ignore to skip."
+        )
+        self.assertTrue(whatsapp_manager.isSystemError(sample))
+        self.assertEqual(whatsapp_manager._prepare_contact_reply(sample), "")
+
     def test_commercial_reply_preserved(self):
         import whatsapp_manager
         text = "Hoje são R$997 de implementação e R$397/mês. Quer fechar por Pix ou prefere uma call de 15 min?"

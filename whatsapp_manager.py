@@ -7527,6 +7527,11 @@ def pre_llm_call(*args, **kwargs):
                     if old_tk:
                         _turn_sent.discard(old_tk)
                     logger.info(f"[pre_llm_call] Novo turno para {chat_id}: {user_msg[:40]!r}")
+                    if not _session_is_owner(sender_id or "") and not _session_is_owner(chat_id or ""):
+                        _followup_note_activity(chat_id, inbound=True)
+                        logger.info(
+                            f"[followup] armado chat={chat_id!r} em {_followup_silence_s()}s"
+                        )
 
     if platform != "whatsapp":
         return None
@@ -7901,6 +7906,10 @@ _INTERNAL_LEAK_PATTERNS = [
     r"caps context",
     r"hermes config set",
     r"codex_gpt55",
+    r"/sethome",
+    r"no home channel is set",
+    r"home channel is where hermes",
+    r"type /sethome",
 ]
 _SYSTEM_STATUS_RE = re.compile(
     r"self[- \u2010-\u2015]?improvement|"
@@ -7933,7 +7942,11 @@ _HERMES_STATUS_RE = re.compile(
     r"caps context|"
     r"hermes config set|"
     r"codex_gpt55|"
-    r"compaction was raised",
+    r"compaction was raised|"
+    r"/sethome|"
+    r"no home channel is set|"
+    r"home channel is where hermes|"
+    r"type /sethome",
     re.I,
 )
 _CNPJ_PATTERN = re.compile(r"\b\d{2}\.?\d{3}\.?\d{3}/\d{4}-?\d{2}\b")
@@ -8192,6 +8205,9 @@ function isHermesStatusLeak(message) {
     m.includes("caps context") ||
     m.includes("hermes config set") ||
     m.includes("codex_gpt55") ||
+    m.includes("/sethome") ||
+    m.includes("no home channel is set") ||
+    m.includes("home channel is where hermes") ||
     /⏳\s*working/.test(m) ||
     /working\s+[—–-]\s*\d+\s*min/.test(m) ||
     /iteration\s+\d+\s*\/\s*\d+/.test(m)
