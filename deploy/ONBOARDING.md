@@ -144,7 +144,7 @@ Para ver: `docker compose exec hermes hermes skills list`.
 
 Áudio: o Hermes 0.20+ transcreve com Whisper local e, sem idioma, assume inglês. O compose grava `stt.language: pt` (e `HERMES_LOCAL_STT_LANGUAGE=pt`). Sem isso o PTT em português vira tradução zoada. `stt.echo_transcripts: false` — a transcrição fica só no contexto do agente; o cliente não vê a bolha `🎙️ "..."`.
 
-Voz de resposta: Fish Audio. Gere a chave em https://fish.audio/app/api-keys/ e coloque `FISH_API_KEY` no `.env`. Opcional: `FISH_REFERENCE_ID` (voz da biblioteca) e `FISH_TTS_MODEL` (padrão `s2.1-pro-free`). Com `voice.auto_tts: true` o WhatsApp responde em nota de voz. Sem chave, o texto continua indo. PIX, endereço, link, e-mail e código para copiar **não** viram áudio — só texto.
+Voz de resposta: Fish Audio, modelo `s2.1-pro-free` (campanha grátis até 31/08/2026; no dia 30 o cron avisa o dono para trocar para `s2.1-pro`). Gere a chave em https://fish.audio/app/api-keys/ e coloque `FISH_API_KEY` no `.env`. Opcional: `FISH_REFERENCE_ID` e `FISH_TTS_MODEL`. Resposta falável vai **só em nota de voz**. PIX, endereço, link, e-mail, código e intro do tipo “vou te enviar um audio” ficam **texto**. Sem chave, o texto continua indo. Tags `[happy]` / `[warm and friendly]` entoam a voz e não aparecem no chat.
 
 ---
 

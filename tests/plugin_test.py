@@ -5457,20 +5457,65 @@ class TestVoiceReply(BaseWhatsAppManagerTest):
         self.assertEqual(mock_media.call_args[0][0], "5511888888888@s.whatsapp.net")
         self.assertEqual(mock_media.call_args[0][2], "audio")
 
-    @patch("whatsapp_manager._maybe_send_voice")
-    @patch("whatsapp_manager._human_send")
-    def test_transform_sends_text_then_voice(self, mock_send, mock_voice):
-        mock_voice.return_value = True
+    def _hook(self, text):
         hook = self.ctx.hooks.get("transform_llm_output")
-        result = hook(
+        return hook(
             "transform_llm_output",
             platform="whatsapp",
             session_id="5511888888888@s.whatsapp.net",
-            assistant_response="fechamos então",
+            assistant_response=text,
         )
+
+    @patch("whatsapp_manager._maybe_send_voice")
+    @patch("whatsapp_manager._human_send")
+    def test_transform_voice_only_when_speakable(self, mock_send, mock_voice):
+        mock_voice.return_value = True
+        result = self._hook("fechamos então")
+        self.assertEqual(result, "\n")
+        mock_send.assert_not_called()
+        mock_voice.assert_called_once_with("5511888888888@s.whatsapp.net", "fechamos então")
+
+    @patch("whatsapp_manager._maybe_send_voice")
+    @patch("whatsapp_manager._human_send")
+    def test_transform_pix_stays_text(self, mock_send, mock_voice):
+        result = self._hook("A chave Pix é 44.249.819/0001-62")
+        self.assertEqual(result, "\n")
+        mock_voice.assert_not_called()
+        mock_send.assert_called_once()
+        self.assertIn("44.249.819/0001-62", mock_send.call_args[0][1])
+
+    @patch("whatsapp_manager._maybe_send_voice")
+    @patch("whatsapp_manager._human_send")
+    def test_transform_intro_then_voice(self, mock_send, mock_voice):
+        mock_voice.return_value = True
+        result = self._hook("vou te enviar um audio explicando\n\n[happy] o fluxo é simples")
         self.assertEqual(result, "\n")
         mock_send.assert_called_once()
-        mock_voice.assert_called_once_with("5511888888888@s.whatsapp.net", "fechamos então")
+        self.assertIn("audio", mock_send.call_args[0][1].lower())
+        mock_voice.assert_called_once()
+        self.assertIn("fluxo", mock_voice.call_args[0][1])
+
+    @patch("whatsapp_manager._maybe_send_voice")
+    @patch("whatsapp_manager._human_send")
+    def test_transform_voice_then_pix(self, mock_send, mock_voice):
+        mock_voice.return_value = True
+        result = self._hook("fechamos então\n\nA chave Pix é 44.249.819/0001-62")
+        self.assertEqual(result, "\n")
+        mock_voice.assert_called_once()
+        self.assertIn("fechamos", mock_voice.call_args[0][1])
+        mock_send.assert_called_once()
+        self.assertIn("44.249.819/0001-62", mock_send.call_args[0][1])
+
+    @patch("whatsapp_manager._maybe_send_voice")
+    @patch("whatsapp_manager._human_send")
+    def test_transform_strips_cues_from_fallback_text(self, mock_send, mock_voice):
+        mock_voice.return_value = False
+        result = self._hook("[warm and friendly] oi, tudo certo")
+        self.assertEqual(result, "\n")
+        mock_send.assert_called_once()
+        sent = mock_send.call_args[0][1]
+        self.assertNotIn("[warm and friendly]", sent)
+        self.assertIn("oi, tudo certo", sent)
 
 
 class TestWhatsAppAdapterWhitespace(unittest.TestCase):

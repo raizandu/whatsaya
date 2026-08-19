@@ -841,6 +841,30 @@ def _send_bridge_media(chat_id: str, file_path: str, media_type: str = "audio") 
         resp.read()
 
 
+def _fish_call(name: str, default, *args):
+    try:
+        fish = _load_fish_tts()
+        fn = getattr(fish, name, None) if fish else None
+        if callable(fn):
+            return fn(*args)
+    except Exception as err:
+        logger.warning(f"[voice] {name} falhou: {err}")
+    return default(*args) if callable(default) else default
+
+
+def _split_voice_and_text(text: str) -> tuple[str, str, str]:
+    """(spoken, intro_text, written_after) — spoken keeps Fish cues."""
+    return _fish_call("split_voice_and_text", lambda blob: ((blob or "").strip(), "", ""), text)
+
+
+def _strip_fish_cues(text: str) -> str:
+    return _fish_call("strip_fish_cues", lambda blob: (blob or "").strip(), text)
+
+
+def _prepare_spoken_for_tts(spoken: str) -> str:
+    return _fish_call("prepare_spoken_for_tts", lambda blob: (blob or "").strip(), spoken)
+
+
 def _maybe_send_voice(chat_id: str, text: str) -> bool:
     """Gera PTT no Fish e manda pelo bridge. True se a nota de voz saiu."""
     if not _voice_reply_enabled():
@@ -854,14 +878,13 @@ def _maybe_send_voice(chat_id: str, text: str) -> bool:
         logger.info("[voice] fish_tts.py ausente — só texto")
         return False
 
-    try:
-        fish = _load_fish_tts()
-        reason = fish.written_only_reason(blob) if fish and hasattr(fish, "written_only_reason") else None
-    except Exception as err:
-        logger.warning(f"[voice] written_only_reason falhou: {err}")
-        reason = None
+    reason = _fish_call("written_only_reason", lambda _: None, blob)
     if reason:
         logger.info(f"[voice] skip tts: {reason}")
+        return False
+
+    spoken = _prepare_spoken_for_tts(blob)
+    if not spoken:
         return False
 
     try:
@@ -877,7 +900,7 @@ def _maybe_send_voice(chat_id: str, text: str) -> bool:
         with tempfile.TemporaryDirectory(prefix="whatsaya-tts-") as tmp:
             inp = Path(tmp) / "in.txt"
             out = Path(tmp) / "out.ogg"
-            inp.write_text(blob, encoding="utf-8")
+            inp.write_text(spoken, encoding="utf-8")
             proc = subprocess.run(
                 ["python3", str(script), str(inp), str(out), "ogg"],
                 capture_output=True,
@@ -887,7 +910,7 @@ def _maybe_send_voice(chat_id: str, text: str) -> bool:
             )
             err = (proc.stderr or "").strip()
             if proc.returncode != 0 or not out.is_file() or out.stat().st_size < 64:
-                if err.startswith("skip tts:"):
+                if "skip tts:" in err:
                     logger.info(f"[voice] {err}")
                 else:
                     logger.warning(f"[voice] fish_tts falhou rc={proc.returncode}: {err[-400:]}")
@@ -898,6 +921,22 @@ def _maybe_send_voice(chat_id: str, text: str) -> bool:
     except Exception as err:
         logger.warning(f"[voice] envio falhou: {err}")
         return False
+
+
+def _deliver_contact_reply(chat_id: str, clean_text: str) -> None:
+    """Voz só, texto só quando precisa copiar, ou intro + áudio + dado escrito."""
+    spoken, before, after = _split_voice_and_text(clean_text)
+    if before:
+        _human_send(chat_id, before)
+    voiced = bool(spoken) and _maybe_send_voice(chat_id, spoken)
+    if spoken and not voiced:
+        _human_send(chat_id, _strip_fish_cues(spoken))
+    if after:
+        _human_send(chat_id, after)
+    logger.info(
+        f"[voice] deliver spoken={bool(spoken)} voiced={voiced} "
+        f"intro={bool(before)} written={bool(after)}"
+    )
 
 
 def _normalize_brazilian_phone(phone: str) -> str:
@@ -7524,15 +7563,11 @@ def transform_llm_output(*args, **kwargs):
         return "\n"
 
     try:
-        _human_send(str(chat_id), clean_text)
+        _deliver_contact_reply(str(chat_id), clean_text)
     except Exception as err:
         logger.warning(f"[transform_llm_output] envio falhou, Hermes manda o bloco filtrado: {err}")
-        return clean_text
-    try:
-        _maybe_send_voice(str(chat_id), clean_text)
-    except Exception as err:
-        logger.warning(f"[transform_llm_output] voice falhou: {err}")
-    logger.info("[transform_llm_output] bolhas enviadas; suprimindo envio do Hermes")
+        return _strip_fish_cues(clean_text)
+    logger.info("[transform_llm_output] entrega feita; suprimindo envio do Hermes")
     return "\n"
 
 

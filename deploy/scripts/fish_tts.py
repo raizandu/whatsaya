@@ -32,14 +32,108 @@ _WRITTEN_ONLY = (
     (re.compile(r"(?<!\d)(?:\d[ .\-]?){10,}(?!\d)"), "codigo"),
 )
 
+# S2 free-form cues: [happy], [warm and friendly], [very excited], [break]…
+# Don't touch redaction placeholders like [número omitido].
+_FISH_CUE = re.compile(
+    r"\[(?!(?:n[uú]mero omitido)\])"
+    r"(?:very |slightly |extremely |a bit |um pouco )?"
+    r"[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ0-9 ,\-]{0,48}\]",
+    re.I,
+)
+_AUDIO_INTRO = re.compile(
+    r"(vou te (enviar|mandar) um [áa]udio|"
+    r"te (envio|mando) um [áa]udio|"
+    r"olha(r)? (no|o) [áa]udio|"
+    r"segue (o )?[áa]udio|"
+    r"vou gravar|"
+    r"te mando o [áa]udio)",
+    re.I,
+)
+_DEFAULT_CUE = "[warm and friendly]"
+_FREE_MODEL = "s2.1-pro-free"
+_PAID_MODEL = "s2.1-pro"
+
 
 def written_only_reason(text: str) -> str | None:
     """If the reply must stay copyable as text, return why. Else None."""
-    blob = text or ""
+    blob = strip_fish_cues(text or "")
     for pattern, reason in _WRITTEN_ONLY:
         if pattern.search(blob):
             return reason
     return None
+
+
+def strip_fish_cues(text: str) -> str:
+    """Remove S2 emotion/tone markers so they never leak into WhatsApp text."""
+    cleaned = _FISH_CUE.sub("", text or "")
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    cleaned = re.sub(r" *\n *", "\n", cleaned)
+    return cleaned.strip()
+
+
+def is_audio_intro(text: str) -> bool:
+    return bool(_AUDIO_INTRO.search(strip_fish_cues(text or "")))
+
+
+def _split_sentences(block: str) -> list[str]:
+    parts = re.split(r"(?<=[.!?…])\s+", (block or "").strip())
+    return [p.strip() for p in parts if p.strip()]
+
+
+def split_voice_and_text(text: str) -> tuple[str, str, str]:
+    """Split a reply into (spoken, text_before, text_after).
+
+    spoken keeps Fish cues. text_before is an audio intro. text_after is
+    copyable data (PIX, address, codes). Empty spoken means text-only.
+    """
+    spoken: list[str] = []
+    before: list[str] = []
+    after: list[str] = []
+
+    for para in re.split(r"\n\s*\n+", text or ""):
+        para = para.strip()
+        if not para:
+            continue
+        visible = strip_fish_cues(para)
+        if is_audio_intro(visible):
+            before.append(visible)
+            continue
+        if not written_only_reason(para):
+            spoken.append(para)
+            continue
+        sents = _split_sentences(para)
+        if len(sents) <= 1:
+            after.append(visible)
+            continue
+        for sent in sents:
+            sv = strip_fish_cues(sent)
+            if is_audio_intro(sv):
+                before.append(sv)
+            elif written_only_reason(sent):
+                after.append(sv)
+            else:
+                spoken.append(sent)
+
+    return (
+        "\n\n".join(spoken).strip(),
+        "\n\n".join(before).strip(),
+        "\n\n".join(after).strip(),
+    )
+
+
+def prepare_spoken_for_tts(spoken: str) -> str:
+    """Join paragraphs with a pause and add a warm default cue if none exist."""
+    parts = [p.strip() for p in re.split(r"\n\s*\n+", spoken or "") if p.strip()]
+    if not parts:
+        return ""
+    joined = " [break] ".join(parts)
+    if not _FISH_CUE.search(joined):
+        joined = f"{_DEFAULT_CUE} {joined}"
+    return joined
+
+
+def resolve_model() -> str:
+    return os.environ.get("FISH_TTS_MODEL", _FREE_MODEL).strip() or _FREE_MODEL
 
 
 def main() -> int:
@@ -70,11 +164,36 @@ def main() -> int:
         print(f"skip tts: {skip}", file=sys.stderr)
         return 1
 
-    body: dict = {"text": text, "format": fmt, "normalize": True}
+    text = prepare_spoken_for_tts(text)
+    try:
+        temperature = float(os.environ.get("FISH_TTS_TEMPERATURE", "0.8"))
+    except ValueError:
+        temperature = 0.8
+    try:
+        speed = float(os.environ.get("FISH_TTS_SPEED", "1.02"))
+    except ValueError:
+        speed = 1.02
+
+    body: dict = {
+        "text": text,
+        "format": fmt,
+        # False: S2 [emotion] cues stay acoustic. True flatten numbers but
+        # also flattens paralinguistics — the opposite of a warm WA closer.
+        "normalize": False,
+        "temperature": temperature,
+        "top_p": 0.75,
+        "latency": "normal",
+        "prosody": {
+            "speed": speed,
+            "volume": 0,
+            "normalize_loudness": True,
+        },
+    }
     ref = os.environ.get("FISH_REFERENCE_ID", "").strip()
     if ref:
         body["reference_id"] = ref
-    model = os.environ.get("FISH_TTS_MODEL", "s2.1-pro-free").strip() or "s2.1-pro-free"
+    model = resolve_model()
+    print(f"fish model={model} format={fmt} chars={len(text)}", file=sys.stderr)
 
     req = urllib.request.Request(
         "https://api.fish.audio/v1/tts",
