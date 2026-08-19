@@ -142,6 +142,8 @@ Ficam ligadas só as úteis nesta operação: `session-librarian`, OCR/PDF/DOCX,
 
 Para ver: `docker compose exec hermes hermes skills list`.
 
+Áudio: o Hermes 0.20+ transcreve com Whisper local e, sem idioma, assume inglês. O compose grava `stt.language: pt` (e `HERMES_LOCAL_STT_LANGUAGE=pt`). Sem isso o PTT em português vira tradução zoada.
+
 ---
 
 ## 9. Depois do ar
