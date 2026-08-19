@@ -23,7 +23,7 @@ Trabalhe no sintoma. Não recomece o onboard inteiro.
 | QR vazio / não conecta | `/whatsapp/status`. Um bridge só (senão `440 conflict`). Sessão gravável: `ls -ld …/platforms/whatsapp/session` — se root, `chown` para o user do container (`10000`). Fallback de QR: runbook §6. |
 | Dono tratado como cliente (ou o contrário) | `WHATSAPP_OWNER_NUMBER` sem `+`, mesmo DDD/dígito 9 do JID. Device suffix `:0` no JID é normal. |
 | Ferramenta (`read_file`, terminal) vaza no chat do cliente | Perfil `whatsapp` com `toolsets: []` (escrito pelo compose no boot). `pre_tool_call` deve bloquear contato. |
-| Patch no volume sumiu após restart | Compose faz `git reset --hard`. Correção no git deste repo, não no volume. |
+| Patch no volume sumiu após restart | Sem `KEEP_LOCAL_PLUGIN=true` o boot e o auto-update fazem `reset --hard`. Correção no git deste repo, ou ligue a flag só enquanto o patch existir. |
 
 ## Comandos úteis
 

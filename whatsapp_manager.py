@@ -2570,7 +2570,7 @@ def _sync_contacts_from_db_internal(force: bool = True) -> str:
             repo_user = repo_parts[0]
             repo_name = repo_parts[1]
         else:
-            repo_user = setup_user or "leoalvesia"
+            repo_user = setup_user or config.github_user
             repo_name = config_repo
 
         try:
@@ -3160,7 +3160,7 @@ def _update_soul_whatsapp_with_examples(style_section: str) -> bool:
                 repo_parts = config_repo.split("/")
                 repo_user, repo_name = repo_parts[0], repo_parts[1]
             else:
-                repo_user = config.hermes_setup_github_user or "leoalvesia"
+                repo_user = config.hermes_setup_github_user or config.github_user
                 repo_name = config_repo
 
             from datetime import datetime
@@ -3199,7 +3199,7 @@ def _github_put_file(
     """Sobe um arquivo para o GitHub via API REST (GET sha → PUT content).
 
     Args:
-        repo_user: Dono do repositório (ex: "leoalvesia").
+        repo_user: Dono do repositório (ex: "raizandu").
         repo_name: Nome do repositório.
         token: Token de acesso pessoal do GitHub.
         github_path: Caminho do arquivo no repositório (ex: "personal_contacts.json").
@@ -3642,7 +3642,7 @@ def _push_personal_contacts_to_github() -> bool:
         repo_user = repo_parts[0]
         repo_name = repo_parts[1]
     else:
-        repo_user = setup_user or "leoalvesia"
+        repo_user = setup_user or config.github_user
         repo_name = config_repo
 
     try:
@@ -3731,7 +3731,7 @@ def _pull_and_merge_configurations():
         repo_user = repo_parts[0]
         repo_name = repo_parts[1]
     else:
-        repo_user = setup_user or dev_user or "leoalvesia"
+        repo_user = setup_user or dev_user or config.github_user
         repo_name = config_repo
 
     config_base_url = f"https://raw.githubusercontent.com/{repo_user}/{repo_name}/main"
@@ -4252,7 +4252,7 @@ def _save_product_catalog(catalog: dict) -> None:
             if "/" in config_repo:
                 repo_user, repo_name = config_repo.split("/", 1)
             else:
-                repo_user = setup_user or "leoalvesia"
+                repo_user = setup_user or config.github_user
                 repo_name = config_repo
             return _github_put_file(
                 repo_user=repo_user,
@@ -4546,7 +4546,7 @@ def _save_sales(sales: dict) -> None:
             if "/" in config_repo:
                 repo_user, repo_name = config_repo.split("/", 1)
             else:
-                repo_user = setup_user or "leoalvesia"
+                repo_user = setup_user or config.github_user
                 repo_name = config_repo
             return _github_put_file(
                 repo_user=repo_user,
@@ -5506,7 +5506,7 @@ def _live_classify_contact(
             if config_repo and config_token:
                 repo_user, repo_name = (
                     config_repo.split("/") if "/" in config_repo
-                    else (setup_user or dev_user or "leoalvesia", config_repo)
+                    else (setup_user or dev_user or config.github_user, config_repo)
                 )
                 _github_put_file(
                     repo_user=repo_user, repo_name=repo_name, token=config_token,
@@ -7384,7 +7384,7 @@ def register(ctx):
                     repo_user = repo_parts[0]
                     repo_name = repo_parts[1]
                 else:
-                    repo_user = setup_user or "leoalvesia"
+                    repo_user = setup_user or config.github_user
                     repo_name = config_repo
 
                 repo_url = f"https://api.github.com/repos/{repo_user}/{repo_name}"
