@@ -134,7 +134,17 @@ Sessão de teste suja o histórico. Apague a sessão Hermes daquele JID se for r
 
 ---
 
-## 8. Depois do ar
+## 8. Skills do Hermes (dono)
+
+O perfil `whatsapp` (cliente) já sobe com `skills.enabled: false`. O perfil do dono herda o catálogo bundled — dezenas de skills de studio, MLOps, GitHub e desktop. O `command:` do compose grava `skills.disabled` no `config.yaml` a cada boot.
+
+Ficam ligadas só as úteis nesta operação: `session-librarian`, OCR/PDF/DOCX, Google Workspace / e-mail, mapas, atas, `plan`, `hermes-agent`, `grounded-citations`.
+
+Para ver: `docker compose exec hermes hermes skills list`.
+
+---
+
+## 9. Depois do ar
 
 - Atualizar plugin: push neste repo → restart. Confira no log `bridge.js atualizado` / `whatsapp-manager`.
 - Mudar só persona/catálogo: edite `/opt/data/SOUL_WHATSAPP.md` e `support_rules.md` (ou o `CONFIG_REPO`) e reinicie.
