@@ -822,6 +822,10 @@ def _human_send(chat_id: str, message: str) -> None:
     """Envia mensagem simulando comportamento humano: typing + delay + bolhas."""
     import random
 
+    message = _strip_fish_cues(message)
+    if not message:
+        return
+
     if isSystemError(message):
         logger.warning(f"[human-send] status interno bloqueado chat={chat_id!r}: {message[:120]!r}")
         return
@@ -927,13 +931,30 @@ def _fish_call(name: str, default, *args):
     return default(*args) if callable(default) else default
 
 
+# Mesma regra do fish_tts.strip_fish_cues. Fallback obrigatório: se o módulo
+# não carregar, _fish_call senão só faz .strip() e a tag vaza no WhatsApp.
+_FISH_CUE_FALLBACK = re.compile(
+    r"\[(?!(?:n[uú]mero omitido)\])"
+    r"(?:very |slightly |extremely |a bit |um pouco )?"
+    r"[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ0-9 ,\-]{0,48}\]",
+    re.I,
+)
+
+
+def _strip_fish_cues_fallback(blob: str) -> str:
+    cleaned = _FISH_CUE_FALLBACK.sub("", blob or "")
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    cleaned = re.sub(r" *\n *", "\n", cleaned)
+    return cleaned.strip()
+
+
 def _split_voice_and_text(text: str) -> tuple[str, str, str]:
     """(spoken, intro_text, written_after) — spoken keeps Fish cues."""
     return _fish_call("split_voice_and_text", lambda blob: ((blob or "").strip(), "", ""), text)
 
 
 def _strip_fish_cues(text: str) -> str:
-    return _fish_call("strip_fish_cues", lambda blob: (blob or "").strip(), text)
+    return _fish_call("strip_fish_cues", _strip_fish_cues_fallback, text)
 
 
 def _prepare_spoken_for_tts(spoken: str) -> str:

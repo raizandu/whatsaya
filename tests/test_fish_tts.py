@@ -97,6 +97,15 @@ class TestFishCues(unittest.TestCase):
         self.assertNotIn("[happy]", out)
         self.assertIn("[número omitido]", out)
 
+    def test_strip_confident_and_empathetic(self):
+        out = self.fish.strip_fish_cues(
+            "[confident] Sim, respondi aqui.\n\n[empathetic] Ah, entendi."
+        )
+        self.assertNotIn("[confident]", out)
+        self.assertNotIn("[empathetic]", out)
+        self.assertIn("Sim, respondi aqui.", out)
+        self.assertIn("Ah, entendi.", out)
+
     def test_default_cue_when_missing(self):
         out = self.fish.prepare_spoken_for_tts("Oi, tudo bem?")
         self.assertTrue(out.startswith("[warm and friendly]"))

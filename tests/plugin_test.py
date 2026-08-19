@@ -5604,6 +5604,15 @@ class TestVoiceReply(BaseWhatsAppManagerTest):
         self.assertNotIn("[warm and friendly]", sent)
         self.assertIn("oi, tudo certo", sent)
 
+    def test_strip_fallback_without_fish_module(self):
+        whatsapp_manager._fish_tts_mod = object()
+        out = whatsapp_manager._strip_fish_cues(
+            "[confident] Sim, respondi aqui.\n\n[empathetic] Ah, entendi."
+        )
+        self.assertNotIn("[confident]", out)
+        self.assertNotIn("[empathetic]", out)
+        self.assertIn("Sim, respondi aqui.", out)
+
 
 class TestWhatsAppAdapterWhitespace(unittest.TestCase):
     """Adapter não reenvia o whitespace que transform_llm_output devolve ao Hermes."""
@@ -5633,6 +5642,24 @@ class TestWhatsAppAdapterWhitespace(unittest.TestCase):
             )
         )
         mock_urlopen.assert_not_called()
+
+    @patch("urllib.request.urlopen")
+    def test_adapter_strips_emotion_cues(self, mock_urlopen):
+        from adapter import WhatsAppPlatformAdapter
+        adapter = WhatsAppPlatformAdapter()
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.__enter__.return_value = mock_resp
+        mock_urlopen.return_value = mock_resp
+        self.assertTrue(
+            adapter.send(
+                "5511888888888@s.whatsapp.net",
+                "[confident] Sim, respondi aqui.",
+            )
+        )
+        raw = mock_urlopen.call_args[0][0].data.decode("utf-8")
+        self.assertNotIn("[confident]", raw)
+        self.assertIn("Sim, respondi aqui.", raw)
 
 
 class TestPreToolCall(BaseWhatsAppManagerTest):

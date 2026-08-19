@@ -129,6 +129,7 @@ Não declare o cliente no ar sem isto:
 | `{{` em qualquer resposta | Falhou o passo 5 |
 | Dono no self-chat: `quais comandos` | Ajuda do plugin (`stop_bot`, `start_bot`, …) |
 | Duas ideias na resposta | Duas bolhas, se o `main` já tiver o hook `transform_llm_output` (PR de bolhas). Um bloco só + SOUL pedindo `\n\n` = hook ausente ou plugin velho |
+| Texto com `[confident]` / `[empathetic]` / `[happy]` | Cliente **não** vê a tag. Se vazar, o strip do `_human_send` / adapter não está no plugin que está rodando |
 
 Sessão de teste suja o histórico. Apague a sessão Hermes daquele JID se for repetir o teste do zero.
 
@@ -170,7 +171,7 @@ WhatsApp não recebe status interno do gateway: o compose grava `display.busy_ac
 
 Áudio: o Hermes 0.20+ transcreve com Whisper local e, sem idioma, assume inglês. O compose grava `stt.language: pt` (e `HERMES_LOCAL_STT_LANGUAGE=pt`). Sem isso o PTT em português vira tradução zoada. `stt.echo_transcripts: false` — a transcrição fica só no contexto do agente; o cliente não vê a bolha `🎙️ "..."`.
 
-Voz de resposta: Fish Audio, modelo `s2.1-pro-free` (campanha grátis até 31/08/2026; no dia 30 o cron avisa o dono para trocar para `s2.1-pro`). Gere a chave em https://fish.audio/app/api-keys/ e coloque `FISH_API_KEY` no `.env`. Opcional: `FISH_REFERENCE_ID`, `FISH_TTS_MODEL` e `FISH_TTS_VOLUME` (padrão `4`). Resposta falável vai **só em nota de voz**. PIX, endereço, link, e-mail, código e intro do tipo “vou te enviar um audio” ficam **texto**. Sem chave, o texto continua indo. Tags `[happy]` / `[warm and friendly]` entoam a voz e não aparecem no chat. Preço no áudio vai por extenso (`997 reais`). Duas mensagens seguidas esperam 2,5s e entram no mesmo lote (`WHATSAPP_DEBOUNCE_INITIAL_MS=2500`).
+Voz de resposta: Fish Audio, modelo `s2.1-pro-free` (campanha grátis até 31/08/2026; no dia 30 o cron avisa o dono para trocar para `s2.1-pro`). Gere a chave em https://fish.audio/app/api-keys/ e coloque `FISH_API_KEY` no `.env`. Opcional: `FISH_REFERENCE_ID`, `FISH_TTS_MODEL` e `FISH_TTS_VOLUME` (padrão `4`). Resposta falável vai **só em nota de voz**. PIX, endereço, link, e-mail, código e intro do tipo “vou te enviar um audio” ficam **texto**. Sem chave, o texto continua indo. Tags `[happy]` / `[confident]` / `[empathetic]` / `[warm and friendly]` são só para o Fish: o plugin corta no `_human_send` e o adapter corta no `send`, mesmo se o `fish_tts.py` não carregar. Se a tag aparecer no chat, o volume está com plugin velho. `[número omitido]` não é tag de voz e fica. Preço no áudio vai por extenso (`997 reais`). Duas mensagens seguidas esperam 2,5s e entram no mesmo lote (`WHATSAPP_DEBOUNCE_INITIAL_MS=2500`).
 
 ---
 
