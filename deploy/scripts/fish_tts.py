@@ -13,10 +13,33 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
+
+_WRITTEN_ONLY = (
+    (re.compile(r"\b(chave\s+)?pix\b|\bcnpj\b|\bcpf\b", re.I), "pix"),
+    (re.compile(r"\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}"), "cnpj"),
+    (re.compile(r"\d{3}\.\d{3}\.\d{3}-\d{2}"), "cpf"),
+    (re.compile(r"\b\d{5}-?\d{3}\b"), "cep"),
+    (re.compile(r"\b(rua|r\.|avenida|av\.|alameda|travessa|rodovia|estrada|bairro|complemento|cep)\b", re.I), "endereco"),
+    (re.compile(r"https?://|\bwww\.", re.I), "link"),
+    (re.compile(r"[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}", re.I), "email"),
+    (re.compile(r"\b(ag[eê]ncia|conta\s+corrente|banco\s+\w+|c[oó]digo\s+de\s+barras)\b", re.I), "dado-bancario"),
+    (re.compile(r"\b(copia\s+e\s+cola|copiar\s+e\s+colar|qr\s*code)\b", re.I), "copia-cola"),
+    (re.compile(r"(?<!\d)(?:\d[ .\-]?){10,}(?!\d)"), "codigo"),
+)
+
+
+def written_only_reason(text: str) -> str | None:
+    """If the reply must stay copyable as text, return why. Else None."""
+    blob = text or ""
+    for pattern, reason in _WRITTEN_ONLY:
+        if pattern.search(blob):
+            return reason
+    return None
 
 
 def main() -> int:
@@ -40,6 +63,11 @@ def main() -> int:
     text = text_path.read_text(encoding="utf-8").strip()
     if not text:
         print("texto vazio", file=sys.stderr)
+        return 1
+
+    skip = written_only_reason(text)
+    if skip:
+        print(f"skip tts: {skip}", file=sys.stderr)
         return 1
 
     body: dict = {"text": text, "format": fmt, "normalize": True}
