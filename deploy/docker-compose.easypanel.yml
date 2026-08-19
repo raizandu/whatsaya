@@ -303,6 +303,13 @@ services:
             mem = cfg.get('memory') if isinstance(cfg.get('memory'), dict) else {}
             mem['user_profile_enabled'] = False
             cfg['memory'] = mem
+            pl = cfg.get('plugins') if isinstance(cfg.get('plugins'), dict) else {}
+            en = [x for x in (pl.get('enabled') or []) if x]
+            for name in ('whatsapp-manager', 'basic'):
+                if name not in en:
+                    en.append(name)
+            pl['enabled'] = en
+            cfg['plugins'] = pl
             pt = cfg.get('platform_toolsets') if isinstance(cfg.get('platform_toolsets'), dict) else {}
             wa_strip = {
                 'clarify', 'clarifying_questions', 'memory', 'kanban', 'todo',
@@ -432,11 +439,14 @@ services:
       - API_SERVER_KEY=${API_SERVER_KEY}
       - API_SERVER_CORS_ORIGINS=${API_SERVER_CORS_ORIGINS:-*}
 
-      # Dashboard (porta 9119)
+      # Dashboard (porta 9119). Hermes 0.20 exige o plugin `basic` + estas envs
+      # quando o bind é 0.0.0.0; senão a tela fica "SIGN-IN UNAVAILABLE".
       - HERMES_DASHBOARD=1
       - HERMES_DASHBOARD_HOST=0.0.0.0
       - HERMES_DASHBOARD_PORT=9119
       - HERMES_DASHBOARD_TUI=1
+      - HERMES_DASHBOARD_BASIC_AUTH_USERNAME=${HERMES_DASHBOARD_BASIC_AUTH_USERNAME:-admin}
+      - HERMES_DASHBOARD_BASIC_AUTH_PASSWORD=${HERMES_DASHBOARD_BASIC_AUTH_PASSWORD:-${HERMES_DASHBOARD_PASSWORD:-}}
 
       # Código do plugin + sync de contexto
       - HERMES_SETUP_GITHUB_USER=${HERMES_SETUP_GITHUB_USER:-raizandu}
