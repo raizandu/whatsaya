@@ -1112,6 +1112,109 @@ def _best_contact_name(jid: str, bridge_name: str | None, db_name: str | None, p
         return db_name.strip(), "log"
     return f"Contato {phone}", "fallback"
 
+
+_NOT_A_PERSON_NAME = {
+    "contato", "cliente", "user", "usuario", "usuário", "você", "voce", "you",
+    "whatsapp", "unknown", "null", "none", "undefined", "amigo", "amiga",
+    "beleza", "show", "ok", "opa", "oi", "oie", "sim", "nao", "não", "claro",
+    "perfeito", "valeu", "obrigado", "obrigada", "fechou", "combinado",
+    "entendi", "legal", "top", "blz", "tmj", "fala", "eita", "cara", "mano",
+    "bom", "dia", "tarde", "noite",
+}
+_SELF_INTRO_NAME = re.compile(
+    r"(?:meu\s+nome\s+[eé]\s+|me\s+chamo\s+|pode\s+me\s+chamar\s+de\s+|"
+    r"sou\s+[oa]\s+|aqui\s+[eé]\s+[oa]?\s*)"
+    r"([A-Za-zÀ-ÿ]{2,}(?:\s+[A-Za-zÀ-ÿ]{2,}){0,2})",
+    re.I,
+)
+_JUST_A_NAME = re.compile(r"^[A-Za-zÀ-ÿ]{2,20}[.!]?$")
+
+
+def _is_usable_person_name(name: str | None) -> bool:
+    """True se o rótulo serve para chamar a pessoa em voz (não número, LID, placeholder)."""
+    if not name or not isinstance(name, str):
+        return False
+    n = name.strip()
+    if len(n) < 2 or len(n) > 40:
+        return False
+    if "@" in n or n.startswith("+"):
+        return False
+    if n.lower().startswith("contato "):
+        return False
+    letters = re.sub(r"[^A-Za-zÀ-ÿ]", "", n)
+    if len(letters) < 2:
+        return False
+    if len(re.sub(r"\D", "", n)) >= 6:
+        return False
+    first = n.split()[0].lower()
+    return first not in _NOT_A_PERSON_NAME and n.lower() not in _NOT_A_PERSON_NAME
+
+
+def _spoken_first_name(name: str) -> str:
+    token = (name or "").strip().split()[0]
+    if not token:
+        return ""
+    return token[0].upper() + token[1:]
+
+
+def _resolve_lead_spoken_name(contact_info: dict | None, bridge_name: str | None = None) -> str | None:
+    """Primeiro nome falável: o que a pessoa disse > apelido > nome do WhatsApp."""
+    info = contact_info or {}
+    for candidate in (info.get("spoken_name"), info.get("nickname"), info.get("name"), bridge_name):
+        if _is_usable_person_name(candidate):
+            return _spoken_first_name(str(candidate))
+    return None
+
+
+def _extract_self_introduced_name(message: str) -> str | None:
+    """Pega o nome se a pessoa se apresentou. Não trata 'beleza'/'ok' como nome."""
+    blob = (message or "").strip()
+    if not blob:
+        return None
+    match = _SELF_INTRO_NAME.search(blob)
+    if match and _is_usable_person_name(match.group(1)):
+        return _spoken_first_name(match.group(1))
+    if _JUST_A_NAME.match(blob) and _is_usable_person_name(blob.rstrip(".!")):
+        return _spoken_first_name(blob.rstrip(".!"))
+    return None
+
+
+def _persist_spoken_name(key: str, name: str, contacts: dict) -> None:
+    if not key or not name:
+        return
+    rec = contacts.get(key) or {}
+    rec["spoken_name"] = name
+    if not _is_usable_person_name(rec.get("name")):
+        rec["name"] = name
+    contacts[key] = rec
+    try:
+        with open("/opt/data/personal_contacts.json", "w", encoding="utf-8") as f:
+            json.dump(contacts, f, indent=2, ensure_ascii=False)
+    except OSError as err:
+        logger.warning(f"[spoken-name] falha ao gravar: {err}")
+
+
+def _lead_name_prompt_block(spoken: str | None) -> str:
+    if spoken:
+        return (
+            "### NOME DO LEAD NA VOZ ###\n"
+            f"Nome para usar: {spoken}\n"
+            f"Use esse nome no áudio, natural, no máximo uma vez por resposta. "
+            f"Principalmente ao explicar o produto e ao falar de preço.\n"
+            f"Ex: \"Então {spoken}, funciona assim…\" / "
+            f"\"{spoken}, o investimento é R$997 de implementação e R$397 por mês…\"\n"
+            "Não force em toda frase. Não invente outro nome.\n\n"
+        )
+    return (
+        "### NOME DO LEAD NA VOZ ###\n"
+        "Nome: AUSENTE (WhatsApp sem nome claro).\n"
+        "Não invente nome. Não use número, LID nem a palavra Contato.\n"
+        "Depois de responder o que a pessoa perguntou, pergunte uma vez: "
+        "\"como posso te chamar?\"\n"
+        "Se ela já disse o nome nesta conversa, use-o.\n\n"
+    )
+
+
 def _extract_json_from_text(text: str) -> dict:
     """Extrai o primeiro objeto JSON válido de um texto usando balanceamento de chaves."""
     # Remove blocos markdown ```json ... ``` ou ``` ... ```
@@ -5481,9 +5584,13 @@ def _build_support_prompt(
         )
         contact_block = "\n".join(lines) + "\n\n"
 
+    spoken = _resolve_lead_spoken_name(contact_info)
+    name_block = _lead_name_prompt_block(spoken)
+
     return {
         "context": (
             f"{_datetime_context_block()}"
+            f"{name_block}"
             "### PERSONA E DIRETRIZES DO SUPORTE WHATSAPP ###\n"
             f"{whatsapp_soul}\n\n"
             "### IDIOMA: APENAS PORTUGUÊS BRASILEIRO ###\n"
@@ -5709,8 +5816,10 @@ def _live_classify_contact(
     if not man_rel and contact_info and contact_info.get("relationship") in ["Vendedor", "Amigo", "AmigoProximo", "Parente", "Filho"]:
         man_rel = contact_info.get("relationship")
 
+    spoken_kept = (contact_info or {}).get("spoken_name")
     new_data = {
         "name": name,
+        "spoken_name": spoken_kept,
         "relationship": man_rel or classification.get("relationship", "Cliente"),
         "manual_relationship": man_rel,
         "notes": contact_info.get("notes") if contact_info else None,
@@ -7209,6 +7318,23 @@ def pre_llm_call(*args, **kwargs):
 
     # Buscar info de contato no JSON
     contact_info = personal_contacts.get(clean_jid) or personal_contacts.get(phone_number)
+    if contact_info is None:
+        contact_info = {}
+
+    user_msg_now = kwargs.get("user_message") or (context or {}).get("user_message") or ""
+    introduced = _extract_self_introduced_name(str(user_msg_now))
+    persist_key = clean_jid if clean_jid in personal_contacts or phone_number not in personal_contacts else phone_number
+    if introduced:
+        contact_info["spoken_name"] = introduced
+        _persist_spoken_name(persist_key, introduced, personal_contacts)
+        logger.info(f"[spoken-name] capturado {introduced!r} de {persist_key}")
+    elif not _resolve_lead_spoken_name(contact_info):
+        try:
+            bridge_name = _resolve_contact_name_from_bridge(sender_id or clean_jid)
+        except Exception:
+            bridge_name = None
+        if _is_usable_person_name(bridge_name):
+            contact_info["name"] = bridge_name.strip()
 
     # Verificar se precisa de classificação em tempo real
     needs_live_classify = False

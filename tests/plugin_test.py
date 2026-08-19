@@ -2987,6 +2987,51 @@ class TestBestContactName(BaseWhatsAppManagerTest):
         self.assertEqual(source, "fallback")
 
 
+class TestSpokenLeadName(unittest.TestCase):
+    def test_usable_whatsapp_name(self):
+        import whatsapp_manager as wm
+        self.assertTrue(wm._is_usable_person_name("Tony"))
+        self.assertTrue(wm._is_usable_person_name("Maria Silva"))
+        self.assertEqual(wm._resolve_lead_spoken_name({"name": "Tony"}), "Tony")
+
+    def test_rejects_blank_and_unclear(self):
+        import whatsapp_manager as wm
+        for raw in ("", None, "Contato 5511999", "55119998877", "111437255037108", ".", "You", "beleza"):
+            self.assertFalse(wm._is_usable_person_name(raw), raw)
+        self.assertIsNone(wm._resolve_lead_spoken_name({"name": "Contato 5511"}))
+
+    def test_spoken_name_wins_over_generic_whatsapp(self):
+        import whatsapp_manager as wm
+        self.assertEqual(
+            wm._resolve_lead_spoken_name({"spoken_name": "Marina", "name": "Contato 55"}),
+            "Marina",
+        )
+
+    def test_extracts_introduction(self):
+        import whatsapp_manager as wm
+        self.assertEqual(wm._extract_self_introduced_name("meu nome é Tony"), "Tony")
+        self.assertEqual(wm._extract_self_introduced_name("Me chamo Maria Silva"), "Maria")
+        self.assertEqual(wm._extract_self_introduced_name("Tony"), "Tony")
+        self.assertIsNone(wm._extract_self_introduced_name("Beleza"))
+        self.assertIsNone(wm._extract_self_introduced_name("ok"))
+
+    def test_prompt_asks_when_missing(self):
+        import whatsapp_manager as wm
+        missing = wm._lead_name_prompt_block(None)
+        self.assertIn("AUSENTE", missing)
+        self.assertIn("como posso te chamar", missing)
+        present = wm._lead_name_prompt_block("Tony")
+        self.assertIn("Nome para usar: Tony", present)
+        self.assertIn("Então Tony", present)
+
+    def test_support_prompt_includes_name_block(self):
+        import whatsapp_manager as wm
+        ctx = wm._build_support_prompt("soul", "rules", "", contact_info={"name": "Tony"})
+        self.assertIn("Nome para usar: Tony", ctx["context"])
+        ctx2 = wm._build_support_prompt("soul", "rules", "", contact_info={})
+        self.assertIn("Nome: AUSENTE", ctx2["context"])
+
+
 class TestCallLlmApi(BaseWhatsAppManagerTest):
     """Testes para _call_llm_api."""
 
