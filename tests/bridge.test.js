@@ -389,6 +389,8 @@ test('WhatsApp Bridge Regression Tests', async (t) => {
   await t.test('13. isSystemError filter should catch technical/system messages and allow normal client messages', () => {
     // Blocked system/error messages
     assert.ok(isSystemError('💾 Self-improvement review: Memory updated'), 'Should block memory updates');
+    assert.ok(isSystemError('💾 Self-improvement review: User profile updated'), 'Should block user profile updates');
+    assert.ok(isSystemError('Self-improvement review: User profile updated'), 'Should block profile status even without emoji');
     assert.ok(isSystemError('💾 Memory updated'), 'Should block memory updates');
     assert.ok(isSystemError('❌ Rate limited after 3 retries — HTTP 402: This request requires more credits, or fewer max_tokens. You requested up to 65536 tokens, but can only afford 64850. To increase, visit https://openrouter.ai/settings/credits and add more credits'), 'Should block OpenRouter credit errors');
     assert.ok(isSystemError('⏱️ Rate limited. Waiting 2.3s (attempt 2/3)...'), 'Should block rate limit alerts');

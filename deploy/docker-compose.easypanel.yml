@@ -283,6 +283,14 @@ services:
             voice = cfg.get('voice') if isinstance(cfg.get('voice'), dict) else {}
             voice['auto_tts'] = True
             cfg['voice'] = voice
+            mem = cfg.get('memory') if isinstance(cfg.get('memory'), dict) else {}
+            mem['user_profile_enabled'] = False
+            cfg['memory'] = mem
+            pt = cfg.get('platform_toolsets') if isinstance(cfg.get('platform_toolsets'), dict) else {}
+            wa_tools = [t for t in (pt.get('whatsapp') or []) if t != 'memory']
+            if 'whatsapp' in pt or wa_tools:
+                pt['whatsapp'] = wa_tools
+                cfg['platform_toolsets'] = pt
             with open(path, 'w') as f:
                 yaml.dump(cfg, f, default_flow_style=False)
 

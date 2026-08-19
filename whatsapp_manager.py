@@ -750,9 +750,27 @@ def _split_human_bubbles(message: str) -> list[str]:
     return cleaned or [text]
 
 
+def isSystemError(message: str) -> bool:
+    """Firewall do adapter Hermes: status interno não pode ir para o WhatsApp."""
+    if not message or not isinstance(message, str):
+        return False
+    blob = message.strip()
+    if not blob:
+        return False
+    if "💾" in blob and _SYSTEM_STATUS_RE.search(blob):
+        return True
+    if blob.startswith("💾") and len(blob) < 160:
+        return True
+    return bool(_SYSTEM_STATUS_RE.search(blob))
+
+
 def _human_send(chat_id: str, message: str) -> None:
     """Envia mensagem simulando comportamento humano: typing + delay + bolhas."""
     import random
+
+    if isSystemError(message):
+        logger.warning(f"[human-send] status interno bloqueado chat={chat_id!r}: {message[:120]!r}")
+        return
 
     def _typing(cid: str) -> None:
         try:
@@ -772,6 +790,9 @@ def _human_send(chat_id: str, message: str) -> None:
             pass
 
     parts = _split_human_bubbles(message)
+    if not parts:
+        return
+    parts = [p for p in parts if not isSystemError(p)]
     if not parts:
         return
     logger.info(f"[human-send] chat={chat_id!r} bubbles={len(parts)} sizes={[len(p) for p in parts]}")
@@ -7385,7 +7406,10 @@ _ACTION_CLAIM_PATTERNS = [
 ]
 # Prompt Mestre §17 — vazamento técnico/interno (filtro por linha).
 _INTERNAL_LEAK_PATTERNS = [
-    r"self[- ]?improvement\s+review",
+    r"self[- \u2010-\u2015]?improvement",
+    r"user\s+profile\s+updated",
+    r"profile\s+updated",
+    r"^💾",
     r"a\s+sess[aã]o\s+foi\s+restaurada",
     r"session\s+restored",
     r"context\s+updated",
@@ -7398,6 +7422,16 @@ _INTERNAL_LEAK_PATTERNS = [
     r"\bHermes\s+(Agent|v?\d|status|log|platform|session)\b",
     r"\bCodex\b",
 ]
+_SYSTEM_STATUS_RE = re.compile(
+    r"self[- \u2010-\u2015]?improvement|"
+    r"user\s+profile\s+updated|"
+    r"memory\s+updated|"
+    r"memory\s+update|"
+    r"profile\s+updated|"
+    r"context\s+updated|"
+    r"session\s+restored",
+    re.I,
+)
 _CNPJ_PATTERN = re.compile(r"\b\d{2}\.?\d{3}\.?\d{3}/\d{4}-?\d{2}\b")
 _PHONE_CANDIDATE_RE = re.compile(r"\(?\+?[\d][\d\s\-\.\(\)]{6,18}[\d]")
 

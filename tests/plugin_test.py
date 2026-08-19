@@ -5252,6 +5252,22 @@ class TestPrepareContactReply(BaseWhatsAppManagerTest):
         out = whatsapp_manager._prepare_contact_reply("Self-improvement review")
         self.assertEqual(out, "")
 
+    def test_user_profile_updated_suppressed(self):
+        import whatsapp_manager
+        out = whatsapp_manager._prepare_contact_reply(
+            "💾 Self-improvement review: User profile updated"
+        )
+        self.assertEqual(out, "")
+
+    def test_is_system_error_blocks_profile_status(self):
+        import whatsapp_manager
+        self.assertTrue(
+            whatsapp_manager.isSystemError("💾 Self-improvement review: User profile updated")
+        )
+        self.assertTrue(whatsapp_manager.isSystemError("Self-improvement review: Memory updated"))
+        self.assertFalse(whatsapp_manager.isSystemError("Oi, tudo bem?"))
+        self.assertFalse(whatsapp_manager.isSystemError("Quer fechar por Pix?"))
+
     def test_commercial_reply_preserved(self):
         import whatsapp_manager
         text = "Hoje são R$997 de implementação e R$397/mês. Quer fechar por Pix ou prefere uma call de 15 min?"
@@ -5533,6 +5549,18 @@ class TestWhatsAppAdapterWhitespace(unittest.TestCase):
         from adapter import WhatsAppPlatformAdapter
         adapter = WhatsAppPlatformAdapter()
         self.assertTrue(adapter.send("5511888888888@s.whatsapp.net", "   "))
+        mock_urlopen.assert_not_called()
+
+    @patch("urllib.request.urlopen")
+    def test_self_improvement_status_is_blocked(self, mock_urlopen):
+        from adapter import WhatsAppPlatformAdapter
+        adapter = WhatsAppPlatformAdapter()
+        self.assertTrue(
+            adapter.send(
+                "5511888888888@s.whatsapp.net",
+                "💾 Self-improvement review: User profile updated",
+            )
+        )
         mock_urlopen.assert_not_called()
 
 

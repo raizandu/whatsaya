@@ -1490,11 +1490,15 @@ function isSystemError(message) {
     return true;
   }
 
-  // 1. Exact status messages from self-improvement / memory skills
-  if (trimmedMessage.startsWith('💾') && (lowercaseMsg.includes('self-improvement') || lowercaseMsg.includes('memory updated') || lowercaseMsg.includes('memory update'))) {
-    return true;
-  }
-  if (trimmedMessage === '💾 Memory updated' || trimmedMessage === '💾 Self-improvement review: Memory updated') {
+  // 1. Status from self-improvement / memory / user-profile skills.
+  // Hermes 0.20 posts "💾 Self-improvement review: User profile updated" after a turn.
+  if (
+    lowercaseMsg.includes('self-improvement') ||
+    lowercaseMsg.includes('user profile updated') ||
+    lowercaseMsg.includes('memory updated') ||
+    lowercaseMsg.includes('memory update') ||
+    (trimmedMessage.includes('💾') && (lowercaseMsg.includes('profile') || lowercaseMsg.includes('review') || lowercaseMsg.includes('memory')))
+  ) {
     return true;
   }
 
