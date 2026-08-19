@@ -98,8 +98,8 @@
 #   WHATSAPP_CONNECTION_NAME Nome da conexão exibido no Dashboard (padrão: EmpreendedorSerial)
 #
 # ⏳ DEBOUNCE DE MENSAGENS (agrupa fragmentos de texto antes de processar)
-#   WHATSAPP_DEBOUNCE_INITIAL_MS      Espera inicial em ms antes de processar (padrão: 15000)
-#   WHATSAPP_DEBOUNCE_MIN_MS          Piso do decaimento progressivo em ms (padrão: 2000)
+#   WHATSAPP_DEBOUNCE_INITIAL_MS      Espera inicial em ms antes de processar (padrão: 2500)
+#   WHATSAPP_DEBOUNCE_MIN_MS          Piso do decaimento progressivo em ms (padrão: 1500)
 #   WHATSAPP_DEBOUNCE_DECAY           Fator de decaimento a cada fragmento novo (padrão: 0.6)
 #   WHATSAPP_DEBOUNCE_SKIP_SELF_CHAT  Pular debounce no self-chat do dono (padrão: true)
 #
@@ -365,8 +365,8 @@ services:
       - WHATSAPP_CONNECTION_NAME=${WHATSAPP_CONNECTION_NAME:-EmpreendedorSerial}
 
       # Debounce de mensagens (agrupa fragmentos de texto antes de processar)
-      - WHATSAPP_DEBOUNCE_INITIAL_MS=${WHATSAPP_DEBOUNCE_INITIAL_MS:-15000}
-      - WHATSAPP_DEBOUNCE_MIN_MS=${WHATSAPP_DEBOUNCE_MIN_MS:-2000}
+      - WHATSAPP_DEBOUNCE_INITIAL_MS=${WHATSAPP_DEBOUNCE_INITIAL_MS:-2500}
+      - WHATSAPP_DEBOUNCE_MIN_MS=${WHATSAPP_DEBOUNCE_MIN_MS:-1500}
       - WHATSAPP_DEBOUNCE_DECAY=${WHATSAPP_DEBOUNCE_DECAY:-0.6}
       - WHATSAPP_DEBOUNCE_SKIP_SELF_CHAT=${WHATSAPP_DEBOUNCE_SKIP_SELF_CHAT:-true}
 
@@ -416,7 +416,7 @@ services:
       - FISH_REFERENCE_ID=${FISH_REFERENCE_ID:-}
       - FISH_TTS_MODEL=${FISH_TTS_MODEL:-s2.1-pro-free}
       - FISH_TTS_VOLUME=${FISH_TTS_VOLUME:-4}
-      - WHATSAPP_INBOUND_BUFFER_S=${WHATSAPP_INBOUND_BUFFER_S:-2}
+      - WHATSAPP_INBOUND_BUFFER_S=${WHATSAPP_INBOUND_BUFFER_S:-0}
       - CONFIG_REPO=${CONFIG_REPO:-hermes_agent_context_contatcs}
       - CONFIG_GITHUB_TOKEN=${CONFIG_GITHUB_TOKEN:-}
 

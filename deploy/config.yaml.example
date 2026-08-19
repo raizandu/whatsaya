@@ -46,7 +46,7 @@ approvals:
 memory:
   # Habilita a memória persistente para que o Hermes lembre das preferências do dono nas próximas conversas
   memory_enabled: true
-  user_profile_enabled: true
+  user_profile_enabled: false
 
 display:
   # Desativa mensagens de progresso de ferramentas (ex: "📖 read_file: ...") no WhatsApp/Chats
