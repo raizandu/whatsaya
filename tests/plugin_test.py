@@ -5330,6 +5330,16 @@ class TestPrepareContactReply(BaseWhatsAppManagerTest):
         ))
         self.assertFalse(whatsapp_manager.isSystemError("Quer fechar por Pix?"))
 
+    def test_is_system_error_blocks_codex_autoraise(self):
+        import whatsapp_manager
+        sample = (
+            "ℹ Codex gpt-5.6-luna caps context at 900K, so auto-compaction "
+            "was raised to 85% (from 50%) to use more of the window before summarizing.\n"
+            "  Opt back out: hermes config set compression.codex_gpt55_autoraise false"
+        )
+        self.assertTrue(whatsapp_manager.isSystemError(sample))
+        self.assertEqual(whatsapp_manager._prepare_contact_reply(sample), "")
+
     def test_commercial_reply_preserved(self):
         import whatsapp_manager
         text = "Hoje são R$997 de implementação e R$397/mês. Quer fechar por Pix ou prefere uma call de 15 min?"

@@ -7728,6 +7728,11 @@ _INTERNAL_LEAK_PATTERNS = [
     r"⏳\s*working",
     r"working\s+[—–-]\s*\d+\s*min",
     r"iteration\s+\d+\s*/\s*\d+",
+    r"auto-compaction",
+    r"autoraise",
+    r"caps context",
+    r"hermes config set",
+    r"codex_gpt55",
 ]
 _SYSTEM_STATUS_RE = re.compile(
     r"self[- \u2010-\u2015]?improvement|"
@@ -7754,7 +7759,13 @@ _HERMES_STATUS_RE = re.compile(
     r"asking model to|"
     r"⏳\s*working|"
     r"working\s+[—–-]\s*\d+\s*min|"
-    r"iteration\s+\d+\s*/\s*\d+",
+    r"iteration\s+\d+\s*/\s*\d+|"
+    r"auto-compaction|"
+    r"autoraise|"
+    r"caps context|"
+    r"hermes config set|"
+    r"codex_gpt55|"
+    r"compaction was raised",
     re.I,
 )
 _CNPJ_PATTERN = re.compile(r"\b\d{2}\.?\d{3}\.?\d{3}/\d{4}-?\d{2}\b")
@@ -8008,6 +8019,11 @@ function isHermesStatusLeak(message) {
     m.includes("still working") ||
     m.includes("waiting for provider response") ||
     m.includes("iteration budget") ||
+    m.includes("auto-compaction") ||
+    m.includes("autoraise") ||
+    m.includes("caps context") ||
+    m.includes("hermes config set") ||
+    m.includes("codex_gpt55") ||
     /⏳\s*working/.test(m) ||
     /working\s+[—–-]\s*\d+\s*min/.test(m) ||
     /iteration\s+\d+\s*\/\s*\d+/.test(m)

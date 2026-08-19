@@ -247,6 +247,9 @@ services:
                          'basic_auth': {'username': usr, 'password_hash': hash_password(pwd)}})
             cfg['dashboard'] = dash
             cfg['session_reset'] = {'notify_user': False}
+            comp = cfg.get('compression') if isinstance(cfg.get('compression'), dict) else {}
+            comp['codex_gpt55_autoraise'] = False
+            cfg['compression'] = comp
             disp = cfg.get('display')
             if not isinstance(disp, dict):
                 disp = {}

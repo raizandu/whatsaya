@@ -24,6 +24,7 @@ const {
   runSelfDiagnostics,
   clearRecentlyProcessedIds,
   stripExecLines,
+  stripFishCues,
 } = await import('../bridge.js');
 
 // Setup Mock Socket
@@ -512,6 +513,7 @@ test('WhatsApp Bridge Regression Tests', async (t) => {
     assert.ok(isSystemError('Failed to generate output because connection failed'), 'Should catch failed to generate / connection failed');
     assert.ok(isSystemError('{"status":"error","message":"crashed"}'), 'Should catch JSON error status');
     assert.ok(isSystemError("⚠️ Compression model MiniMax-M2.7 (api.minimax.io) context is 204,800 tokens, but the main model gemini-3.5-flash (gemini)'s compression threshold was 524,288 tokens. Auto-lowered this session's threshold to 204,800 tokens so compression can run."), 'Should block compression context warning leaks');
+    assert.ok(isSystemError('ℹ Codex gpt-5.6-luna caps context at 900K, so auto-compaction was raised to 85% (from 50%) to use more of the window before summarizing.\n  Opt back out: hermes config set compression.codex_gpt55_autoraise false'), 'Should block Codex autoraise notice');
     assert.ok(isSystemError("⏳ Still working... (3 min elapsed — iteration 31/60, waiting for provider response (streaming))"), 'Should block provider wait loops');
     assert.ok(isSystemError("waiting for provider response"), 'Should block waiting for provider message');
     assert.ok(isSystemError("⚠️ Iteration budget exhausted (60/60) — asking model to summarise"), 'Should block iteration budget alerts');
@@ -601,6 +603,13 @@ test('WhatsApp Bridge Regression Tests', async (t) => {
       globalThis.fetch = originalFetch;
       process.env = originalEnv;
     }
+  });
+
+  await t.test('21a. stripFishCues should drop intonation tags from outgoing text', () => {
+    const out = stripFishCues('[confident] Sim, respondi aqui.\n\n[empathetic] Ah, entendi.');
+    assert.ok(!out.includes('[confident]'));
+    assert.ok(!out.includes('[empathetic]'));
+    assert.ok(out.includes('Sim, respondi aqui.'));
   });
 
   await t.test('21. stripExecLines should remove EXEC: command lines from outgoing messages', () => {

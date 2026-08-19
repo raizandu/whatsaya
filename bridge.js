@@ -25,7 +25,7 @@ import pino from 'pino';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync, unlinkSync, rmSync } from 'fs';
-import { randomBytes } from 'crypto';
+import { randomBytes, createHash } from 'crypto';
 import { execSync, spawn } from 'child_process';
 import { tmpdir } from 'os';
 import qrcode from 'qrcode';
@@ -192,6 +192,16 @@ const IMAGE_CACHE_DIR = path.join(process.env.HOME || '~', '.hermes', 'image_cac
 const DOCUMENT_CACHE_DIR = path.join(process.env.HOME || '~', '.hermes', 'document_cache');
 const AUDIO_CACHE_DIR = path.join(process.env.HOME || '~', '.hermes', 'audio_cache');
 const PAIR_ONLY = args.includes('--pair-only');
+let SCRIPT_HASH = '';
+try {
+  SCRIPT_HASH = createHash('sha256')
+    .update(readFileSync(fileURLToPath(import.meta.url)))
+    .digest('hex')
+    .slice(0, 16);
+} catch {}
+const SEND_READ_RECEIPTS = ['1', 'true', 'yes', 'on'].includes(
+  String(process.env.WHATSAPP_SEND_READ_RECEIPTS || '').toLowerCase(),
+);
 const WHATSAPP_MODE = getArg('mode', process.env.WHATSAPP_MODE || 'self-chat'); // "bot" or "self-chat"
 const ALLOWED_USERS = parseAllowedUsers(process.env.WHATSAPP_ALLOWED_USERS || '');
 const WHATSAPP_OWNER_NUMBER = (process.env.WHATSAPP_OWNER_NUMBER || '').replace(/\D/g, '');
@@ -1494,6 +1504,12 @@ function isSystemError(message) {
       lowercaseMsg.includes('compression model') ||
       lowercaseMsg.includes('compression threshold') ||
       lowercaseMsg.includes('auto-lowered') ||
+      lowercaseMsg.includes('auto-compaction') ||
+      lowercaseMsg.includes('autoraise') ||
+      lowercaseMsg.includes('caps context') ||
+      lowercaseMsg.includes('hermes config set') ||
+      lowercaseMsg.includes('codex_gpt55') ||
+      lowercaseMsg.includes('compaction was raised') ||
       lowercaseMsg.includes('still working') ||
       lowercaseMsg.includes('waiting for provider response') ||
       lowercaseMsg.includes('waiting for model response') ||
@@ -1614,8 +1630,8 @@ messagingRouter.post('/send', async (req, res) => {
       return res.json({ success: true, info: 'System status/error message blocked and logged' });
     }
 
-    // Strip EXEC: lines before sending — they are system commands, never user-visible
-    const cleanedMessage = stripExecLines(message);
+    // Strip EXEC: lines and Fish intonation tags before sending.
+    const cleanedMessage = stripFishCues(stripExecLines(message));
     if (cleanedMessage !== message) {
       console.log(`[bridge] EXEC: lines stripped from outgoing message to ${chatId}`);
     }
@@ -1949,6 +1965,8 @@ diagnosticsRouter.get('/health', (req, res) => {
     status: connectionState,
     queueLength: messageQueue.length,
     uptime: process.uptime(),
+    scriptHash: SCRIPT_HASH,
+    sendReadReceipts: SEND_READ_RECEIPTS,
   });
 });
 
@@ -2003,6 +2021,7 @@ export {
   runSelfDiagnostics,
   clearRecentlyProcessedIds,
   stripExecLines,
+  stripFishCues,
 };
 
 function getBotPaused() { return botPaused; }
@@ -2016,4 +2035,11 @@ function getRecentLogs() { return recentLogs; }
 function clearRecentlyProcessedIds() { recentlyProcessedIds.clear(); }
 function stripExecLines(text) {
   return (text || '').replace(/^EXEC:\s*\S+.*$/gim, '').replace(/\n{3,}/g, '\n\n').trim();
+}
+function stripFishCues(text) {
+  return String(text || '')
+    .replace(/\[(?!(?:n[uú]mero omitido)\])(?:very |slightly |extremely |a bit |um pouco )?[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ0-9 ,\-]{0,48}\]/gi, '')
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/ *\n */g, '\n')
+    .trim();
 }
