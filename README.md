@@ -104,12 +104,15 @@ Volume Compartilhado: /opt/data
 
 ## ⚡ Instalação e Deploy
 
-### Pré-requisitos
+**Caminho oficial (próximo cliente):** [deploy/ONBOARDING.md](deploy/ONBOARDING.md) — VPS + Compose + IP, sem domínio obrigatório. Skills no repo: `whatsaya-onboard` (subir) e `whatsaya-diagnose` (bot no ar, comportamento errado).
 
-- Hermes Agent rodando no **Portainer** ou **Easypanel**
-- Domínio configurado apontando para o servidor
-- [Google AI Studio](https://aistudio.google.com) — chave da API Gemini (`GOOGLE_API_KEY`)
-- Repositório privado no GitHub para versionamento de contatos
+### Pré-requisitos (caminho oficial)
+
+- Ubuntu 24 com Docker Compose v2
+- Número do dono, nome, catálogo e (se vender no chat) chave Pix
+- Um provider de modelo (OpenRouter, Gemini ou Codex no dashboard) — não preencha duas chaves da cadeia Google → OpenAI → OpenRouter
+
+Portainer / EasyPanel + domínio continuam abaixo como caminho extra.
 
 ---
 

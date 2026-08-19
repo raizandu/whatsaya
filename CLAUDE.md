@@ -93,7 +93,9 @@ O runbook completo está em `.gemini/skills/deploy-plugin/SKILL.md` (escrito par
 
 ## Ao replicar este kit para outro cliente
 
-Tudo o que muda por cliente é **variável de ambiente**. Não edite código para trocar de cliente — se você se pegar fazendo isso, é sinal de que falta parametrizar algo.
+Runbook do operador: [`deploy/ONBOARDING.md`](deploy/ONBOARDING.md). Skills: `whatsaya-onboard`, `whatsaya-diagnose`.
+
+Tudo o que muda por cliente é **variável de ambiente** + os templates em `deploy/SOUL*.md` e `support_rules.md`. Não edite código para trocar de cliente — se você se pegar fazendo isso, é sinal de que falta parametrizar algo.
 
 | Variável | Para que serve |
 |---|---|
