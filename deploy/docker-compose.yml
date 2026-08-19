@@ -14,7 +14,7 @@
 #   /opt/data/.hermes/plugins/  → plugins carregados pelo gateway
 #   /opt/data/.hermes/platforms/whatsapp/bridge/bridge.js  → bridge Node.js
 #   /opt/data/.hermes/platforms/whatsapp/session/          → sessão WhatsApp
-#   /opt/data/workspace/        → repositórios clonados (ex: whatsappkit)
+#   /opt/data/workspace/        → repositórios clonados (ex: whatsaya)
 # ==============================================================================
 #
 # ██████████████████████████████████████████████████████████████████████████████
@@ -92,8 +92,10 @@
 #   GOOGLE_CLIENT_ID       Client ID para autenticação OAuth (Google Calendar, Drive, etc.)
 #   GOOGLE_CLIENT_SECRET   Client Secret correspondente
 #
-# 📦 SINCRONIZAÇÃO DE CONTEXTO VIA GITHUB
-#   HERMES_SETUP_GITHUB_USER  Usuário GitHub dono do repositório de configuração
+# 📦 CÓDIGO DO PLUGIN + SYNC DE CONTEXTO
+#   HERMES_SETUP_GITHUB_USER  Dono do GitHub do plugin (padrão: raizandu)
+#   HERMES_SETUP_GITHUB_REPO  Nome do repositório do plugin (padrão: whatsaya)
+#   KEEP_LOCAL_PLUGIN         true/1 = plugin não se auto-atualiza no volume
 #   CONFIG_REPO               Nome do repositório com contextos/contatos (padrão: hermes_agent_context_contatcs)
 #
 # ⏱️ TIMEOUTS E OUTROS
@@ -185,8 +187,10 @@ services:
       - HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH=${HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH:-}
       - HERMES_DASHBOARD_PASSWORD=${HERMES_DASHBOARD_PASSWORD:-}
 
-      # Sincronização de contexto via GitHub
-      - HERMES_SETUP_GITHUB_USER=${HERMES_SETUP_GITHUB_USER:-leoalvesia}
+      # Código do plugin + sync de contexto
+      - HERMES_SETUP_GITHUB_USER=${HERMES_SETUP_GITHUB_USER:-raizandu}
+      - HERMES_SETUP_GITHUB_REPO=${HERMES_SETUP_GITHUB_REPO:-whatsaya}
+      - KEEP_LOCAL_PLUGIN=${KEEP_LOCAL_PLUGIN:-}
       - CONFIG_REPO=${CONFIG_REPO:-hermes_agent_context_contatcs}
       - CONFIG_GITHUB_TOKEN=${CONFIG_GITHUB_TOKEN:-}
 

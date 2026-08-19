@@ -104,16 +104,17 @@ Tudo o que muda por cliente é **variável de ambiente** + os templates em `depl
 | `WHATSAPP_PIX_KEY` | Chave Pix quando o item do catálogo não define a sua. **Sem default de propósito** — errar aqui manda o pagamento do cliente para a conta errada |
 | `OPENROUTER_API_KEY` | Provider padrão. Deixe `GOOGLE_API_KEY` e `OPENAI_API_KEY` **vazias**: a cadeia é Google → OpenAI → OpenRouter e para na primeira chave preenchida |
 | `WHATSAPP_*_MODEL` / `*_PROVIDER` | Slugs do OpenRouter (`vendor/modelo`). Texto usa `deepseek/deepseek-v4-flash`; mídia precisa de modelo multimodal (`google/gemini-3.1-flash-lite`) porque o DeepSeek aceita só texto |
-| `CONFIG_REPO` + `CONFIG_GITHUB_TOKEN` | Opcional — versiona contatos e personas num repo privado |
-| `HERMES_SETUP_GITHUB_USER` | Dono do repositório de onde o plugin se atualiza |
+| `CONFIG_REPO` + `CONFIG_GITHUB_TOKEN` | Opcional — versiona contatos e personas num repo privado. Sem `user/repo`, o dono cai em `config.github_user` (`HERMES_SETUP_GITHUB_USER` → `DEV_GITHUB_USER` → `raizandu`) |
+| `HERMES_SETUP_GITHUB_USER` / `HERMES_SETUP_GITHUB_REPO` | De onde o plugin se clona e se atualiza. Padrão: `raizandu` / `whatsaya` |
+| `KEEP_LOCAL_PLUGIN` | `true` — o boot e o `_self_update_plugin_code` não fazem fetch/reset no volume |
 
 Fora as envs, só os arquivos de conteúdo: `deploy/SOUL.md`, `SOUL_WHATSAPP.md`, `SOUL_EMAIL.md` e `support_rules.md` são **templates com placeholders `{{...}}`**. Preencha antes de subir — placeholder não substituído vai literal para o cliente, e um `support_rules.md` com produto errado faz o bot inventar oferta que não existe.
 
-**Ainda embutem o nome do repositório:** `whatsapp_manager.py:3788, 3804, 7347, 7378, 7439` e `deploy/setup.sh:83`. E `whatsapp_manager.py:7347` embute a URL **inteira**, ignorando `HERMES_SETUP_GITHUB_USER` — um cliente com outro usuário GitHub precisa de patch nessa linha.
+URL do plugin: `config.plugin_git_url` / `config.plugin_raw_root` (não há mais `whatsappkit` hardcoded). `PASSO_A_PASSO.md` e `deploy/README.md` ainda falam do fork antigo — o caminho oficial é [`deploy/ONBOARDING.md`](deploy/ONBOARDING.md).
 
 ## Como o código chega na VPS
 
-O `command:` do `deploy/docker-compose.easypanel.yml` faz `git clone` (ou `fetch` + `reset --hard`) do repositório a cada boot. Fluxo de atualização: `git push` na `main` → restart do serviço no EasyPanel.
+O `command:` do `deploy/docker-compose.easypanel.yml` clona `raizandu/whatsaya` (ou `HERMES_SETUP_GITHUB_*`) a cada boot, salvo `KEEP_LOCAL_PLUGIN`. Fluxo de atualização: `git push` na `main` → restart. O Swarm/`docker-compose.yml` não clona: só injeta as mesmas envs para o auto-update do plugin.
 
 Duas decisões deliberadas nesse bloco:
 - **É clone, não download de arquivos avulsos.** O `setup.sh` original baixava 9 arquivos individuais e não criava `.git`, o que fazia `_self_update_plugin_code()` cair no fallback de lista fixa — arquivos novos nunca chegavam.
