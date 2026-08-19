@@ -121,12 +121,68 @@ def split_voice_and_text(text: str) -> tuple[str, str, str]:
     )
 
 
+_UNITS = "zero um dois três quatro cinco seis sete oito nove".split()
+_TEENS = "dez onze doze treze quatorze quinze dezesseis dezessete dezoito dezenove".split()
+_TENS = ["", "", "vinte", "trinta", "quarenta", "cinquenta", "sessenta", "setenta", "oitenta", "noventa"]
+_HUNDREDS = [
+    "", "cento", "duzentos", "trezentos", "quatrocentos",
+    "quinhentos", "seiscentos", "setecentos", "oitocentos", "novecentos",
+]
+
+
+def _br_int_words(n: int) -> str:
+    if n < 0:
+        return str(n)
+    if n == 0:
+        return "zero"
+    if n == 100:
+        return "cem"
+    if n < 10:
+        return _UNITS[n]
+    if n < 20:
+        return _TEENS[n - 10]
+    if n < 100:
+        tens, unit = divmod(n, 10)
+        return _TENS[tens] if unit == 0 else f"{_TENS[tens]} e {_UNITS[unit]}"
+    if n < 1000:
+        hund, rest = divmod(n, 100)
+        head = _HUNDREDS[hund]
+        return head if rest == 0 else f"{head} e {_br_int_words(rest)}"
+    if n < 1_000_000:
+        thou, rest = divmod(n, 1000)
+        head = "mil" if thou == 1 else f"{_br_int_words(thou)} mil"
+        return head if rest == 0 else f"{head} e {_br_int_words(rest)}"
+    return str(n)
+
+
+def speak_money(text: str) -> str:
+    """R$997 / R$397/mês → 'novecentos e noventa e sete reais' para o S2 não engasgar."""
+
+    def _parse_int(raw: str) -> int:
+        return int(re.sub(r"[^\d]", "", raw) or "0")
+
+    out = re.sub(
+        r"R\$\s*(\d{1,3}(?:\.\d{3})*|\d+)\s*/\s*m[eê]s",
+        lambda m: f"{_br_int_words(_parse_int(m.group(1)))} reais por mês",
+        text or "",
+        flags=re.I,
+    )
+    out = re.sub(
+        r"R\$\s*(\d{1,3}(?:\.\d{3})*|\d+)",
+        lambda m: f"{_br_int_words(_parse_int(m.group(1)))} reais",
+        out,
+        flags=re.I,
+    )
+    return out
+
+
 def prepare_spoken_for_tts(spoken: str) -> str:
     """Join paragraphs with a pause and add a warm default cue if none exist."""
     parts = [p.strip() for p in re.split(r"\n\s*\n+", spoken or "") if p.strip()]
     if not parts:
         return ""
     joined = " [break] ".join(parts)
+    joined = speak_money(joined)
     if not _FISH_CUE.search(joined):
         joined = f"{_DEFAULT_CUE} {joined}"
     return joined
@@ -173,22 +229,28 @@ def main() -> int:
         speed = float(os.environ.get("FISH_TTS_SPEED", "1.02"))
     except ValueError:
         speed = 1.02
+    try:
+        volume = float(os.environ.get("FISH_TTS_VOLUME", "4"))
+    except ValueError:
+        volume = 4.0
 
     body: dict = {
         "text": text,
         "format": fmt,
-        # False: S2 [emotion] cues stay acoustic. True flatten numbers but
-        # also flattens paralinguistics — the opposite of a warm WA closer.
+        # False: S2 [emotion] cues stay acoustic. Numbers are spoken via speak_money().
         "normalize": False,
         "temperature": temperature,
         "top_p": 0.75,
         "latency": "normal",
+        "opus_bitrate": 48000 if fmt == "opus" else None,
         "prosody": {
             "speed": speed,
-            "volume": 0,
+            "volume": volume,
             "normalize_loudness": True,
         },
     }
+    if body["opus_bitrate"] is None:
+        body.pop("opus_bitrate")
     ref = os.environ.get("FISH_REFERENCE_ID", "").strip()
     if ref:
         body["reference_id"] = ref

@@ -5413,6 +5413,15 @@ class TestTransformLlmOutput(BaseWhatsAppManagerTest):
         self.assertNotIn("11999887766", sent)
 
     @patch("whatsapp_manager._human_send")
+    def test_same_session_allows_new_user_turn(self, mock_send):
+        session = "5511888888888@s.whatsapp.net"
+        whatsapp_manager._turn_key[session] = "turno-1"
+        self._call(session, "primeira")
+        whatsapp_manager._turn_key[session] = "turno-2"
+        self._call(session, "segunda, me chamo Anthony")
+        self.assertEqual(mock_send.call_count, 2)
+
+    @patch("whatsapp_manager._human_send")
     def test_turn_dedup_suppresses_second_call(self, mock_send):
         session = "5511888888888@s.whatsapp.net"
         whatsapp_manager._turn_key[session] = "turno-abc"

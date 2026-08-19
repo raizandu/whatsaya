@@ -117,3 +117,20 @@ class TestFishCues(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("FISH_TTS_MODEL", None)
             self.assertEqual(self.fish.resolve_model(), "s2.1-pro-free")
+
+
+class TestSpeakMoney(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.fish = _load()
+
+    def test_reais_and_monthly(self):
+        out = self.fish.speak_money("Tony, o investimento é R$997 de implementação e R$397/mês")
+        self.assertIn("novecentos e noventa e sete reais", out)
+        self.assertIn("trezentos e noventa e sete reais por mês", out)
+        self.assertNotIn("R$", out)
+        self.assertNotIn("997", out)
+
+    def test_prepare_applies_money(self):
+        out = self.fish.prepare_spoken_for_tts("Hoje são R$997.")
+        self.assertIn("novecentos e noventa e sete reais", out)

@@ -251,10 +251,62 @@ _turn_key: dict[str, str] = {}       # chat_id → chave do turno atual
 _turn_sent: set[str] = set()         # chaves de turnos que já foram enviados
 _turn_lock = threading.Lock()
 
-# Dedup por sessão Hermes: garante que cada session_id só envia UMA resposta.
-# Segunda camada de proteção independente do turn-based dedup.
+# Dedup por sessão Hermes: NÃO usar como bloqueio de turno seguinte.
+# O Hermes reusa o mesmo session_id na conversa inteira; bloquear aqui
+# trava a 2ª mensagem ("Sessão já respondida"). O _turn_sent já cobre
+# o reenvio do mesmo user_message.
 _responded_sessions: set[str] = set()
 _responded_sessions_lock = threading.Lock()
+
+# Buffer de entrada: espera um instante e junta duas mensagens seguidas.
+_inbound_buf: dict[str, list[str]] = {}
+_inbound_leader: dict[str, bool] = {}
+_inbound_locks: dict[str, threading.Lock] = {}
+_inbound_locks_guard = threading.Lock()
+
+
+def _inbound_lock_for(chat_id: str) -> threading.Lock:
+    with _inbound_locks_guard:
+        lock = _inbound_locks.get(chat_id)
+        if lock is None:
+            lock = threading.Lock()
+            _inbound_locks[chat_id] = lock
+        return lock
+
+
+def _coalesce_contact_inbound(chat_id: str, text: str) -> str | None:
+    """Espera um instante e junta mensagens seguidas. None = esta chamada só alimenta o buffer."""
+    if not chat_id:
+        return text
+    try:
+        wait_s = float(os.getenv("WHATSAPP_INBOUND_BUFFER_S", "2"))
+    except ValueError:
+        wait_s = 2.0
+    if wait_s <= 0:
+        return text
+
+    blob = (text or "").strip()
+    lock = _inbound_lock_for(chat_id)
+    with lock:
+        _inbound_buf.setdefault(chat_id, []).append(blob)
+        if _inbound_leader.get(chat_id):
+            logger.info(f"[inbound-buf] +1 em {chat_id!r} (aguarda o lote)")
+            return None
+        _inbound_leader[chat_id] = True
+
+    time.sleep(wait_s)
+
+    with lock:
+        parts = [p for p in _inbound_buf.pop(chat_id, []) if p]
+        _inbound_leader.pop(chat_id, None)
+    if not parts:
+        return blob
+    # Dedupe vizinhos iguais (eco de áudio + texto)
+    merged: list[str] = []
+    for part in parts:
+        if not merged or merged[-1] != part:
+            merged.append(part)
+    return "\n".join(merged)
 
 # Dedup de mensagens recebidas: evita processar a mesma mensagem do WhatsApp duas vezes
 _seen_message_ids: set[str] = set()
@@ -7144,6 +7196,18 @@ def pre_gateway_dispatch(*args, **kwargs):
         if sender_id and msg_text:
             _last_owner_text[sender_id] = msg_text
 
+    if not is_owner:
+        buf_chat = str(getattr(event.source, "chat_id", "") or sender_id or "")
+        live_text = (getattr(event, "text", None) or msg_text or "").strip()
+        merged = _coalesce_contact_inbound(buf_chat, live_text)
+        if merged is None:
+            return {"action": "skip", "reason": "inbound-coalesce"}
+        if merged and merged != live_text:
+            event.text = merged
+            if hasattr(event, "body"):
+                event.body = merged
+            logger.info(f"[inbound-buf] juntou {buf_chat!r}: {merged[:120]!r}")
+
     # Roteamento Dinâmico de Modelos (Dono vs Clientes)
     try:
         session_key = gateway._session_key_for_source(event.source)
@@ -7674,17 +7738,6 @@ def _claim_contact_send(session_id: str, chat_id: str, preview: str) -> bool:
     if session_id and "@" in session_id:
         local, domain = session_id.split("@", 1)
         session_clean = f"{local.split(':')[0]}@{domain}"
-
-    if session_id:
-        with _responded_sessions_lock:
-            if session_id in _responded_sessions:
-                logger.warning(f"[contact-send] Sessão já respondida — suprimindo (session={session_id!r})")
-                _log_suppressed("SESSION_DEDUP", session_id, chat_id, preview)
-                return False
-            _responded_sessions.add(session_id)
-            if len(_responded_sessions) > 2000:
-                _responded_sessions.clear()
-                _responded_sessions.add(session_id)
 
     with _turn_lock:
         tk = _turn_key.get(chat_id, "") or _turn_key.get(session_clean, "")
