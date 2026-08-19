@@ -25,12 +25,14 @@ CONFIG_REPO="${3:-${CONFIG_REPO:-hermes_agent_context_contatcs}}"
 CONFIG_GITHUB_TOKEN="${4:-$CONFIG_GITHUB_TOKEN}"
 
 # Consolidação dos repositórios e tokens:
-CODE_USER="${HERMES_SETUP_GITHUB_USER:-${DEV_GITHUB_USER:-leoalvesia}}"
+CODE_USER="${HERMES_SETUP_GITHUB_USER:-${DEV_GITHUB_USER:-raizandu}}"
+CODE_REPO="${HERMES_SETUP_GITHUB_REPO:-whatsaya}"
 CODE_TOKEN="$DEV_GITHUB_TOKEN"
 
 echo "=========================================================="
 echo "🤖 CONFIGURADOR DE MODO MISTO DO EMPREENDEDOR SERIAL 🤖"
 echo "           GitHub User  : $CODE_USER"
+echo "           Plugin Repo  : $CODE_REPO"
 echo "           Config Repo  : $CONFIG_REPO"
 if [ -n "$CONFIG_GITHUB_TOKEN" ]; then
 echo "           Config Token : CONFIGURADO (tamanho: ${#CONFIG_GITHUB_TOKEN} caracteres)"
@@ -80,7 +82,7 @@ safe_download() {
 }
 
 # URL Base para os arquivos de código (bridge, plugins, etc.) do GitHub
-RAW_ROOT="https://raw.githubusercontent.com/$CODE_USER/whatsappkit/main"
+RAW_ROOT="https://raw.githubusercontent.com/$CODE_USER/$CODE_REPO/main"
 RAW_URL="$RAW_ROOT/deploy"
 
 # URL para os arquivos de configuração (SOULs, regras, contatos)

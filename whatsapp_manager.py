@@ -124,7 +124,23 @@ class PluginConfig:
 
     @property
     def github_user(self) -> str:
-        return (self.hermes_setup_github_user or self.dev_github_user or "leoalvesia").strip()
+        return (self.hermes_setup_github_user or self.dev_github_user or "raizandu").strip()
+
+    @property
+    def plugin_github_repo(self) -> str:
+        return (os.getenv("HERMES_SETUP_GITHUB_REPO", "whatsaya").strip() or "whatsaya")
+
+    @property
+    def plugin_git_url(self) -> str:
+        return f"https://github.com/{self.github_user}/{self.plugin_github_repo}.git"
+
+    @property
+    def plugin_raw_root(self) -> str:
+        return f"https://raw.githubusercontent.com/{self.github_user}/{self.plugin_github_repo}/main"
+
+    @property
+    def keep_local_plugin(self) -> bool:
+        return os.getenv("KEEP_LOCAL_PLUGIN", "").strip().lower() in {"1", "true", "yes"}
 
     @property
     def whatsapp_owner_number(self) -> str:
@@ -3870,10 +3886,12 @@ def _sanitize_contacts_keys(contacts: dict) -> dict:
 
 def _self_update_plugin_code() -> bool:
     """Atualiza o código do plugin a partir do repositório Git. Retorna True se houve mudanças no próprio plugin."""
-    github_user = config.github_user
-    code_token = config.dev_github_token
+    if config.keep_local_plugin:
+        logger.info("Code Update: KEEP_LOCAL_PLUGIN — pulando auto-update.")
+        return False
 
-    raw_root = f"https://raw.githubusercontent.com/{github_user}/whatsappkit/main"
+    code_token = config.dev_github_token
+    raw_root = config.plugin_raw_root
     plugin_dir = Path("/opt/data/.hermes/plugins/whatsapp-manager")
 
     # NUNCA usar Path(__file__).parent como fallback — isso gravaria dentro do
@@ -3889,7 +3907,7 @@ def _self_update_plugin_code() -> bool:
     if (plugin_dir / ".git").exists():
         try:
             import subprocess
-            git_url = f"https://github.com/{github_user}/whatsappkit.git"
+            git_url = config.plugin_git_url
             
             # Fetch origin main using the token header if available
             fetch_cmd = ["git"]
@@ -7435,7 +7453,7 @@ def register(ctx):
                                     )
                                     time.sleep(3) # Aguarda o GitHub provisionar o branch main
 
-                                    raw_base = "https://raw.githubusercontent.com/leoalvesia/whatsappkit/main/deploy"
+                                    raw_base = f"{config.plugin_raw_root}/deploy"
                                     commit_file_to_repo(repo_user, repo_name, config_token, "/opt/data/SOUL.md", "SOUL.md", f"{raw_base}/SOUL.md")
                                     commit_file_to_repo(repo_user, repo_name, config_token, "/opt/data/SOUL_WHATSAPP.md", "SOUL_WHATSAPP.md", f"{raw_base}/SOUL_WHATSAPP.md")
                                     commit_file_to_repo(repo_user, repo_name, config_token, "/opt/data/SOUL_EMAIL.md", "SOUL_EMAIL.md", f"{raw_base}/SOUL_EMAIL.md")
@@ -7465,8 +7483,7 @@ def register(ctx):
             logger.error(f"Erro no processo automático de configuração de repositório: {repo_err}")
 
         # 3. Bootstrap automático de personas e regras (se ausentes no volume)
-        github_user = config.github_user
-        raw_base_url = f"https://raw.githubusercontent.com/{github_user}/whatsappkit/main/deploy"
+        raw_base_url = f"{config.plugin_raw_root}/deploy"
 
         personal_contacts_path = Path("/opt/data/personal_contacts.json")
         if not personal_contacts_path.exists():
@@ -7526,8 +7543,7 @@ def register(ctx):
                 logger.info(f"✓ google_api.py atualizado em {target_google_api}")
         else:
             # Fallback: baixar do GitHub se não estiver bundled
-            github_user = config.github_user
-            google_api_url = f"https://raw.githubusercontent.com/{github_user}/whatsappkit/main/deploy/scripts/google_api.py"
+            google_api_url = f"{config.plugin_raw_root}/deploy/scripts/google_api.py"
             if not target_google_api.exists():
                 try:
                     with urllib.request.urlopen(google_api_url, timeout=10) as resp:

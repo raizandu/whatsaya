@@ -66,23 +66,24 @@ Mínimo para o bot responder:
 O `command:` do compose clona
 
 ```text
-https://github.com/${HERMES_SETUP_GITHUB_USER:-leoalvesia}/whatsappkit
+https://github.com/${HERMES_SETUP_GITHUB_USER:-raizandu}/${HERMES_SETUP_GITHUB_REPO:-whatsaya}
 ```
 
-Este repositório é `raizandu/whatsaya`. Até o compose apontar para cá, o clone ou vem do kit antigo, ou falha.
+Defaults: usuário `raizandu`, repo `whatsaya`. Sobrescreva só se o fork do cliente tiver outro path.
 
 Depois do primeiro `docker compose up -d`:
 
 1. Confira se o código em `/opt/data/.hermes/plugins/whatsapp-manager` é **este** repo (`plugin.yaml` name `whatsapp-manager`, arquivos `whatsapp_manager.py` + `bridge.js` da raiz).
-2. Se o clone falhou ou veio `whatsappkit`: copie este repo para esse diretório (incluindo `.git` se quiser puxar updates).
-3. **Não edite o plugin no volume.** O próximo boot faz `git fetch` + `reset --hard` e apaga patch local. Correção = commit neste repo + restart.
-4. Habilite o plugin. `plugins.enabled: []` faz o cliente receber o Hermes padrão (`/sethome`), não a persona:
+2. Se o clone falhou: copie este repo para esse diretório (incluindo `.git` se quiser puxar updates).
+3. Correção de código = commit neste repo + restart. O boot faz `fetch` + `reset --hard` na `main`.
+4. Patch temporário no volume: `KEEP_LOCAL_PLUGIN=true` no `.env` e recreate. Sem isso o próximo boot apaga o patch. O auto-update do plugin (`_self_update_plugin_code`) também respeita essa flag.
+5. Habilite o plugin. `plugins.enabled: []` faz o cliente receber o Hermes padrão (`/sethome`), não a persona:
 
 ```bash
 docker compose exec hermes hermes plugins enable whatsapp-manager
 ```
 
-5. Se a sessão Baileys não gravar creds, o diretório costuma estar root-owned. Ajuste para o user do container (na prática, `10000`) e reinicie:
+6. Se a sessão Baileys não gravar creds, o diretório costuma estar root-owned. Ajuste para o user do container (na prática, `10000`) e reinicie:
 
 ```bash
 docker compose exec hermes ls -ld /opt/data/.hermes/platforms/whatsapp/session
