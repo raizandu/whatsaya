@@ -259,6 +259,7 @@ services:
             stt = cfg.get('stt') if isinstance(cfg.get('stt'), dict) else {}
             local = stt.get('local') if isinstance(stt.get('local'), dict) else {}
             stt['enabled'] = True
+            stt['echo_transcripts'] = False
             stt['provider'] = 'local'
             stt['language'] = 'pt'
             local['language'] = 'pt'
