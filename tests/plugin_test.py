@@ -5111,23 +5111,57 @@ class TestOwnerCommands(BaseWhatsAppManagerTest):
         mock_update.assert_called_once()
 
 
+class TestSplitHumanBubbles(unittest.TestCase):
+    """Splitter de bolhas — sem I/O."""
+
+    def test_blank_line_becomes_two_bubbles(self):
+        parts = whatsapp_manager._split_human_bubbles("eita\n\nele capotou aqui, só umas 11h")
+        self.assertEqual(parts, ["eita", "ele capotou aqui, só umas 11h"])
+
+    def test_three_paragraphs_become_three_bubbles(self):
+        parts = whatsapp_manager._split_human_bubbles("oi\n\ncomo vai\n\ntudo bem?")
+        self.assertEqual(parts, ["oi", "como vai", "tudo bem?"])
+
+    def test_more_than_three_paragraphs_are_capped(self):
+        parts = whatsapp_manager._split_human_bubbles("a\n\nb\n\nc\n\nd")
+        self.assertEqual(len(parts), 3)
+        self.assertEqual(parts[0], "a")
+        self.assertEqual(parts[1], "b")
+        self.assertIn("c", parts[2])
+        self.assertIn("d", parts[2])
+
+    def test_short_lines_split(self):
+        parts = whatsapp_manager._split_human_bubbles("opa\nele tá no futebol até umas 21h")
+        self.assertEqual(len(parts), 2)
+        self.assertEqual(parts[0], "opa")
+
+    def test_single_short_message_stays_one_bubble(self):
+        self.assertEqual(whatsapp_manager._split_human_bubbles("só umas 11h"), ["só umas 11h"])
+
+    def test_opener_splits_long_block(self):
+        rest = (
+            "consegui ver a planilha e tem umas pautas boas pra gente fechar ainda hoje "
+            "quando você tiver um tempo pra olhar com calma o que ficou pendente nessa semana"
+        )
+        block = f"Oi! {rest}"
+        self.assertGreater(len(block), 140)
+        parts = whatsapp_manager._split_human_bubbles(block)
+        self.assertEqual(parts[0], "Oi!")
+        self.assertTrue(parts[1].startswith("consegui"))
+
+    def test_url_sentence_is_not_auto_split(self):
+        text = (
+            "Segue o link https://exemplo.com/checkout agora. "
+            "Depois que pagar me manda o comprovante por aqui mesmo combinado?"
+        )
+        self.assertEqual(whatsapp_manager._split_human_bubbles(text), [text])
+
+    def test_empty_returns_empty_list(self):
+        self.assertEqual(whatsapp_manager._split_human_bubbles("   "), [])
+
+
 class TestPostLlmCall(BaseWhatsAppManagerTest):
-    """Testes para o hook post_llm_call — filtragem, dedup de turno e typing."""
-
-    def setUp(self):
-        super().setUp()
-        import whatsapp_manager
-        whatsapp_manager._turn_key.clear()
-        whatsapp_manager._turn_sent.clear()
-        whatsapp_manager._sender_to_chat.clear()
-        whatsapp_manager._responded_sessions.clear()
-
-    def tearDown(self):
-        import whatsapp_manager
-        whatsapp_manager._turn_key.clear()
-        whatsapp_manager._turn_sent.clear()
-        whatsapp_manager._responded_sessions.clear()
-        super().tearDown()
+    """post_llm_call só processa EXEC do dono. Contatos vão em transform_llm_output."""
 
     def _call(self, session_id, response_text, platform="whatsapp"):
         post_llm = self.ctx.hooks.get("post_llm_call")
@@ -5138,141 +5172,15 @@ class TestPostLlmCall(BaseWhatsAppManagerTest):
             assistant_response=response_text,
         )
 
-    @patch("urllib.request.urlopen")
-    @patch("time.sleep")
-    def test_contact_gets_filtered_response(self, mock_sleep, mock_urlopen):
-        """Contato recebe assistant_response filtrado."""
-        mock_urlopen.return_value.__enter__ = lambda s: s
-        mock_urlopen.return_value.__exit__ = MagicMock(return_value=False)
+    def test_contact_session_returns_none(self):
+        """Contato: post_llm_call não envia — Hermes ignora este retorno."""
         result = self._call("5511888888888@s.whatsapp.net", "oi, tudo bem!")
-        self.assertIsNotNone(result)
-        self.assertEqual(result["assistant_response"], "oi, tudo bem!")
+        self.assertIsNone(result)
 
-    @patch("urllib.request.urlopen")
-    @patch("time.sleep")
-    def test_owner_session_returns_none_without_exec(self, mock_sleep, mock_urlopen):
+    def test_owner_session_returns_none_without_exec(self):
         """Owner sem EXEC no response: post_llm_call retorna None (Hermes envia normalmente)."""
         result = self._call("5511999999999@s.whatsapp.net", "resposta normal sem exec")
         self.assertIsNone(result)
-
-    @patch("urllib.request.urlopen")
-    @patch("time.sleep")
-    def test_tool_result_suppressed(self, mock_sleep, mock_urlopen):
-        """Tool results intermediários são suprimidos (espaço)."""
-        mock_urlopen.return_value.__enter__ = lambda s: s
-        mock_urlopen.return_value.__exit__ = MagicMock(return_value=False)
-        result = self._call("5511888888888@s.whatsapp.net", "nothing to save.")
-        self.assertEqual(result["assistant_response"], "")
-
-    @patch("urllib.request.urlopen")
-    @patch("time.sleep")
-    def test_tool_result_ok_suppressed(self, mock_sleep, mock_urlopen):
-        mock_urlopen.return_value.__enter__ = lambda s: s
-        mock_urlopen.return_value.__exit__ = MagicMock(return_value=False)
-        result = self._call("5511888888888@s.whatsapp.net", "ok.")
-        self.assertEqual(result["assistant_response"], "")
-
-    @patch("urllib.request.urlopen")
-    @patch("time.sleep")
-    def test_action_claim_replaced(self, mock_sleep, mock_urlopen):
-        """Afirmações de ação no sistema são substituídas por recusa."""
-        mock_urlopen.return_value.__enter__ = lambda s: s
-        mock_urlopen.return_value.__exit__ = MagicMock(return_value=False)
-        result = self._call("5511888888888@s.whatsapp.net", "pronto, adicionei o contato.")
-        self.assertIn("André", result["assistant_response"])
-        self.assertNotIn("adicionei", result["assistant_response"])
-
-    @patch("urllib.request.urlopen")
-    @patch("time.sleep")
-    def test_phone_number_redacted(self, mock_sleep, mock_urlopen):
-        """Números de telefone são redactados."""
-        mock_urlopen.return_value.__enter__ = lambda s: s
-        mock_urlopen.return_value.__exit__ = MagicMock(return_value=False)
-        result = self._call("5511888888888@s.whatsapp.net", "ligue para 11999887766 ok?")
-        self.assertIn("[número omitido]", result["assistant_response"])
-
-    @patch("urllib.request.urlopen")
-    @patch("time.sleep")
-    def test_turn_dedup_suppresses_second_call(self, mock_sleep, mock_urlopen):
-        """Segundo post_llm_call para o mesmo turno é suprimido."""
-        import whatsapp_manager
-        mock_urlopen.return_value.__enter__ = lambda s: s
-        mock_urlopen.return_value.__exit__ = MagicMock(return_value=False)
-
-        session = "5511888888888@s.whatsapp.net"
-        whatsapp_manager._turn_key[session] = "turno-abc"
-
-        r1 = self._call(session, "primeira resposta")
-        self.assertEqual(r1["assistant_response"], "primeira resposta")
-
-        r2 = self._call(session, "segunda resposta duplicada")
-        self.assertEqual(r2["assistant_response"], "")
-
-    @patch("whatsapp_manager._persist_turn_sent_to_disk")
-    @patch("urllib.request.urlopen")
-    @patch("time.sleep")
-    def test_turn_dedup_survives_restart(self, mock_sleep, mock_urlopen, mock_persist):
-        """Turno já enviado antes de um restart (chave carregada do disco) deve ser suprimido.
-
-        Cenário: container reinicia após responder ao Jardel (+60). _turn_sent é restaurado do
-        disco com a chave do turno. O Hermes reenvia a mensagem. pre_llm_call NÃO deve remover
-        a chave de _turn_sent; post_llm_call deve suprimir a resposta duplicada.
-        """
-        import whatsapp_manager, hashlib
-        mock_urlopen.return_value.__enter__ = lambda s: s
-        mock_urlopen.return_value.__exit__ = MagicMock(return_value=False)
-
-        chat_id = "60314276073511@s.whatsapp.net"
-        user_msg = "oi tudo bem"
-        tk = chat_id + ":" + hashlib.md5(user_msg.encode()).hexdigest()
-
-        # Simula estado restaurado do disco após restart: _turn_sent contém tk, _turn_key vazio
-        whatsapp_manager._turn_sent.add(tk)
-        # _turn_key está vazio (restart apagou memória)
-
-        # Simula pre_llm_call chegando com a mesma mensagem (retry pós-restart) — direto na lógica
-        with whatsapp_manager._turn_lock:
-            old_tk = whatsapp_manager._turn_key.get(chat_id)
-            if old_tk != tk:
-                whatsapp_manager._turn_key[chat_id] = tk
-                if old_tk:
-                    whatsapp_manager._turn_sent.discard(old_tk)
-
-        # tk NÃO deve ter sido removido de _turn_sent (old_tk era None, não foi descartado)
-        self.assertIn(tk, whatsapp_manager._turn_sent, "pre_llm_call removeu tk restaurado do disco!")
-
-        # post_llm_call deve suprimir a resposta duplicada
-        r = self._call(chat_id, "olá Jardel!")
-        self.assertEqual(r["assistant_response"], "", "Duplicata pós-restart não foi suprimida!")
-
-    @patch("urllib.request.urlopen")
-    @patch("time.sleep")
-    def test_typing_indicator_called(self, mock_sleep, mock_urlopen):
-        """Typing indicator é enviado via HTTP antes de retornar."""
-        mock_urlopen.return_value.__enter__ = lambda s: s
-        mock_urlopen.return_value.__exit__ = MagicMock(return_value=False)
-        self._call("5511888888888@s.whatsapp.net", "olá!")
-        mock_urlopen.assert_called_once()
-        call_args = mock_urlopen.call_args[0][0]
-        self.assertIn("/typing", call_args.full_url)
-
-    @patch("urllib.request.urlopen")
-    @patch("time.sleep")
-    def test_sleep_called_after_typing(self, mock_sleep, mock_urlopen):
-        """Sleep proporcional é chamado após o typing indicator."""
-        mock_urlopen.return_value.__enter__ = lambda s: s
-        mock_urlopen.return_value.__exit__ = MagicMock(return_value=False)
-        self._call("5511888888888@s.whatsapp.net", "mensagem de teste")
-        mock_sleep.assert_called_once()
-
-    @patch("urllib.request.urlopen")
-    @patch("time.sleep")
-    def test_typing_failure_does_not_crash(self, mock_sleep, mock_urlopen):
-        """Falha no typing indicator não interrompe o retorno da resposta."""
-        mock_urlopen.side_effect = Exception("bridge offline")
-        result = self._call("5511888888888@s.whatsapp.net", "tudo certo!")
-        self.assertIsNotNone(result)
-        self.assertEqual(result["assistant_response"], "tudo certo!")
 
     def test_non_whatsapp_platform_returns_none(self):
         """Plataformas que não são whatsapp passam sem filtro."""
@@ -5281,8 +5189,7 @@ class TestPostLlmCall(BaseWhatsAppManagerTest):
 
     def test_empty_response_returns_none(self):
         """Response vazio retorna None."""
-        post_llm = self.ctx.hooks.get("post_llm_call")
-        result = post_llm("post_llm_call", platform="whatsapp", session_id="5511888888888@s.whatsapp.net", assistant_response="")
+        result = self._call("5511888888888@s.whatsapp.net", "")
         self.assertIsNone(result)
 
     @patch("whatsapp_manager._update_contact_fields", return_value="✅ Contato atualizado.")
@@ -5295,6 +5202,147 @@ class TestPostLlmCall(BaseWhatsAppManagerTest):
         self.assertIsNotNone(result)
         mock_update.assert_called_once()
         self.assertNotIn("EXEC:", result["assistant_response"])
+
+
+class TestTransformLlmOutput(BaseWhatsAppManagerTest):
+    """Hook que envia bolhas e devolve whitespace para o Hermes não reenviar o bloco."""
+
+    def setUp(self):
+        super().setUp()
+        whatsapp_manager._turn_key.clear()
+        whatsapp_manager._turn_sent.clear()
+        whatsapp_manager._sender_to_chat.clear()
+        whatsapp_manager._responded_sessions.clear()
+
+    def tearDown(self):
+        whatsapp_manager._turn_key.clear()
+        whatsapp_manager._turn_sent.clear()
+        whatsapp_manager._responded_sessions.clear()
+        super().tearDown()
+
+    def _call(self, session_id, response_text, platform="whatsapp"):
+        hook = self.ctx.hooks.get("transform_llm_output")
+        self.assertIsNotNone(hook)
+        return hook(
+            "transform_llm_output",
+            platform=platform,
+            session_id=session_id,
+            assistant_response=response_text,
+        )
+
+    @patch("whatsapp_manager._human_send")
+    def test_contact_sends_bubbles_and_returns_whitespace(self, mock_send):
+        result = self._call("5511888888888@s.whatsapp.net", "oi, tudo bem!")
+        self.assertEqual(result, "\n")
+        mock_send.assert_called_once_with("5511888888888@s.whatsapp.net", "oi, tudo bem!")
+
+    @patch("whatsapp_manager._human_send")
+    def test_blank_line_is_kept_for_the_splitter(self, mock_send):
+        text = "eita\n\nele capotou aqui, só umas 11h"
+        result = self._call("5511888888888@s.whatsapp.net", text)
+        self.assertEqual(result, "\n")
+        mock_send.assert_called_once_with("5511888888888@s.whatsapp.net", text)
+
+    @patch("whatsapp_manager._human_send")
+    def test_owner_session_returns_none(self, mock_send):
+        result = self._call("5511999999999@s.whatsapp.net", "resposta do dono")
+        self.assertIsNone(result)
+        mock_send.assert_not_called()
+
+    def test_non_whatsapp_platform_returns_none(self):
+        result = self._call("5511888888888@s.whatsapp.net", "oi", platform="telegram")
+        self.assertIsNone(result)
+
+    @patch("whatsapp_manager._human_send")
+    def test_tool_result_suppressed(self, mock_send):
+        result = self._call("5511888888888@s.whatsapp.net", "nothing to save.")
+        self.assertEqual(result, "\n")
+        mock_send.assert_not_called()
+
+    @patch("whatsapp_manager._human_send")
+    def test_tool_result_ok_suppressed(self, mock_send):
+        result = self._call("5511888888888@s.whatsapp.net", "ok.")
+        self.assertEqual(result, "\n")
+        mock_send.assert_not_called()
+
+    @patch("whatsapp_manager._human_send")
+    def test_action_claim_replaced(self, mock_send):
+        result = self._call("5511888888888@s.whatsapp.net", "pronto, adicionei o contato.")
+        self.assertEqual(result, "\n")
+        sent = mock_send.call_args[0][1]
+        self.assertIn("André", sent)
+        self.assertNotIn("adicionei", sent)
+
+    @patch("whatsapp_manager._human_send")
+    def test_phone_number_redacted(self, mock_send):
+        result = self._call("5511888888888@s.whatsapp.net", "ligue para 11999887766 ok?")
+        self.assertEqual(result, "\n")
+        sent = mock_send.call_args[0][1]
+        self.assertIn("[número omitido]", sent)
+        self.assertNotIn("11999887766", sent)
+
+    @patch("whatsapp_manager._human_send")
+    def test_turn_dedup_suppresses_second_call(self, mock_send):
+        session = "5511888888888@s.whatsapp.net"
+        whatsapp_manager._turn_key[session] = "turno-abc"
+
+        r1 = self._call(session, "primeira resposta")
+        self.assertEqual(r1, "\n")
+        r2 = self._call(session, "segunda resposta duplicada")
+        self.assertEqual(r2, "\n")
+        mock_send.assert_called_once()
+
+    @patch("whatsapp_manager._persist_turn_sent_to_disk")
+    @patch("whatsapp_manager._human_send")
+    def test_turn_dedup_survives_restart(self, mock_send, mock_persist):
+        import hashlib
+
+        chat_id = "60314276073511@s.whatsapp.net"
+        user_msg = "oi tudo bem"
+        tk = chat_id + ":" + hashlib.md5(user_msg.encode()).hexdigest()
+        whatsapp_manager._turn_sent.add(tk)
+
+        with whatsapp_manager._turn_lock:
+            old_tk = whatsapp_manager._turn_key.get(chat_id)
+            if old_tk != tk:
+                whatsapp_manager._turn_key[chat_id] = tk
+                if old_tk:
+                    whatsapp_manager._turn_sent.discard(old_tk)
+
+        self.assertIn(tk, whatsapp_manager._turn_sent)
+        r = self._call(chat_id, "olá Jardel!")
+        self.assertEqual(r, "\n")
+        mock_send.assert_not_called()
+
+    @patch("whatsapp_manager._human_send", side_effect=RuntimeError("bridge offline"))
+    def test_send_failure_returns_filtered_text(self, mock_send):
+        result = self._call("5511888888888@s.whatsapp.net", "tudo certo!")
+        self.assertEqual(result, "tudo certo!")
+
+    @patch("whatsapp_manager._human_send")
+    def test_mapped_session_resolves_chat_id(self, mock_send):
+        whatsapp_manager._sender_to_chat["sessao-uuid"] = "5511888888888@s.whatsapp.net"
+        result = self._call("sessao-uuid", "opa")
+        self.assertEqual(result, "\n")
+        mock_send.assert_called_once_with("5511888888888@s.whatsapp.net", "opa")
+
+
+class TestWhatsAppAdapterWhitespace(unittest.TestCase):
+    """Adapter não reenvia o whitespace que transform_llm_output devolve ao Hermes."""
+
+    @patch("urllib.request.urlopen")
+    def test_whitespace_send_is_skipped(self, mock_urlopen):
+        from adapter import WhatsAppPlatformAdapter
+        adapter = WhatsAppPlatformAdapter()
+        self.assertTrue(adapter.send("5511888888888@s.whatsapp.net", "\n"))
+        mock_urlopen.assert_not_called()
+
+    @patch("urllib.request.urlopen")
+    def test_empty_send_is_skipped(self, mock_urlopen):
+        from adapter import WhatsAppPlatformAdapter
+        adapter = WhatsAppPlatformAdapter()
+        self.assertTrue(adapter.send("5511888888888@s.whatsapp.net", "   "))
+        mock_urlopen.assert_not_called()
 
 
 class TestPreToolCall(BaseWhatsAppManagerTest):

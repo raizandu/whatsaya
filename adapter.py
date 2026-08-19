@@ -74,6 +74,10 @@ class WhatsAppPlatformAdapter(BasePlatformAdapter):
         except ImportError:
             pass
 
+        if not (content or "").strip():
+            logger.info(f"[whatsapp-adapter] skipping whitespace-only send to {chat_id}")
+            return True
+
         try:
             payload = json.dumps({"chatId": chat_id, "text": content}).encode("utf-8")
             req = urllib.request.Request(
