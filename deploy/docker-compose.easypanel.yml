@@ -270,6 +270,19 @@ services:
             openai.setdefault('model', 'whisper-1')
             stt['openai'] = openai
             cfg['stt'] = stt
+            tts = cfg.get('tts') if isinstance(cfg.get('tts'), dict) else {}
+            tts['provider'] = 'fishaudio'
+            providers = tts.get('providers') if isinstance(tts.get('providers'), dict) else {}
+            providers['fishaudio'] = {
+                'type': 'command',
+                'command': 'python3 /opt/data/.hermes/scripts/fish_tts.py {input_path} {output_path} {format}',
+                'timeout': 60,
+            }
+            tts['providers'] = providers
+            cfg['tts'] = tts
+            voice = cfg.get('voice') if isinstance(cfg.get('voice'), dict) else {}
+            voice['auto_tts'] = True
+            cfg['voice'] = voice
             with open(path, 'w') as f:
                 yaml.dump(cfg, f, default_flow_style=False)
 
@@ -391,6 +404,9 @@ services:
       - HERMES_SETUP_GITHUB_REPO=${HERMES_SETUP_GITHUB_REPO:-whatsaya}
       - KEEP_LOCAL_PLUGIN=${KEEP_LOCAL_PLUGIN:-}
       - HERMES_LOCAL_STT_LANGUAGE=${HERMES_LOCAL_STT_LANGUAGE:-pt}
+      - FISH_API_KEY=${FISH_API_KEY:-}
+      - FISH_REFERENCE_ID=${FISH_REFERENCE_ID:-}
+      - FISH_TTS_MODEL=${FISH_TTS_MODEL:-s2.1-pro-free}
       - CONFIG_REPO=${CONFIG_REPO:-hermes_agent_context_contatcs}
       - CONFIG_GITHUB_TOKEN=${CONFIG_GITHUB_TOKEN:-}
 
