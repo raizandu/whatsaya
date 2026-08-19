@@ -365,6 +365,8 @@ services:
             'WHATSAPP_CLIENT_PROVIDER': client_provider,
             'WHATSAPP_OWNER_MODEL': owner_model,
             'WHATSAPP_OWNER_PROVIDER': owner_provider,
+            'WHATSAPP_FOLLOWUP_ENABLED': os.environ.get('WHATSAPP_FOLLOWUP_ENABLED') or 'true',
+            'WHATSAPP_FOLLOWUP_SILENCE_MIN': os.environ.get('WHATSAPP_FOLLOWUP_SILENCE_MIN') or '30',
         }
         for env_path in ['/opt/data/.hermes/.env',
                          '/opt/data/.hermes/profiles/whatsapp/.env']:
@@ -504,6 +506,8 @@ services:
       - FISH_TTS_MODEL=${FISH_TTS_MODEL:-s2.1-pro-free}
       - FISH_TTS_VOLUME=${FISH_TTS_VOLUME:-4}
       - WHATSAPP_INBOUND_BUFFER_S=${WHATSAPP_INBOUND_BUFFER_S:-0}
+      - WHATSAPP_FOLLOWUP_ENABLED=${WHATSAPP_FOLLOWUP_ENABLED:-true}
+      - WHATSAPP_FOLLOWUP_SILENCE_MIN=${WHATSAPP_FOLLOWUP_SILENCE_MIN:-30}
       - CONFIG_REPO=${CONFIG_REPO:-hermes_agent_context_contatcs}
       - CONFIG_GITHUB_TOKEN=${CONFIG_GITHUB_TOKEN:-}
 

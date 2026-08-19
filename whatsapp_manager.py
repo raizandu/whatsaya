@@ -325,6 +325,167 @@ _DEDUP_LOG_PATH = Path("/opt/data/.hermes/dedup_suppressed.log")
 _TURN_SENT_PATH = Path("/opt/data/.hermes/turn_sent_state.json")
 _TURN_SENT_TTL_S = 3600  # 1 hora
 
+# Follow-up de silêncio: se o cliente não fala por N minutos, manda uma mensagem.
+_FOLLOWUP_PATH = Path("/opt/data/.hermes/whatsapp_followups.json")
+_FOLLOWUP_LOCK = threading.Lock()
+_FOLLOWUP_SKIP_REL = {
+    "amigo", "amigoproximo", "parente", "filho", "pessoal",
+    "namorada", "namorado", "esposa", "marido",
+    "mãe", "mae", "pai", "filha", "irmão", "irmao", "irmã", "irma",
+}
+
+
+def _followup_enabled() -> bool:
+    flag = _followup_env("WHATSAPP_FOLLOWUP_ENABLED", "true").strip().lower()
+    return flag not in {"0", "false", "no", "off"}
+
+
+def _followup_env(name: str, default: str = "") -> str:
+    val = os.getenv(name)
+    if val:
+        return val
+    for path in (Path("/opt/data/.hermes/.env"), Path("/opt/data/.hermes/profiles/whatsapp/.env")):
+        try:
+            if not path.exists():
+                continue
+            for line in path.read_text(encoding="utf-8").splitlines():
+                raw = line.strip()
+                if raw.startswith("#") or "=" not in raw:
+                    continue
+                key, _, value = raw.partition("=")
+                if key.strip() == name:
+                    return value.strip().strip('"').strip("'")
+        except OSError:
+            continue
+    return default
+
+
+def _followup_silence_s() -> int:
+    try:
+        minutes = int(_followup_env("WHATSAPP_FOLLOWUP_SILENCE_MIN", "30"))
+    except (TypeError, ValueError):
+        minutes = 30
+    return max(60, minutes * 60)
+
+
+def _followup_load() -> dict:
+    try:
+        if _FOLLOWUP_PATH.exists():
+            data = json.loads(_FOLLOWUP_PATH.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+    except (OSError, ValueError, json.JSONDecodeError):
+        pass
+    return {}
+
+
+def _followup_save(data: dict) -> None:
+    _FOLLOWUP_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _FOLLOWUP_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _followup_is_due(rec: dict, now: float, silence_s: int) -> bool:
+    last_client = rec.get("last_client")
+    if not last_client:
+        return False
+    if rec.get("followup_sent_at"):
+        return False
+    return (now - float(last_client)) >= silence_s
+
+
+def _followup_note_activity(chat_id: str, *, inbound: bool = False) -> None:
+    if not chat_id or not _followup_enabled():
+        return
+    with _FOLLOWUP_LOCK:
+        data = _followup_load()
+        rec = data.setdefault(str(chat_id), {})
+        rec["last_activity"] = time.time()
+        if inbound:
+            rec["last_client"] = time.time()
+            rec["followup_sent_at"] = None
+        _followup_save(data)
+
+
+def _followup_cancel(chat_id: str) -> None:
+    if not chat_id:
+        return
+    with _FOLLOWUP_LOCK:
+        data = _followup_load()
+        rec = data.get(str(chat_id))
+        if not rec:
+            return
+        rec["followup_sent_at"] = time.time()
+        rec["last_client"] = time.time()
+        _followup_save(data)
+
+
+def _followup_text(chat_id: str) -> str:
+    name = ""
+    try:
+        pc_path = Path("/opt/data/personal_contacts.json")
+        if pc_path.exists():
+            pc = json.loads(pc_path.read_text(encoding="utf-8"))
+            info = pc.get(chat_id) or {}
+            name = (info.get("spoken_name") or info.get("nickname") or info.get("name") or "").strip()
+            if name and not _is_usable_person_name(name):
+                name = ""
+    except Exception:
+        name = ""
+    if name:
+        return f"{name}, ainda tá por aí? qualquer coisa é só chamar"
+    return "ainda tá por aí? qualquer coisa é só chamar"
+
+
+def _followup_skip_contact(chat_id: str) -> bool:
+    try:
+        pc_path = Path("/opt/data/personal_contacts.json")
+        if not pc_path.exists():
+            return False
+        pc = json.loads(pc_path.read_text(encoding="utf-8"))
+        info = pc.get(chat_id) or {}
+        rel = f"{info.get('relationship') or ''} {info.get('manual_relationship') or ''}".lower()
+        return any(token in rel for token in _FOLLOWUP_SKIP_REL)
+    except Exception:
+        return False
+
+
+def _tick_followups() -> int:
+    if not _followup_enabled():
+        return 0
+    if _check_bot_paused():
+        return 0
+    silence_s = _followup_silence_s()
+    now = time.time()
+    sent = 0
+    with _FOLLOWUP_LOCK:
+        data = _followup_load()
+        for chat_id, rec in list(data.items()):
+            if not isinstance(rec, dict) or not _followup_is_due(rec, now, silence_s):
+                continue
+            if _check_chat_silenced(chat_id) or _followup_skip_contact(chat_id):
+                continue
+            try:
+                _human_send(chat_id, _followup_text(chat_id))
+                rec["followup_sent_at"] = now
+                rec["last_activity"] = now
+                sent += 1
+                logger.info(f"[followup] enviado chat={chat_id!r} after={int(now - float(rec.get('last_client') or now))}s")
+            except Exception as err:
+                logger.warning(f"[followup] falhou chat={chat_id!r}: {err}")
+        if sent:
+            _followup_save(data)
+    return sent
+
+
+def _run_followup_loop() -> None:
+    time.sleep(8)
+    while True:
+        try:
+            _tick_followups()
+        except Exception as err:
+            logger.error(f"[followup] loop: {err}")
+        time.sleep(15)
+
 
 def _load_turn_sent_from_disk() -> None:
     """Restaura _turn_sent do disco na inicialização, ignorando entradas expiradas."""
@@ -7185,6 +7346,10 @@ def pre_gateway_dispatch(*args, **kwargs):
 
     # Se for mensagem manual enviada pelo dono no WhatsApp para outro contato, pulamos a resposta do LLM
     if is_owner and not is_self_chat:
+        try:
+            _followup_cancel(str(event.source.chat_id) if event.source.chat_id else "")
+        except Exception:
+            pass
         return {"action": "skip", "reason": "owner-manual-message"}
 
     # Ignorar mensagens de status do bot (stop_bot/start_bot responses)
@@ -7209,6 +7374,9 @@ def pre_gateway_dispatch(*args, **kwargs):
         # Verificar se a conversa específica está silenciada temporariamente
         if chat_id and _check_chat_silenced(chat_id):
             return {"action": "skip", "reason": "conversa-silenciada"}
+
+        if chat_id:
+            _followup_note_activity(chat_id, inbound=True)
 
         if chat_id and sender_id:
             _sender_to_chat[sender_id] = chat_id
@@ -8422,3 +8590,12 @@ def register(ctx):
         logger.info("✅ Agendador periódico (24h) de sincronização iniciado com sucesso.")
     except Exception as thread_err:
         logger.warning(f"Não foi possível iniciar o agendador periódico: {thread_err}")
+
+    try:
+        threading.Thread(target=_run_followup_loop, daemon=True).start()
+        logger.info(
+            "✅ Follow-up de silêncio iniciado (%s min)",
+            os.getenv("WHATSAPP_FOLLOWUP_SILENCE_MIN", "30"),
+        )
+    except Exception as follow_err:
+        logger.warning(f"Não foi possível iniciar o follow-up: {follow_err}")

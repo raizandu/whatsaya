@@ -3,6 +3,7 @@
 import os
 import json
 import sqlite3
+import time
 import urllib.error
 import unittest
 import sys
@@ -5164,6 +5165,25 @@ class TestOwnerCommands(BaseWhatsAppManagerTest):
         self.assertEqual(result["action"], "skip")
         self.assertEqual(result["reason"], "update-contact-disambiguate")
         mock_update.assert_called_once()
+
+
+class TestSilenceFollowup(unittest.TestCase):
+    def test_due_after_silence_and_resets_on_inbound(self):
+        now = time.time()
+        rec = {"last_client": now - 301, "followup_sent_at": None}
+        self.assertTrue(whatsapp_manager._followup_is_due(rec, now, 300))
+        rec["followup_sent_at"] = now
+        self.assertFalse(whatsapp_manager._followup_is_due(rec, now, 300))
+        rec = {"last_client": now - 10, "followup_sent_at": None}
+        self.assertFalse(whatsapp_manager._followup_is_due(rec, now, 300))
+        rec = {}
+        self.assertFalse(whatsapp_manager._followup_is_due(rec, now, 300))
+
+    def test_silence_minutes_env(self):
+        with patch.dict(os.environ, {"WHATSAPP_FOLLOWUP_SILENCE_MIN": "5"}):
+            self.assertEqual(whatsapp_manager._followup_silence_s(), 300)
+        with patch.dict(os.environ, {"WHATSAPP_FOLLOWUP_SILENCE_MIN": "30"}):
+            self.assertEqual(whatsapp_manager._followup_silence_s(), 1800)
 
 
 class TestSplitHumanBubbles(unittest.TestCase):
