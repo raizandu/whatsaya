@@ -135,15 +135,7 @@ class TestHumanSendSplit(unittest.TestCase):
     """Lógica de split de mensagem em bolhas (sem I/O real)."""
 
     def _get_parts(self, message: str) -> list[str]:
-        """Replica a lógica de split do _human_send."""
-        parts = [p.strip() for p in message.split("\n\n") if p.strip()]
-        if len(parts) == 1:
-            parts = [p.strip() for p in message.split("\n") if p.strip()]
-            if len(parts) == 2 and len(parts[0]) <= 60:
-                pass
-            else:
-                parts = [message.strip()]
-        return parts
+        return wm._split_human_bubbles(message)
 
     def test_dois_paragrafos_vira_duas_bolhas(self):
         msg = "eita\n\nele capotou aqui, só umas 11h"
@@ -199,25 +191,33 @@ class TestPostLlmCallRoteamento(unittest.TestCase):
             result = self._call(owner, "Tudo certo por aqui!")
         self.assertIsNone(result)
 
-    def test_contato_chama_human_send(self):
-        """Contato não-owner deve chamar _human_send e retornar assistant_response vazio."""
+    def test_contato_post_llm_nao_envia(self):
+        """Contato: post_llm_call retorna None; o envio ficou em transform_llm_output."""
+        result = self._call("contato_session", "ele capotou aqui kk")
+        self.assertIsNone(result)
+
+    def test_contato_transform_envia_bolhas(self):
+        """Contato não-owner: transform_llm_output chama _human_send e devolve whitespace."""
         wm._sender_to_chat["contato_session"] = "558699997003@s.whatsapp.net"
         sent = []
 
         def fake_human_send(chat_id, message):
             sent.append((chat_id, message))
 
-        # post_llm_call.__globals__ é o namespace do exec — patchear lá diretamente
-        globs = wm.post_llm_call.__globals__
+        globs = wm.transform_llm_output.__globals__
         orig = globs["_human_send"]
         globs["_human_send"] = fake_human_send
         try:
             with patch.dict(os.environ, {"WHATSAPP_OWNER_NUMBER": "5511000000000"}):
-                result = self._call("contato_session", "ele capotou aqui kk")
+                result = wm.transform_llm_output(
+                    session_id="contato_session",
+                    assistant_response="ele capotou aqui kk",
+                    platform="whatsapp",
+                )
         finally:
             globs["_human_send"] = orig
 
-        self.assertEqual(result, {"assistant_response": ""})
+        self.assertEqual(result, "\n")
         self.assertEqual(len(sent), 1)
         self.assertEqual(sent[0][0], "558699997003@s.whatsapp.net")
 
@@ -229,12 +229,16 @@ class TestPostLlmCallRoteamento(unittest.TestCase):
         def fake_human_send(chat_id, message):
             sent.append(message)
 
-        globs = wm.post_llm_call.__globals__
+        globs = wm.transform_llm_output.__globals__
         orig = globs["_human_send"]
         globs["_human_send"] = fake_human_send
         try:
             with patch.dict(os.environ, {"WHATSAPP_OWNER_NUMBER": "5511000000000"}):
-                self._call("contato_session2", "O número dela é 558698036699")
+                wm.transform_llm_output(
+                    session_id="contato_session2",
+                    assistant_response="O número dela é 558698036699",
+                    platform="whatsapp",
+                )
         finally:
             globs["_human_send"] = orig
 

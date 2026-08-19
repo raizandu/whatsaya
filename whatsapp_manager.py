@@ -706,12 +706,49 @@ MESSAGE_SERVER_URL = config.message_server_url
 BRIDGE_URL = config.whatsapp_bridge_url
 
 
-def _human_send(chat_id: str, message: str) -> None:
-    """Envia mensagem simulando comportamento humano: typing + delay proporcional ao texto.
+_BUBBLE_OPENER = re.compile(
+    r"^(oii+|oi+|opa+|ol[áa]|eita|entendi|legal|perfeito|claro|show|beleza|certo|pode ser|boa)[.!?…]*\s+",
+    re.IGNORECASE,
+)
+_NO_AUTO_SPLIT = re.compile(r"https?://|\bpix\b", re.IGNORECASE)
 
-    Se a mensagem tiver duas partes separadas por '\\n\\n', envia como duas bolhas distintas
-    com um pequeno intervalo entre elas.
+
+def _split_human_bubbles(message: str) -> list[str]:
+    """Quebra a resposta em 1–3 bolhas curtas, estilo WhatsApp humano.
+
+    Prioridade: parágrafos separados por linha em branco; depois 2–3 linhas
+    curtas; por último um abridor curto ("oi", "eita") ou a primeira frase
+    de um bloco longo. Links e menções a PIX não são cortados no meio.
     """
+    text = (message or "").strip()
+    if not text:
+        return []
+
+    parts = [p.strip() for p in re.split(r"\n\s*\n+", text) if p.strip()]
+    if len(parts) == 1:
+        lines = [p.strip() for p in text.split("\n") if p.strip()]
+        if 2 <= len(lines) <= 3 and all(len(line) <= 180 for line in lines):
+            parts = lines
+
+    if len(parts) == 1 and len(parts[0]) > 140:
+        block = parts[0]
+        opener = _BUBBLE_OPENER.match(block)
+        if opener and len(block) - opener.end() >= 20:
+            parts = [opener.group(0).strip(), block[opener.end():].strip()]
+        else:
+            sentence = re.search(r"^(.{20,140}?[.!?…])\s+", block)
+            if sentence and not _NO_AUTO_SPLIT.search(sentence.group(1)):
+                parts = [sentence.group(1).strip(), block[sentence.end():].strip()]
+
+    cleaned = [re.sub(r"[ \t]+\n", "\n", p).strip() for p in parts if p and p.strip()]
+    cleaned = [re.sub(r"[ \t]{2,}", " ", p) for p in cleaned]
+    if len(cleaned) > 3:
+        cleaned = cleaned[:2] + ["\n".join(cleaned[2:])]
+    return cleaned or [text]
+
+
+def _human_send(chat_id: str, message: str) -> None:
+    """Envia mensagem simulando comportamento humano: typing + delay + bolhas."""
     import random
 
     def _typing(cid: str) -> None:
@@ -731,24 +768,17 @@ def _human_send(chat_id: str, message: str) -> None:
         with urllib.request.urlopen(req, timeout=10):
             pass
 
-    # Divide em partes se o LLM devolver dois parágrafos
-    parts = [p.strip() for p in message.split("\n\n") if p.strip()]
-    if len(parts) == 1:
-        parts = [p.strip() for p in message.split("\n") if p.strip()]
-        # Só divide se tiver exatamente 2 linhas e a primeira for curta (reação)
-        if len(parts) == 2 and len(parts[0]) <= 60:
-            pass  # mantém as duas partes
-        else:
-            parts = [message.strip()]
-
+    parts = _split_human_bubbles(message)
+    if not parts:
+        return
+    logger.info(f"[human-send] chat={chat_id!r} bubbles={len(parts)} sizes={[len(p) for p in parts]}")
     for i, part in enumerate(parts):
         _typing(chat_id)
-        # Delay: ~50ms por caractere + jitter humano, entre 1s e 5s
-        delay = min(max(len(part) * 0.05 + random.uniform(0.5, 1.5), 1.0), 5.0)
+        delay = min(max(len(part) * 0.045 + random.uniform(0.4, 1.2), 0.8), 4.0)
         time.sleep(delay)
         _send_one(chat_id, part)
         if i < len(parts) - 1:
-            time.sleep(random.uniform(0.8, 1.5))
+            time.sleep(random.uniform(0.6, 1.3))
 
 
 def _normalize_brazilian_phone(phone: str) -> str:
@@ -760,6 +790,18 @@ def _normalize_brazilian_phone(phone: str) -> str:
         if len(rest) == 9 and rest.startswith("9"):
             clean = f"55{ddd}{rest[1:]}"
     return clean
+
+
+def _session_is_owner(session_id: str) -> bool:
+    """True se o session_id do Hermes é o WhatsApp do dono."""
+    owner_number = config.whatsapp_owner_number
+    if not owner_number or not session_id:
+        return False
+    clean_session = "".join(c for c in session_id.split("@")[0].split(":")[0] if c.isdigit())
+    clean_owner = "".join(c for c in owner_number.split("@")[0].split(":")[0] if c.isdigit())
+    if clean_session and clean_owner:
+        return _normalize_brazilian_phone(clean_session) == _normalize_brazilian_phone(clean_owner)
+    return False
 
 
 def _check_bot_paused() -> bool:
@@ -5146,8 +5188,9 @@ def _build_personal_prompt(contact_info: dict, relationship: str, history_sectio
             f"- Máximo 1-2 frases por resposta. Sem introduções, sem despedidas.\n"
             "- Escreva como WhatsApp real: 'kk', '..', 'né', minúsculas normais.\n"
             f"- NUNCA comece com saudação ('Olá', 'Oi!', 'Fala!', 'Boa tarde').\n"
-            "- NUNCA use listas, tópicos, parágrafos ou texto estruturado.\n"
-            "- NUNCA use quebra de linha (\\n) na resposta. Tudo em uma única linha contínua.\n"
+            "- NUNCA use listas, tópicos ou texto estruturado.\n"
+            "- Separe reação e recado em duas bolhas com uma linha em branco (\\n\\n) entre elas. "
+            "Ex: 'eita\\n\\nele capotou aqui, só umas 11h'. Uma ideia por bolha.\n"
             f"- Status ativo → 1 frase casual. Ex: '{owner_name} capotou aqui, só umas 11h'\n"
             "- Perguntaram quem você é → resposta ultra curta. Ex: 'assistente dele'\n"
             f"- Se houver apelido do contato, use-o naturalmente na resposta.\n"
@@ -5277,7 +5320,9 @@ def _build_support_prompt(
             "REGRAS DE FORMATO — sem exceção:\n"
             "- Respostas curtas: máximo 2-3 frases. WhatsApp não é e-mail.\n"
             "- Sem introduções longas, sem despedidas, sem enrolação.\n"
-            "- Escreva como WhatsApp real: natural, direto, em português.\n\n"
+            "- Escreva como WhatsApp real: natural, direto, em português.\n"
+            "- Separe ideias com uma linha em branco (\\n\\n). O plugin envia cada parágrafo "
+            "como uma mensagem diferente. Máximo 2 ou 3 bolhas.\n\n"
             "CONSTRAINTS ABSOLUTAS — NUNCA VIOLE:\n"
             f"- NUNCA afirme que fez ou consegue fazer qualquer ação no sistema — editar arquivos, atualizar perfis, incluir informações, executar scripts, criar cron ou acessar servidor.\n"
             "- Se pedirem algo técnico: recuse. Ex: 'isso não é algo que posso fazer por aqui'\n"
@@ -7153,10 +7198,121 @@ _EXEC_PATTERN = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 
+_TOOL_RESULT_PATTERNS = [
+    r"nothing to save\.?", r"nada para salvar\.?",
+    r"^saved\.$", r"^ok\.$",
+    r"\[tool result\]", r"tool_result:",
+    r"^nothing\.$",
+]
+_ACTION_CLAIM_PATTERNS = [
+    r"pronto[,.]?\s*(inclu|adicion|edit|atualiz|salv|modific|coloc|registr)",
+    r"(inclu|adicion|edit|atualiz|salv|modific)i\b",
+    r"(fiz|feit[oa]|execut|realiz)\b.*\b(isso|alteraç|ediç|inclusão)",
+    r"já (adicion|inclu|registr|atualiz|salv)",
+]
+
+
+def _prepare_contact_reply(response_text: str) -> str:
+    """Filtra a resposta de contato. String vazia = suprimir o envio."""
+    clean_text = _EXEC_PATTERN.sub("", response_text or "").strip()
+    if any(re.search(p, clean_text, re.IGNORECASE) for p in _TOOL_RESULT_PATTERNS):
+        logger.warning(f"[contact-reply] Tool result filtrado: {clean_text!r}")
+        return ""
+    if any(re.search(p, clean_text, re.IGNORECASE) for p in _ACTION_CLAIM_PATTERNS):
+        owner_name = _owner_name()
+        clean_text = f"isso é com o {owner_name} mesmo, não tenho como fazer por aqui"
+    return re.sub(
+        r'\(?\+?[\d][\d\s\-\.\(\)]{6,18}[\d]',
+        lambda m: "[número omitido]" if len(re.sub(r'\D', '', m.group())) >= 8 else m.group(),
+        clean_text,
+    ).strip()
+
+
+def _resolve_mapped_chat_id(session_id: str) -> str:
+    """Resolve session_id Hermes → JID do chat, com fallback no mapa invertido."""
+    session_clean = session_id
+    if session_id and "@" in session_id:
+        local, domain = session_id.split("@", 1)
+        session_clean = f"{local.split(':')[0]}@{domain}"
+    chat_id = (
+        _sender_to_chat.get(session_id)
+        or _sender_to_chat.get(session_clean)
+        or session_id
+    )
+    if chat_id == session_id and "@" not in str(chat_id or ""):
+        for sid, cid in list(_sender_to_chat.items()):
+            if sid == session_id or session_id in str(sid):
+                return cid
+    return chat_id
+
+
+def _claim_contact_send(session_id: str, chat_id: str, preview: str) -> bool:
+    """Marca o turno como enviado. False = já respondido, não enviar de novo."""
+    session_clean = session_id
+    if session_id and "@" in session_id:
+        local, domain = session_id.split("@", 1)
+        session_clean = f"{local.split(':')[0]}@{domain}"
+
+    if session_id:
+        with _responded_sessions_lock:
+            if session_id in _responded_sessions:
+                logger.warning(f"[contact-send] Sessão já respondida — suprimindo (session={session_id!r})")
+                _log_suppressed("SESSION_DEDUP", session_id, chat_id, preview)
+                return False
+            _responded_sessions.add(session_id)
+            if len(_responded_sessions) > 2000:
+                _responded_sessions.clear()
+                _responded_sessions.add(session_id)
+
+    with _turn_lock:
+        tk = _turn_key.get(chat_id, "") or _turn_key.get(session_clean, "")
+        logger.info(f"[contact-send] dedup: session={session_id!r} chat_id={chat_id!r} tk={tk!r} sent={tk in _turn_sent}")
+        if tk and tk in _turn_sent:
+            logger.warning(f"[contact-send] Turno já respondido — suprimindo (chat={chat_id})")
+            _log_suppressed("TURN_DEDUP", session_id, chat_id, preview)
+            return False
+        if tk:
+            _turn_sent.add(tk)
+            _persist_turn_sent_to_disk(tk)
+    return True
+
+
+def transform_llm_output(*args, **kwargs):
+    """Hermes ignora o retorno de post_llm_call e reenvia o bloco inteiro.
+
+    Este hook roda antes e consegue trocar o texto final. Devolvemos um
+    whitespace para o adapter do WhatsApp pular o envio; as bolhas já
+    saíram pelo bridge via _human_send.
+    """
+    platform = kwargs.get("platform") or ""
+    session_id = kwargs.get("session_id") or ""
+    response_text = kwargs.get("response_text") or kwargs.get("assistant_response") or ""
+    if platform != "whatsapp" or not str(response_text).strip():
+        return None
+    if _session_is_owner(session_id):
+        return None
+
+    clean_text = _prepare_contact_reply(str(response_text))
+    if not clean_text:
+        return "\n"
+
+    chat_id = _resolve_mapped_chat_id(session_id)
+    if not _claim_contact_send(session_id, chat_id, clean_text):
+        return "\n"
+
+    try:
+        _human_send(str(chat_id), clean_text)
+    except Exception as err:
+        logger.warning(f"[transform_llm_output] envio falhou, Hermes manda o bloco filtrado: {err}")
+        return clean_text
+    logger.info("[transform_llm_output] bolhas enviadas; suprimindo envio do Hermes")
+    return "\n"
+
 
 def post_llm_call(*args, **kwargs):
     """Intercepta resposta do LLM:
-    - Para contatos: envia via _human_send (typing + delay + split em bolhas) e retorna vazio.
+    - Para contatos: o envio em bolhas está em transform_llm_output.
+      Este hook é ignorado pelo Hermes no turno final — retorna None.
     - Para owner: processa EXECs e retorna resposta limpa.
     """
     logger.info(f"[post_llm_call] chamado — kwargs keys: {list(kwargs.keys())} args count: {len(args)}")
@@ -7182,100 +7338,10 @@ def post_llm_call(*args, **kwargs):
         logger.debug(f"[post_llm_call] assistant_response vazio.")
         return None
 
-    # ── Sessão de CONTATO → filtrar + typing + delay → Hermes envia ─────────
-    # post_llm_call roda sincronamente antes do Hermes enviar.
-    # Enviamos typing indicator, aguardamos, retornamos o texto filtrado.
-    # O Hermes envia uma única vez via gateway.platforms.base.
+    # Contatos: Hermes ignora o retorno deste hook e reenvia o bloco inteiro.
+    # O envio em bolhas + a troca do final_response ficam em transform_llm_output.
     if not is_owner_session:
-        clean_text = _EXEC_PATTERN.sub("", response_text).strip()
-
-        # Colapsar múltiplas quebras de linha em espaço (evita resposta robótica com parágrafos)
-        clean_text = re.sub(r'\n{2,}', ' ', clean_text).strip()
-
-        # Filtrar tool results intermediários
-        _tool_result_patterns = [
-            r"nothing to save\.?", r"nada para salvar\.?",
-            r"^saved\.$", r"^ok\.$",
-            r"\[tool result\]", r"tool_result:",
-            r"^nothing\.$",
-        ]
-        if any(re.search(p, clean_text, re.IGNORECASE) for p in _tool_result_patterns):
-            logger.warning(f"[post_llm_call] Tool result filtrado: {clean_text!r}")
-            return {"assistant_response": ""}  # string vazia → bridge rejeita silenciosamente
-
-        # Resolver chat_id — normalizar session_id removendo device suffix antes do lookup
-        # (ex: "5940090822813:0@s.whatsapp.net" → "5940090822813@s.whatsapp.net")
-        session_clean = session_id
-        if "@" in session_id:
-            local, domain = session_id.split("@", 1)
-            session_clean = f"{local.split(':')[0]}@{domain}"
-        chat_id = (
-            _sender_to_chat.get(session_id)
-            or _sender_to_chat.get(session_clean)
-            or session_id
-        )
-
-        # Dedup por sessão: cada session_id Hermes só pode enviar UMA resposta real.
-        # Esta camada é independente do turn-based dedup e cobre race conditions.
-        if session_id:
-            with _responded_sessions_lock:
-                if session_id in _responded_sessions:
-                    logger.warning(f"[post_llm_call] Sessão já respondida — suprimindo (session={session_id!r})")
-                    _log_suppressed("SESSION_DEDUP", session_id, chat_id, clean_text)
-                    return {"assistant_response": ""}
-                _responded_sessions.add(session_id)
-                if len(_responded_sessions) > 2000:
-                    _responded_sessions.clear()
-
-        # Dedup por turno: só o primeiro post_llm_call com conteúdo real passa.
-        # Só aplica dedup quando há um turn key registrado (tk != "").
-        with _turn_lock:
-            tk = _turn_key.get(chat_id, "") or _turn_key.get(session_clean, "")
-            logger.info(f"[post_llm_call] dedup: session={session_id!r} chat_id={chat_id!r} tk={tk!r} sent={tk in _turn_sent}")
-            if tk and tk in _turn_sent:
-                logger.warning(f"[post_llm_call] Turno já respondido — suprimindo (chat={chat_id})")
-                _log_suppressed("TURN_DEDUP", session_id, chat_id, clean_text)
-                return {"assistant_response": ""}  # string vazia → bridge rejeita silenciosamente
-            if tk:
-                _turn_sent.add(tk)
-                _persist_turn_sent_to_disk(tk)
-
-        # Bloquear afirmações de ação no sistema
-        _action_patterns = [
-            r"pronto[,.]?\s*(inclu|adicion|edit|atualiz|salv|modific|coloc|registr)",
-            r"(inclu|adicion|edit|atualiz|salv|modific)i\b",
-            r"(fiz|feit[oa]|execut|realiz)\b.*\b(isso|alteraç|ediç|inclusão)",
-            r"já (adicion|inclu|registr|atualiz|salv)",
-        ]
-        if any(re.search(p, clean_text, re.IGNORECASE) for p in _action_patterns):
-            owner_name = _owner_name()
-            clean_text = f"isso é com o {owner_name} mesmo, não tenho como fazer por aqui"
-
-        # Redactar telefones
-        clean_text = re.sub(
-            r'\(?\+?[\d][\d\s\-\.\(\)]{6,18}[\d]',
-            lambda m: "[número omitido]" if len(re.sub(r'\D', '', m.group())) >= 8 else m.group(),
-            clean_text
-        )
-
-        # Typing indicator + delay proporcional (hook é síncrono — Hermes aguarda)
-        try:
-            import random
-            payload = json.dumps({"chatId": chat_id}).encode("utf-8")
-            req = urllib.request.Request(f"{BRIDGE_URL}/typing", data=payload, method="POST")
-            req.add_header("Content-Type", "application/json")
-            with urllib.request.urlopen(req, timeout=3):
-                pass
-            delay = min(max(len(clean_text) * 0.05 + random.uniform(0.5, 1.5), 1.0), 5.0)
-            time.sleep(delay)
-        except Exception:
-            pass
-
-        if not clean_text:
-            logger.warning(f"[post_llm_call] clean_text vazio após filtros — suprimindo")
-            return {"assistant_response": ""}
-        logger.info(f"[post_llm_call] Retornando para Hermes enviar ({len(clean_text)} chars)")
-        return {"assistant_response": clean_text}
+        return None
 
     # ── Sessão do OWNER → processar EXECs ───────────────────────────────────
     matches = _EXEC_PATTERN.findall(response_text)
@@ -7582,6 +7648,7 @@ def register(ctx):
 
     ctx.register_hook("pre_gateway_dispatch", pre_gateway_dispatch)
     ctx.register_hook("pre_llm_call", pre_llm_call)
+    ctx.register_hook("transform_llm_output", transform_llm_output)
     ctx.register_hook("post_llm_call", post_llm_call)
     ctx.register_hook("pre_tool_call", pre_tool_call)
 
