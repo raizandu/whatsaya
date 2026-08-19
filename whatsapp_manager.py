@@ -4129,7 +4129,22 @@ def _pull_and_merge_configurations():
     dev_user = config.dev_github_user
 
     if not config_repo:
-        config_repo = "hermes_agent_context_contatcs"
+        logger.info("[config-sync] CONFIG_REPO vazio — mantendo personas e JSON locais.")
+        try:
+            import shutil
+            soul_whatsapp_path = Path("/opt/data/SOUL_WHATSAPP.md")
+            profile_wa_soul = Path("/opt/data/.hermes/profiles/whatsapp/SOUL.md")
+            if soul_whatsapp_path.exists():
+                profile_wa_soul.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(soul_whatsapp_path, profile_wa_soul)
+            soul_email_path = Path("/opt/data/SOUL_EMAIL.md")
+            profile_em_soul = Path("/opt/data/.hermes/profiles/email/SOUL.md")
+            if soul_email_path.exists():
+                profile_em_soul.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(soul_email_path, profile_em_soul)
+        except Exception as copy_err:
+            logger.error(f"Falha ao copiar personas para perfis locais: {copy_err}")
+        return
 
     if "/" in config_repo:
         repo_parts = config_repo.split("/")
