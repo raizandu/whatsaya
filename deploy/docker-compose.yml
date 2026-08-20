@@ -423,9 +423,16 @@ services:
         _home = ''.join(c for c in (os.environ.get('WHATSAPP_OWNER_NUMBER') or '') if c.isdigit())
         if _home:
             env_updates['WHATSAPP_HOME_CHANNEL'] = _home + '@s.whatsapp.net'
-        for env_path in ['/opt/data/.hermes/.env',
-                         '/opt/data/.hermes/profiles/whatsapp/.env']:
-            _upsert_env(env_path, env_updates)
+        _upsert_env('/opt/data/.hermes/.env', env_updates)
+        # O s6 do Hermes sobe um gateway por perfil (`hermes -p whatsapp`), e esse
+        # gateway le SO o .env do proprio perfil. Com WHATSAPP_ENABLED=true aqui,
+        # ele subia como um segundo consumidor do mesmo bridge — sem o plugin
+        # whatsapp-manager, respondia contato bloqueado/silenciado por fora de
+        # todas as regras. O perfil whatsapp existe so para isolar as conversas de
+        # cliente dentro do gateway principal; o gateway proprio dele fica off.
+        profile_env = dict(env_updates)
+        profile_env['WHATSAPP_ENABLED'] = 'false'
+        _upsert_env('/opt/data/.hermes/profiles/whatsapp/.env', profile_env)
 
         # Perfil "whatsapp" = clientes. Nenhuma ferramenta habilitada; o hook
         # pre_tool_call do plugin e a segunda camada, no backend.
