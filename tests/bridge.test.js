@@ -511,6 +511,29 @@ test('WhatsApp Bridge Regression Tests', async (t) => {
     assert.ok(!isSystemError('⚠️ Obrigado por avisar!'), 'Should allow regular emoji messages without technical keywords');
   });
 
+  await t.test('13b. isSystemError blocks the core retry/fallback notice family', () => {
+    // Vazou em produção em 2026-08-20: chegou no chat do cliente pelo canal de status
+    // do core, que não passa pelos hooks Python.
+    assert.ok(isSystemError('🔄 Switched to fallback model: gpt-5.6-luna via openai-codex → deepseek/deepseek-v4-flash via openrouter'));
+    assert.ok(isSystemError('🔄 Primary model failed — switching to fallback: deepseek/deepseek-v4-flash via openrouter'));
+    assert.ok(isSystemError('↻ Empty response after tool calls — using earlier content as final answer'));
+    assert.ok(isSystemError('⏳ Retrying in 2.4s (attempt 2/3)...'));
+    assert.ok(isSystemError('🗜️ Compressed 180 → 42 messages, retrying...'));
+    assert.ok(isSystemError('⚠️ Empty/malformed response — switching to fallback...'));
+    assert.ok(isSystemError('⚠️ Non-retryable error (HTTP 403) — trying fallback...'));
+    assert.ok(isSystemError('⚠️ Provider safety filter blocked this request — trying fallback...'));
+    assert.ok(isSystemError('⚠️ TLS certificate verification failed — trying fallback...'));
+    assert.ok(isSystemError('❌ Billing or credits exhausted — HTTP 402'));
+    assert.ok(isSystemError('❌ API failed after 3 retries — HTTP 500'));
+    assert.ok(isSystemError('⚠️  Request payload too large (413) — compression attempt 1/3'));
+    assert.ok(isSystemError('❌ Ollama runtime context is too small for Hermes tool use'));
+
+    // O aviso legítimo do plugin pro dono é em português e precisa continuar passando.
+    assert.ok(!isSystemError('⚠️ O provider do modelo falhou respondendo 556281405459@s.whatsapp.net e a mensagem de erro foi bloqueada — o cliente não recebeu nada.'));
+    assert.ok(!isSystemError('❌ Contato \'Tony\' não encontrado em personal_contacts.json.'));
+    assert.ok(!isSystemError('✅ Contato *Tony* atualizado.'));
+  });
+
   await t.test('14. Video message from client in group should NOT trigger auto-reply', async () => {
     const groupJid = 'group123@g.us';
     const clientJid = 'client123@s.whatsapp.net';

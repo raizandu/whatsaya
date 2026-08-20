@@ -5467,6 +5467,30 @@ class TestPrepareContactReply(BaseWhatsAppManagerTest):
         out = whatsapp_manager._prepare_contact_reply("Self-improvement review")
         self.assertEqual(out, "")
 
+    def test_core_fallback_notice_suppressed(self):
+        """Família de aviso de retry/fallback do core — vazou pro cliente em 2026-08-20."""
+        import whatsapp_manager
+        blocked = [
+            "🔄 Switched to fallback model: gpt-5.6-luna via openai-codex → deepseek/deepseek-v4-flash via openrouter",
+            "🔄 Primary model failed — switching to fallback: deepseek/deepseek-v4-flash via openrouter",
+            "↻ Empty response after tool calls — using earlier content as final answer",
+            "⏳ Retrying in 2.4s (attempt 2/3)...",
+            "🗜️ Compressed 180 → 42 messages, retrying...",
+            "⚠️ Empty/malformed response — switching to fallback...",
+            "⚠️ Non-retryable error (HTTP 403) — trying fallback...",
+            "❌ Billing or credits exhausted — HTTP 402",
+            "❌ API failed after 3 retries — HTTP 500",
+        ]
+        for sample in blocked:
+            self.assertTrue(whatsapp_manager.isSystemError(sample), sample)
+            self.assertEqual(whatsapp_manager._prepare_contact_reply(sample), "", sample)
+        # O aviso que o próprio plugin manda pro dono é em português e não pode ser mudo.
+        self.assertFalse(whatsapp_manager.isSystemError(
+            "⚠️ O provider do modelo falhou respondendo Tony e a mensagem de erro "
+            "foi bloqueada — o cliente não recebeu nada."
+        ))
+        self.assertFalse(whatsapp_manager.isSystemError("Fechou! Te mando o Pix então"))
+
     def test_commercial_reply_preserved(self):
         import whatsapp_manager
         text = "Hoje são R$997 de implementação e R$397/mês. Quer fechar por Pix ou prefere uma call de 15 min?"

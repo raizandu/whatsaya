@@ -1599,10 +1599,49 @@ function buildAlerts(errors, activity, connState, paused) {
   return alerts;
 }
 
+// Avisos de retry/fallback/compressão que o core do Hermes emite pelo canal de status
+// (agent/chat_completion_helpers.py e run_agent.py). Esse canal escreve direto no /send,
+// sem passar pelos hooks Python do plugin — então nem o gate de atendimento nem a quebra
+// em bolhas se aplicam, e o texto cru chega no cliente. Bloquear frase a frase sempre
+// atrasa em relação ao core, por isso o glifo de abertura pega a família inteira; a lista
+// existe para os avisos que abrem com ⚠️/❌, glifos que o plugin também usa em mensagem
+// legítima para o dono.
+const CORE_NOTICE_PHRASES = [
+  'switched to fallback model',
+  'primary model failed',
+  'switching to fallback',
+  'trying fallback',
+  'empty response after tool calls',
+  'empty/malformed response',
+  'non-retryable error',
+  'provider safety filter',
+  'max retries',
+  'retrying in',
+  'credits exhausted',
+  'context too large',
+  'payload too large',
+  'compression attempt',
+  'tls certificate verification',
+  'api failed after',
+  'ollama runtime context',
+];
+
+function isCoreStatusNotice(message) {
+  if (!message || typeof message !== 'string') return false;
+  const trimmed = message.trim();
+  if (!trimmed) return false;
+  // 🔄 ↻ 🗜️ ⏳ abrem só aviso interno do core — o plugin nunca começa mensagem com eles.
+  if (/^(🔄|↻|🗜️|⏳)/.test(trimmed)) return true;
+  const lower = trimmed.toLowerCase();
+  return CORE_NOTICE_PHRASES.some((phrase) => lower.includes(phrase));
+}
+
 function isSystemError(message) {
   if (!message || typeof message !== 'string') return false;
   const trimmedMessage = message.trim();
   const lowercaseMsg = trimmedMessage.toLowerCase();
+
+  if (isCoreStatusNotice(trimmedMessage)) return true;
 
   // Block "Auxiliary title generation failed" and other API key/login/credential leakage
   if (lowercaseMsg.includes('auxiliary title') || 
@@ -1746,10 +1785,14 @@ messagingRouter.post('/send', async (req, res) => {
     const lowercaseMsg = trimmedMessage.toLowerCase();
 
     if (isSystemError(message)) {
-      const isStatusMessage = trimmedMessage.startsWith('💾') || 
-                              lowercaseMsg.includes('self-improvement') || 
+      // Aviso de retry/fallback do core não é falha de atendimento: o turno segue e o
+      // cliente recebe a resposta normalmente. Avisar o dono a cada troca de provider
+      // encheria o WhatsApp dele de ruído — basta registrar no log.
+      const isStatusMessage = trimmedMessage.startsWith('💾') ||
+                              isCoreStatusNotice(trimmedMessage) ||
+                              lowercaseMsg.includes('self-improvement') ||
                               lowercaseMsg.includes('memory update');
-      
+
       if (isStatusMessage) {
         console.log(`[bridge] 💾 SYSTEM STATUS BLOCKED FOR CLIENT ${chatId}:\n[CONTENT]: ${message}`);
       } else {
@@ -2178,6 +2221,7 @@ export {
   getMessageQueue,
   setSock,
   isSystemError,
+  isCoreStatusNotice,
   getRecentLogs,
   resolveContactName,
   loadEnv,

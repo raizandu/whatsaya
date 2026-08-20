@@ -1313,6 +1313,8 @@ def isSystemError(message: str) -> bool:
     blob = message.strip()
     if not blob:
         return False
+    if _CORE_NOTICE_GLYPH_RE.match(blob):
+        return True
     if _HERMES_STATUS_RE.search(blob):
         return True
     if "💾" in blob and _SYSTEM_STATUS_RE.search(blob):
@@ -8705,6 +8707,34 @@ _GATEWAY_PROVIDER_ERROR_PATTERNS = [
     r"model server is not responding",
     r"model provider failed after retries",
 ]
+# Avisos de retry/fallback/compressão do core (agent/chat_completion_helpers.py e
+# run_agent.py). Chegam pelo canal de status, que escreve direto no bridge sem passar por
+# transform_llm_output — então nem o gate de atendimento nem a quebra em bolhas se aplicam
+# e o texto cru cai no chat do cliente. Só as frases em inglês do core entram aqui: as
+# mensagens que o próprio plugin manda pro dono são em português e falam de "provider"
+# também, e casá-las deixaria a notificação de falha muda. bridge.js tem a mesma lista em
+# CORE_NOTICE_PHRASES — as duas camadas filtram porque o core alcança as duas.
+_CORE_NOTICE_PHRASES = (
+    r"switched to fallback model",
+    r"primary model failed",
+    r"switching to fallback",
+    r"trying fallback",
+    r"empty response after tool calls",
+    r"empty/malformed response",
+    r"non-retryable error",
+    r"provider safety filter",
+    r"max retries",
+    r"retrying in",
+    r"credits exhausted",
+    r"context too large",
+    r"payload too large",
+    r"compression attempt",
+    r"tls certificate verification",
+    r"api failed after",
+    r"ollama runtime context",
+)
+# 🔄 ↻ 🗜️ ⏳ abrem só aviso interno do core — o plugin nunca começa mensagem com eles.
+_CORE_NOTICE_GLYPH_RE = re.compile(r"^(?:🔄|↻|🗜️|⏳)")
 # Prompt Mestre §17 — vazamento técnico/interno (filtro por linha).
 _INTERNAL_LEAK_PATTERNS = [
     r"self[- \u2010-\u2015]?improvement",
@@ -8742,6 +8772,8 @@ _INTERNAL_LEAK_PATTERNS = [
     r"gateway restarted during delivery",
     r"recovered reply",
     r"may be a duplicate",
+    r"^(?:🔄|↻|🗜️|⏳)",
+    *_CORE_NOTICE_PHRASES,
     r"/sethome",
     r"no home channel is set",
     r"home channel is where hermes",
@@ -8790,7 +8822,8 @@ _HERMES_STATUS_RE = re.compile(
     r"model provider rejected the request|"
     r"model provider is rate-limiting requests|"
     r"model server is not responding|"
-    r"model provider failed after retries",
+    r"model provider failed after retries|"
+    + "|".join(_CORE_NOTICE_PHRASES),
     re.I,
 )
 _CNPJ_PATTERN = re.compile(r"\b\d{2}\.?\d{3}\.?\d{3}/\d{4}-?\d{2}\b")
