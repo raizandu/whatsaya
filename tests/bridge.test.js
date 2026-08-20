@@ -561,6 +561,41 @@ test('WhatsApp Bridge Regression Tests', async (t) => {
     assert.strictEqual(mockSock.sentMessages.length, 0, 'Should NOT send auto-reply to group chats');
   });
 
+  await t.test('14b. Group and broadcast messages are dropped before queueing or media download', async () => {
+    // Antes do drop no ponto de entrada, texto de grupo era enfileirado pro agente e
+    // mídia de grupo era baixada pro disco — só a escrita no SQLite era barrada.
+    const queue = getMessageQueue();
+    queue.length = 0;
+    mockSock.sentMessages = [];
+
+    await onMessagesUpsert({
+      messages: [
+        {
+          key: { id: 'msg-14b-1', fromMe: false, remoteJid: 'group123@g.us', participant: 'client123@s.whatsapp.net' },
+          message: { conversation: 'bom dia pessoal' },
+        },
+        {
+          key: { id: 'msg-14b-2', fromMe: false, remoteJid: 'status@broadcast', participant: 'client123@s.whatsapp.net' },
+          message: { conversation: 'status update' },
+        },
+      ],
+      type: 'notify',
+    });
+
+    assert.strictEqual(queue.length, 0, 'Group/broadcast messages must never reach the agent queue');
+    assert.strictEqual(mockSock.sentMessages.length, 0, 'Nothing should be sent back to a group or broadcast');
+
+    // Mensagem 1:1 do mesmo remetente continua entrando — o drop é só de grupo/broadcast.
+    await onMessagesUpsert({
+      messages: [{
+        key: { id: 'msg-14b-3', fromMe: false, remoteJid: 'client123@s.whatsapp.net' },
+        message: { conversation: 'bom dia' },
+      }],
+      type: 'notify',
+    });
+    assert.strictEqual(queue.length, 1, 'Direct 1:1 messages must still be queued');
+  });
+
   await t.test('15. Video message from client in private chat should NOT trigger auto-reply', async () => {
     const clientJid = 'client123@s.whatsapp.net';
     

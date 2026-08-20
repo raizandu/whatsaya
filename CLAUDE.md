@@ -111,6 +111,7 @@ Tudo o que muda por cliente é **variável de ambiente** + os templates em `depl
 | `CONFIG_REPO` + `CONFIG_GITHUB_TOKEN` | Opcional — versiona contatos e personas num repo privado. Sem `user/repo`, o dono cai em `config.github_user` (`HERMES_SETUP_GITHUB_USER` → `DEV_GITHUB_USER` → `raizandu`) |
 | `HERMES_SETUP_GITHUB_USER` / `HERMES_SETUP_GITHUB_REPO` | De onde o plugin se clona e se atualiza. Padrão: `raizandu` / `whatsaya` |
 | `KEEP_LOCAL_PLUGIN` | `true` — o boot e o `_self_update_plugin_code` não fazem fetch/reset no volume |
+| `WHATSAPP_GROUPS_ENABLED` | Padrão desligado. Mensagem de `@g.us` e `@broadcast` é descartada no ponto de entrada do `bridge.js` — não baixa mídia, não enfileira pro agente, não grava no histórico. Ligar é ato deliberado |
 
 Fora as envs, só os arquivos de conteúdo: `deploy/SOUL.md`, `SOUL_WHATSAPP.md`, `SOUL_EMAIL.md` e `support_rules.md` são **templates com placeholders `{{...}}`**. Preencha antes de subir — placeholder não substituído vai literal para o cliente, e um `support_rules.md` com produto errado faz o bot inventar oferta que não existe.
 

@@ -205,6 +205,12 @@ const SEND_READ_RECEIPTS = ['1', 'true', 'yes', 'on'].includes(
 const HISTORY_PERSIST_DISABLED = ['1', 'true', 'yes', 'on'].includes(
   String(process.env.WHATSAPP_HISTORY_PERSIST_DISABLED || '').toLowerCase(),
 );
+// Grupos ficam fora do atendimento por padrão: o bot é 1:1 com o cliente e conversa de
+// grupo não é dado que a gente tenha motivo para processar nem guardar. Ligar exige ato
+// deliberado (WHATSAPP_GROUPS_ENABLED=true), não acontece por acidente de configuração.
+const GROUPS_ENABLED = ['1', 'true', 'yes', 'on'].includes(
+  String(process.env.WHATSAPP_GROUPS_ENABLED || '').toLowerCase(),
+);
 const WHATSAPP_MODE = getArg('mode', process.env.WHATSAPP_MODE || 'self-chat'); // "bot" or "self-chat"
 const ALLOWED_USERS = parseAllowedUsers(process.env.WHATSAPP_ALLOWED_USERS || '');
 const WHATSAPP_OWNER_NUMBER = (process.env.WHATSAPP_OWNER_NUMBER || '').replace(/\D/g, '');
@@ -712,6 +718,25 @@ let onMessagesUpsert = async ({ messages, type }) => {
     }
 
     const isGroup = chatId.endsWith('@g.us');
+    const isBroadcast = chatId.endsWith('@broadcast');
+
+    // Descarte antes de qualquer trabalho: sem baixar mídia, sem enfileirar pro agente,
+    // sem gravar no histórico. O guard de grupo que existia adiante só cobria a escrita
+    // no SQLite — imagem e áudio de grupo ainda eram baixados pro disco e o texto ainda
+    // chegava no LLM. Aqui a conversa morre no ponto de entrada.
+    if ((isGroup && !GROUPS_ENABLED) || isBroadcast) {
+      if (WHATSAPP_DEBUG) {
+        try {
+          console.log(JSON.stringify({
+            event: 'ignored',
+            reason: isBroadcast ? 'broadcast_or_status' : 'groups_disabled',
+            chatId,
+          }));
+        } catch {}
+      }
+      continue;
+    }
+
     const senderNumber = senderId.replace(/@.*/, '');
 
     // Intercept owner bot commands (stop_bot / start_bot)
