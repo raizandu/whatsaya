@@ -113,6 +113,10 @@ Zero matches. Depois: restart do container para o plugin reler.
 2. Abra `http://IP:9119/whatsapp/qr` (ou `?format=png`) e `…/whatsapp/status`.
 3. No celular: **Aparelhos conectados → Conectar um aparelho**.
 
+O card do dashboard (Bot / Self-chat) lê `WHATSAPP_MODE` do `.env` do Hermes (`/opt/data/.hermes/.env`). O número `15551234567` é só placeholder da UI — a allowlist real é `WHATSAPP_ALLOWED_USERS`. **Deixe Mode = Bot.** Self-chat nativo do Hermes atende só você mesmo e corta os clientes. Comando do dono no “mensagem para si” (`quais comandos`, `stop_bot`) já funciona em modo Bot, via plugin. O compose regrava isso no boot para não sumir no reset.
+
+Modelo persistente: clientes/WhatsApp = `WHATSAPP_CLIENT_MODEL` (padrão `gpt-5.6-luna`, reasoning high). Uso interno no perfil default = `WHATSAPP_OWNER_MODEL` (padrão `gpt-5.6-sol`). Sem isso o painel volta para o modelo que estiver no `config.yaml` antigo.
+
 Se `/whatsapp/qr` do dashboard não gerar o primeiro QR, o fallback que funcionou em campo é o fluxo pair-only da ponte na porta `8080` (processo à parte). Depois do scan: pare esse processo, deixe só o bridge do container, confirme `connected` em `/whatsapp/status`.
 
 Não pareie o mesmo número em dois bridges ao mesmo tempo — Baileys cai com `440 conflict / replaced`.
@@ -129,12 +133,53 @@ Não declare o cliente no ar sem isto:
 | `{{` em qualquer resposta | Falhou o passo 5 |
 | Dono no self-chat: `quais comandos` | Ajuda do plugin (`stop_bot`, `start_bot`, …) |
 | Duas ideias na resposta | Duas bolhas, se o `main` já tiver o hook `transform_llm_output` (PR de bolhas). Um bloco só + SOUL pedindo `\n\n` = hook ausente ou plugin velho |
+| Texto com `[confident]` / `[empathetic]` / `[happy]` | Cliente **não** vê a tag. Se vazar, o strip do `_human_send` / adapter não está no plugin que está rodando |
 
 Sessão de teste suja o histórico. Apague a sessão Hermes daquele JID se for repetir o teste do zero.
 
 ---
 
-## 8. Depois do ar
+## 8. Fullsync e triagem inicial
+
+Depois do primeiro pareamento e de `/whatsapp/status` ficar `connected`, rode o pipeline em [`WHATSAPP_HISTORY_TRIAGE.md`](WHATSAPP_HISTORY_TRIAGE.md). Mensagens históricas vão para o SQLite e **não entram na fila do LLM**.
+
+```bash
+python3 deploy/scripts/whatsapp_history_triage.py \
+  --config deploy/scripts/whatsapp_history_triage.yaml run
+```
+
+Isso espera o lote estabilizar e grava snapshot, CSV e o prompt da skill `whatsapp-client-triage`. Depois da classificação:
+
+```bash
+python3 deploy/scripts/whatsapp_history_triage.py \
+  --config deploy/scripts/whatsapp_history_triage.yaml report \
+  --snapshot /opt/data/.hermes/workspace/whatsapp_fullsync_YYYY-MM-DD.json \
+  --classification /opt/data/.hermes/workspace/whatsapp_classification.json
+```
+
+O Markdown de revisão sai em `/opt/data/.hermes/workspace/whatsapp_triagem_revisao_cliente_YYYY-MM-DD.md`. O dono valida antes de qualquer flag ir para `personal_contacts.json`. Envio ao self-chat é explícito (`send`) e exige `--chat-id` do dono.
+
+Não envie o snapshot bruto. Não declare o onboarding completo sem conferir `historical > 0` quando o número tem histórico.
+
+---
+
+## 9. Skills do Hermes (dono)
+
+O perfil `whatsapp` (cliente) já sobe com `skills.enabled: false`. O perfil do dono herda o catálogo bundled — dezenas de skills de studio, MLOps, GitHub e desktop. O `command:` do compose grava `skills.disabled` no `config.yaml` a cada boot.
+
+Ficam ligadas só as úteis nesta operação: `session-librarian`, OCR/PDF/DOCX, Google Workspace / e-mail, Notion (onboarding de clientes), mapas, atas, `plan`, `hermes-agent`, `grounded-citations`.
+
+Para ver: `docker compose exec hermes hermes skills list`.
+
+WhatsApp não recebe status interno do gateway: o compose grava `display.busy_ack_enabled: false`, `busy_input_mode: queue` e desliga heartbeat/clarify. O cliente não deve ver `⚡ Interrupting`, `⏳ Working` nem `iteration N/60`. PDF/proposta sai com subagentes em paralelo, sem a ferramenta `clarify`.
+
+Áudio: o Hermes 0.20+ transcreve com Whisper local e, sem idioma, assume inglês. O compose grava `stt.language: pt` (e `HERMES_LOCAL_STT_LANGUAGE=pt`). Sem isso o PTT em português vira tradução zoada. `stt.echo_transcripts: false` — a transcrição fica só no contexto do agente; o cliente não vê a bolha `🎙️ "..."`.
+
+Voz de resposta: Fish Audio, modelo `s2.1-pro-free` (campanha grátis até 31/08/2026; no dia 30 o cron avisa o dono para trocar para `s2.1-pro`). Gere a chave em https://fish.audio/app/api-keys/ e coloque `FISH_API_KEY` no `.env`. Opcional: `FISH_REFERENCE_ID`, `FISH_TTS_MODEL` e `FISH_TTS_VOLUME` (padrão `4`). Resposta falável vai **só em nota de voz**. PIX, endereço, link, e-mail, código e intro do tipo “vou te enviar um audio” ficam **texto**. Sem chave, o texto continua indo. Tags `[happy]` / `[confident]` / `[empathetic]` / `[warm and friendly]` são só para o Fish: o plugin corta no `_human_send` e o adapter corta no `send`, mesmo se o `fish_tts.py` não carregar. Se a tag aparecer no chat, o volume está com plugin velho. `[número omitido]` não é tag de voz e fica. Preço no áudio vai por extenso (`997 reais`). Duas mensagens seguidas esperam 2,5s e entram no mesmo lote (`WHATSAPP_DEBOUNCE_INITIAL_MS=2500`).
+
+---
+
+## 10. Depois do ar
 
 - Atualizar plugin: push neste repo → restart. Confira no log `bridge.js atualizado` / `whatsapp-manager`.
 - Mudar só persona/catálogo: edite `/opt/data/SOUL_WHATSAPP.md` e `support_rules.md` (ou o `CONFIG_REPO`) e reinicie.

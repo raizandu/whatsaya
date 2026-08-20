@@ -72,10 +72,10 @@
 #
 # 🤖 MODELOS POR FUNÇÃO (padrão: OpenRouter)
 #   Use slugs do OpenRouter no formato vendor/modelo.
-#   WHATSAPP_OWNER_MODEL          Responder ao dono      (padrão deepseek/deepseek-v4-flash)
-#   WHATSAPP_OWNER_PROVIDER       Provider do dono       (padrão openrouter)
-#   WHATSAPP_CLIENT_MODEL         Responder a clientes   (padrão deepseek/deepseek-v4-flash)
-#   WHATSAPP_CLIENT_PROVIDER      Provider de clientes   (padrão openrouter)
+#   WHATSAPP_OWNER_MODEL          Uso interno / perfil default (padrão gpt-5.6-sol)
+#   WHATSAPP_OWNER_PROVIDER       Provider do dono             (padrão openai-codex)
+#   WHATSAPP_CLIENT_MODEL         WhatsApp clientes            (padrão gpt-5.6-luna)
+#   WHATSAPP_CLIENT_PROVIDER      Provider de clientes         (padrão openai-codex)
 #   WHATSAPP_CLIENT_MEDIA_MODEL   Transcrição de áudio e leitura de imagem
 #                                 (padrão google/gemini-3.1-flash-lite — precisa ser
 #                                  multimodal; DeepSeek aceita só texto e falharia)
@@ -98,8 +98,8 @@
 #   WHATSAPP_CONNECTION_NAME Nome da conexão exibido no Dashboard (padrão: EmpreendedorSerial)
 #
 # ⏳ DEBOUNCE DE MENSAGENS (agrupa fragmentos de texto antes de processar)
-#   WHATSAPP_DEBOUNCE_INITIAL_MS      Espera inicial em ms antes de processar (padrão: 15000)
-#   WHATSAPP_DEBOUNCE_MIN_MS          Piso do decaimento progressivo em ms (padrão: 2000)
+#   WHATSAPP_DEBOUNCE_INITIAL_MS      Espera inicial em ms antes de processar (padrão: 2500)
+#   WHATSAPP_DEBOUNCE_MIN_MS          Piso do decaimento progressivo em ms (padrão: 1500)
 #   WHATSAPP_DEBOUNCE_DECAY           Fator de decaimento a cada fragmento novo (padrão: 0.6)
 #   WHATSAPP_DEBOUNCE_SKIP_SELF_CHAT  Pular debounce no self-chat do dono (padrão: true)
 #
@@ -223,10 +223,12 @@ services:
         # Modelo e provider vem do ambiente. Antes estavam fixos em gemini aqui dentro,
         # o que sobrescrevia as variaveis do painel a cada boot e fazia o agente de
         # cliente continuar chamando o Gemini mesmo com tudo configurado para OpenRouter.
-        client_model = os.environ.get('WHATSAPP_CLIENT_MODEL') or 'deepseek/deepseek-v4-flash'
-        client_provider = os.environ.get('WHATSAPP_CLIENT_PROVIDER') or 'openrouter'
-        owner_model = os.environ.get('WHATSAPP_OWNER_MODEL') or client_model
+        client_model = os.environ.get('WHATSAPP_CLIENT_MODEL') or 'gpt-5.6-luna'
+        client_provider = os.environ.get('WHATSAPP_CLIENT_PROVIDER') or 'openai-codex'
+        owner_model = os.environ.get('WHATSAPP_OWNER_MODEL') or 'gpt-5.6-sol'
         owner_provider = os.environ.get('WHATSAPP_OWNER_PROVIDER') or client_provider
+        wa_mode = os.environ.get('WHATSAPP_MODE') or 'bot'
+        wa_allowed = os.environ.get('WHATSAPP_ALLOWED_USERS') or '*'
 
         for path in ['/opt/data/.hermes/config.yaml',
                      os.path.expanduser('~/.hermes/config.yaml')]:
@@ -244,6 +246,18 @@ services:
             dash.update({'enabled': True, 'host': '0.0.0.0', 'port': 9119,
                          'basic_auth': {'username': usr, 'password_hash': hash_password(pwd)}})
             cfg['dashboard'] = dash
+            owner_jid = ''.join(c for c in (os.environ.get('WHATSAPP_OWNER_NUMBER') or '') if c.isdigit())
+            if owner_jid:
+                plats = cfg.get('platforms') if isinstance(cfg.get('platforms'), dict) else {}
+                wa = plats.get('whatsapp') if isinstance(plats.get('whatsapp'), dict) else {}
+                wa['enabled'] = True
+                wa['home_channel'] = {
+                    'platform': 'whatsapp',
+                    'chat_id': owner_jid + '@s.whatsapp.net',
+                    'name': 'Home',
+                }
+                plats['whatsapp'] = wa
+                cfg['platforms'] = plats
             cfg['session_reset'] = {'notify_user': False}
             gateway_cfg = cfg.get('gateway') if isinstance(cfg.get('gateway'), dict) else {}
             gateway_cfg['delivery_ledger'] = False
@@ -254,12 +268,127 @@ services:
             disp = cfg.get('display')
             if not isinstance(disp, dict):
                 disp = {}
-            disp.update({'show_system_header': False, 'tool_progress': 'off',
-                         'platforms': {'whatsapp': {'tool_progress': 'off'}}})
+            disp.update({
+                'show_system_header': False,
+                'tool_progress': 'off',
+                'busy_ack_enabled': False,
+                'busy_ack_detail': False,
+                'busy_input_mode': 'queue',
+                'interim_assistant_messages': False,
+                'long_running_notifications': False,
+                'cleanup_progress': True,
+                'platforms': {
+                    'whatsapp': {
+                        'tool_progress': 'off',
+                        'interim_assistant_messages': False,
+                        'long_running_notifications': False,
+                        'busy_ack_detail': False,
+                        'busy_steer_ack_enabled': False,
+                    }
+                },
+            })
             cfg['display'] = disp
             cfg['model'] = {'default': owner_model, 'provider': owner_provider}
+            sk = cfg.get('skills') if isinstance(cfg.get('skills'), dict) else {}
+            off = ['architecture-diagram', 'ascii-art', 'ascii-video', 'baoyu-infographic', 'claude-design', 'comfyui', 'design-md', 'excalidraw', 'humanizer', 'manim-video', 'p5js', 'popular-web-designs', 'pretext', 'sketch', 'songwriting-and-ai-music', 'touchdesigner-mcp', 'gif-search', 'heartmula', 'songsee', 'youtube-content', 'claude-code', 'codex', 'computer-use', 'merge-reconciler', 'opencode', 'yuanbao', 'hermes-desktop-plugins', 'audiocraft-audio-generation', 'evaluating-llms-harness', 'huggingface-hub', 'llama-cpp', 'segment-anything-model', 'serving-llms-vllm', 'weights-and-biases', 'jupyter-live-kernel', 'openhue', 'xurl', 'obsidian', 'polymarket', 'petdex', 'airtable', 'box', 'teams-meeting-pipeline', 'product-price-monitor', 'powerpoint', 'xlsx', 'arxiv', 'llm-wiki', 'research-paper-writing', 'blocked-page-recovery', 'blogwatcher', 'competitor-news-monitor', 'codebase-inspection', 'github-auth', 'github-code-review', 'github-issue-to-pr', 'github-issues', 'github-pr-workflow', 'github-repo-management', 'dogfood', 'hermes-agent-skill-authoring', 'inspecting-hermes-desktop-dom', 'node-inspect-debugger', 'python-debugpy', 'requesting-code-review', 'simplify-code', 'spike', 'systematic-debugging', 'test-driven-development']
+            sk['disabled'] = sorted(set(sk.get('disabled') or []) | set(off))
+            cfg['skills'] = sk
+            stt = cfg.get('stt') if isinstance(cfg.get('stt'), dict) else {}
+            local = stt.get('local') if isinstance(stt.get('local'), dict) else {}
+            stt['enabled'] = True
+            stt['echo_transcripts'] = False
+            stt['provider'] = 'local'
+            stt['language'] = 'pt'
+            local['language'] = 'pt'
+            local.setdefault('model', 'base')
+            stt['local'] = local
+            openai = stt.get('openai') if isinstance(stt.get('openai'), dict) else {}
+            openai['language'] = 'pt'
+            openai.setdefault('model', 'whisper-1')
+            stt['openai'] = openai
+            cfg['stt'] = stt
+            tts = cfg.get('tts') if isinstance(cfg.get('tts'), dict) else {}
+            tts['provider'] = 'fishaudio'
+            providers = tts.get('providers') if isinstance(tts.get('providers'), dict) else {}
+            providers['fishaudio'] = {
+                'type': 'command',
+                'command': 'python3 /opt/data/.hermes/scripts/fish_tts.py {input_path} {output_path} {format}',
+                'timeout': 60,
+            }
+            tts['providers'] = providers
+            cfg['tts'] = tts
+            voice = cfg.get('voice') if isinstance(cfg.get('voice'), dict) else {}
+            voice['auto_tts'] = True
+            cfg['voice'] = voice
+            mem = cfg.get('memory') if isinstance(cfg.get('memory'), dict) else {}
+            mem['user_profile_enabled'] = False
+            cfg['memory'] = mem
+            pl = cfg.get('plugins') if isinstance(cfg.get('plugins'), dict) else {}
+            en = [x for x in (pl.get('enabled') or []) if x]
+            for name in ('whatsapp-manager', 'basic'):
+                if name not in en:
+                    en.append(name)
+            pl['enabled'] = en
+            cfg['plugins'] = pl
+            pt = cfg.get('platform_toolsets') if isinstance(cfg.get('platform_toolsets'), dict) else {}
+            wa_strip = {
+                'clarify', 'clarifying_questions', 'memory', 'kanban', 'todo',
+                'session_search',
+            }
+            wa_tools = [t for t in (pt.get('whatsapp') or []) if t not in wa_strip]
+            for extra in ('delegate_task', 'task_delegation'):
+                if extra not in wa_tools:
+                    wa_tools.append(extra)
+            pt['whatsapp'] = wa_tools
+            cfg['platform_toolsets'] = pt
             with open(path, 'w') as f:
                 yaml.dump(cfg, f, default_flow_style=False)
+
+        # O painel lê WHATSAPP_MODE / ALLOWED_USERS do .env do Hermes, não do
+        # processo Docker. Sem isso o card mostra Bot por default visual e o
+        # placeholder 15551234567 — e o Self-chat marcado na UI some no reset.
+        def _upsert_env(env_path, updates):
+            lines = []
+            seen = set()
+            try:
+                with open(env_path) as fh:
+                    lines = fh.read().splitlines()
+            except OSError:
+                lines = []
+            out = []
+            for line in lines:
+                raw = line.strip()
+                if raw and not raw.startswith('#') and '=' in raw:
+                    key = raw.split('=', 1)[0].strip()
+                    if key in updates:
+                        out.append('%s=%s' % (key, updates[key]))
+                        seen.add(key)
+                        continue
+                out.append(line)
+            for key, value in updates.items():
+                if key not in seen:
+                    out.append('%s=%s' % (key, value))
+            os.makedirs(os.path.dirname(env_path), exist_ok=True)
+            with open(env_path, 'w') as fh:
+                fh.write('\n'.join(out) + '\n')
+
+        env_updates = {
+            'WHATSAPP_ENABLED': 'true',
+            'WHATSAPP_MODE': wa_mode,
+            'WHATSAPP_ALLOWED_USERS': wa_allowed,
+            'WHATSAPP_CLIENT_MODEL': client_model,
+            'WHATSAPP_CLIENT_PROVIDER': client_provider,
+            'WHATSAPP_OWNER_MODEL': owner_model,
+            'WHATSAPP_OWNER_PROVIDER': owner_provider,
+            'WHATSAPP_FOLLOWUP_ENABLED': os.environ.get('WHATSAPP_FOLLOWUP_ENABLED') or 'true',
+            'WHATSAPP_FOLLOWUP_SILENCE_MIN': os.environ.get('WHATSAPP_FOLLOWUP_SILENCE_MIN') or '30',
+        }
+        _home = ''.join(c for c in (os.environ.get('WHATSAPP_OWNER_NUMBER') or '') if c.isdigit())
+        if _home:
+            env_updates['WHATSAPP_HOME_CHANNEL'] = _home + '@s.whatsapp.net'
+        for env_path in ['/opt/data/.hermes/.env',
+                         '/opt/data/.hermes/profiles/whatsapp/.env']:
+            _upsert_env(env_path, env_updates)
 
         # Perfil "whatsapp" = clientes. Nenhuma ferramenta habilitada; o hook
         # pre_tool_call do plugin e a segunda camada, no backend.
@@ -281,7 +410,15 @@ services:
                 'toolsets': [], 'disabled_toolsets': disabled, 'tools': [],
                 'skills': {'enabled': False},
                 'terminal': {'backend': 'disabled'},
-                'display': {'show_system_header': False, 'tool_progress': 'off'},
+                'display': {
+                    'show_system_header': False,
+                    'tool_progress': 'off',
+                    'busy_ack_enabled': False,
+                    'busy_ack_detail': False,
+                    'busy_input_mode': 'queue',
+                    'interim_assistant_messages': False,
+                    'long_running_notifications': False,
+                },
             }, f, default_flow_style=False)
         print('[setup] config.yaml e perfil whatsapp escritos (modelo cliente: %s via %s)'
               % (client_model, client_provider))
@@ -334,8 +471,8 @@ services:
       - WHATSAPP_CONNECTION_NAME=${WHATSAPP_CONNECTION_NAME:-EmpreendedorSerial}
 
       # Debounce de mensagens (agrupa fragmentos de texto antes de processar)
-      - WHATSAPP_DEBOUNCE_INITIAL_MS=${WHATSAPP_DEBOUNCE_INITIAL_MS:-15000}
-      - WHATSAPP_DEBOUNCE_MIN_MS=${WHATSAPP_DEBOUNCE_MIN_MS:-2000}
+      - WHATSAPP_DEBOUNCE_INITIAL_MS=${WHATSAPP_DEBOUNCE_INITIAL_MS:-2500}
+      - WHATSAPP_DEBOUNCE_MIN_MS=${WHATSAPP_DEBOUNCE_MIN_MS:-1500}
       - WHATSAPP_DEBOUNCE_DECAY=${WHATSAPP_DEBOUNCE_DECAY:-0.6}
       - WHATSAPP_DEBOUNCE_SKIP_SELF_CHAT=${WHATSAPP_DEBOUNCE_SKIP_SELF_CHAT:-true}
 
@@ -349,10 +486,10 @@ services:
       # Os slugs abaixo precisam ser os do OpenRouter (vendor/modelo). DeepSeek aceita
       # apenas texto, então mídia (áudio e imagem) tem de ir para um modelo multimodal —
       # daí o Gemini via OpenRouter no MEDIA_MODEL.
-      - WHATSAPP_OWNER_MODEL=${WHATSAPP_OWNER_MODEL:-deepseek/deepseek-v4-flash}
-      - WHATSAPP_OWNER_PROVIDER=${WHATSAPP_OWNER_PROVIDER:-openrouter}
-      - WHATSAPP_CLIENT_MODEL=${WHATSAPP_CLIENT_MODEL:-deepseek/deepseek-v4-flash}
-      - WHATSAPP_CLIENT_PROVIDER=${WHATSAPP_CLIENT_PROVIDER:-openrouter}
+      - WHATSAPP_OWNER_MODEL=${WHATSAPP_OWNER_MODEL:-gpt-5.6-sol}
+      - WHATSAPP_OWNER_PROVIDER=${WHATSAPP_OWNER_PROVIDER:-openai-codex}
+      - WHATSAPP_CLIENT_MODEL=${WHATSAPP_CLIENT_MODEL:-gpt-5.6-luna}
+      - WHATSAPP_CLIENT_PROVIDER=${WHATSAPP_CLIENT_PROVIDER:-openai-codex}
       - WHATSAPP_CLIENT_MEDIA_MODEL=${WHATSAPP_CLIENT_MEDIA_MODEL:-google/gemini-3.1-flash-lite}
       - WHATSAPP_CONTACT_CLASSIFIER_MODEL=${WHATSAPP_CONTACT_CLASSIFIER_MODEL:-deepseek/deepseek-v4-flash}
 
@@ -370,16 +507,28 @@ services:
       - API_SERVER_KEY=${API_SERVER_KEY}
       - API_SERVER_CORS_ORIGINS=${API_SERVER_CORS_ORIGINS:-*}
 
-      # Dashboard (porta 9119)
+      # Dashboard (porta 9119). Hermes 0.20 exige o plugin `basic` + estas envs
+      # quando o bind é 0.0.0.0; senão a tela fica "SIGN-IN UNAVAILABLE".
       - HERMES_DASHBOARD=1
       - HERMES_DASHBOARD_HOST=0.0.0.0
       - HERMES_DASHBOARD_PORT=9119
       - HERMES_DASHBOARD_TUI=1
+      - HERMES_DASHBOARD_BASIC_AUTH_USERNAME=${HERMES_DASHBOARD_BASIC_AUTH_USERNAME:-admin}
+      - HERMES_DASHBOARD_BASIC_AUTH_PASSWORD=${HERMES_DASHBOARD_BASIC_AUTH_PASSWORD:-${HERMES_DASHBOARD_PASSWORD:-}}
 
       # Código do plugin + sync de contexto
       - HERMES_SETUP_GITHUB_USER=${HERMES_SETUP_GITHUB_USER:-raizandu}
       - HERMES_SETUP_GITHUB_REPO=${HERMES_SETUP_GITHUB_REPO:-whatsaya}
       - KEEP_LOCAL_PLUGIN=${KEEP_LOCAL_PLUGIN:-}
+      - HERMES_LOCAL_STT_LANGUAGE=${HERMES_LOCAL_STT_LANGUAGE:-pt}
+      - FISH_API_KEY=${FISH_API_KEY:-}
+      - FISH_REFERENCE_ID=${FISH_REFERENCE_ID:-}
+      - FISH_TTS_MODEL=${FISH_TTS_MODEL:-s2.1-pro-free}
+      - FISH_TTS_VOLUME=${FISH_TTS_VOLUME:-4}
+      - WHATSAPP_INBOUND_BUFFER_S=${WHATSAPP_INBOUND_BUFFER_S:-0}
+      - WHATSAPP_FOLLOWUP_ENABLED=${WHATSAPP_FOLLOWUP_ENABLED:-true}
+      - WHATSAPP_FOLLOWUP_SILENCE_MIN=${WHATSAPP_FOLLOWUP_SILENCE_MIN:-30}
+      - WHATSAPP_HOME_CHANNEL=${WHATSAPP_HOME_CHANNEL:-}
       - CONFIG_REPO=${CONFIG_REPO:-hermes_agent_context_contatcs}
       - CONFIG_GITHUB_TOKEN=${CONFIG_GITHUB_TOKEN:-}
 

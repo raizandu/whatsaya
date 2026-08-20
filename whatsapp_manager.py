@@ -1643,6 +1643,178 @@ def _schedule_contact_reply(chat_id: str, clean_text: str, turn_key: str) -> boo
     return True
 
 
+def _fish_tts_path() -> Path | None:
+    env = os.getenv("WHATSAPP_FISH_TTS", "").strip()
+    candidates = []
+    if env:
+        candidates.append(Path(env))
+    hermes_home = Path(os.getenv("HERMES_HOME", "/opt/data/.hermes"))
+    here = Path(__file__).resolve().parent
+    candidates.extend([
+        hermes_home / "scripts" / "fish_tts.py",
+        here / "deploy" / "scripts" / "fish_tts.py",
+        here.parent / "deploy" / "scripts" / "fish_tts.py",
+    ])
+    for path in candidates:
+        if path.is_file():
+            return path
+    return None
+
+
+_fish_tts_mod = None
+
+
+def _load_fish_tts():
+    """Carrega deploy/scripts/fish_tts.py (written_only_reason + mesmo CLI do Hermes)."""
+    global _fish_tts_mod
+    if _fish_tts_mod is not None:
+        return _fish_tts_mod
+    path = _fish_tts_path()
+    if not path:
+        return None
+    spec = importlib.util.spec_from_file_location("_whatsaya_fish_tts", path)
+    if not spec or not spec.loader:
+        return None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    _fish_tts_mod = mod
+    return mod
+
+
+def _voice_reply_enabled() -> bool:
+    if not os.getenv("FISH_API_KEY", "").strip():
+        return False
+    flag = os.getenv("WHATSAPP_AUTO_TTS", "true").strip().lower()
+    return flag not in {"0", "false", "no", "off"}
+
+
+def _send_bridge_media(chat_id: str, file_path: str, media_type: str = "audio") -> None:
+    payload = json.dumps({
+        "chatId": chat_id,
+        "filePath": file_path,
+        "mediaType": media_type,
+    }).encode("utf-8")
+    req = urllib.request.Request(f"{BRIDGE_URL}/send-media", data=payload, method="POST")
+    req.add_header("Content-Type", "application/json")
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        resp.read()
+
+
+def _fish_call(name: str, default, *args):
+    try:
+        fish = _load_fish_tts()
+        fn = getattr(fish, name, None) if fish else None
+        if callable(fn):
+            return fn(*args)
+    except Exception as err:
+        logger.warning(f"[voice] {name} falhou: {err}")
+    return default(*args) if callable(default) else default
+
+
+# Mesma regra do fish_tts.strip_fish_cues. Fallback obrigatório: se o módulo
+# não carregar, _fish_call senão só faz .strip() e a tag vaza no WhatsApp.
+_FISH_CUE_FALLBACK = re.compile(
+    r"\[(?!(?:n[uú]mero omitido)\])"
+    r"(?:very |slightly |extremely |a bit |um pouco )?"
+    r"[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ0-9 ,\-]{0,48}\]",
+    re.I,
+)
+
+
+def _strip_fish_cues_fallback(blob: str) -> str:
+    cleaned = _FISH_CUE_FALLBACK.sub("", blob or "")
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    cleaned = re.sub(r" *\n *", "\n", cleaned)
+    return cleaned.strip()
+
+
+def _split_voice_and_text(text: str) -> tuple[str, str, str]:
+    """(spoken, intro_text, written_after) — spoken keeps Fish cues."""
+    return _fish_call("split_voice_and_text", lambda blob: ((blob or "").strip(), "", ""), text)
+
+
+def _strip_fish_cues(text: str) -> str:
+    return _fish_call("strip_fish_cues", _strip_fish_cues_fallback, text)
+
+
+def _prepare_spoken_for_tts(spoken: str) -> str:
+    return _fish_call("prepare_spoken_for_tts", lambda blob: (blob or "").strip(), spoken)
+
+
+def _maybe_send_voice(chat_id: str, text: str) -> bool:
+    """Gera PTT no Fish e manda pelo bridge. True se a nota de voz saiu."""
+    if not _voice_reply_enabled():
+        return False
+    blob = (text or "").strip()
+    if not blob:
+        return False
+
+    script = _fish_tts_path()
+    if not script:
+        logger.info("[voice] fish_tts.py ausente — só texto")
+        return False
+
+    reason = _fish_call("written_only_reason", lambda _: None, blob)
+    if reason:
+        logger.info(f"[voice] skip tts: {reason}")
+        return False
+
+    spoken = _prepare_spoken_for_tts(blob)
+    if not spoken:
+        return False
+
+    try:
+        typing_payload = json.dumps({"chatId": chat_id}).encode("utf-8")
+        typing_req = urllib.request.Request(f"{BRIDGE_URL}/typing", data=typing_payload, method="POST")
+        typing_req.add_header("Content-Type", "application/json")
+        with urllib.request.urlopen(typing_req, timeout=5):
+            pass
+    except Exception:
+        pass
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="whatsaya-tts-") as tmp:
+            inp = Path(tmp) / "in.txt"
+            out = Path(tmp) / "out.ogg"
+            inp.write_text(spoken, encoding="utf-8")
+            proc = subprocess.run(
+                ["python3", str(script), str(inp), str(out), "ogg"],
+                capture_output=True,
+                text=True,
+                timeout=70,
+                env=os.environ.copy(),
+            )
+            err = (proc.stderr or "").strip()
+            if proc.returncode != 0 or not out.is_file() or out.stat().st_size < 64:
+                if "skip tts:" in err:
+                    logger.info(f"[voice] {err}")
+                else:
+                    logger.warning(f"[voice] fish_tts falhou rc={proc.returncode}: {err[-400:]}")
+                return False
+            _send_bridge_media(chat_id, str(out), "audio")
+            logger.info(f"[voice] ptt enviado chat={chat_id!r} bytes={out.stat().st_size}")
+            return True
+    except Exception as err:
+        logger.warning(f"[voice] envio falhou: {err}")
+        return False
+
+
+def _deliver_contact_reply(chat_id: str, clean_text: str) -> None:
+    """Voz só, texto só quando precisa copiar, ou intro + áudio + dado escrito."""
+    spoken, before, after = _split_voice_and_text(clean_text)
+    if before:
+        _human_send(chat_id, before)
+    voiced = bool(spoken) and _maybe_send_voice(chat_id, spoken)
+    if spoken and not voiced:
+        _human_send(chat_id, _strip_fish_cues(spoken))
+    if after:
+        _human_send(chat_id, after)
+    logger.info(
+        f"[voice] deliver spoken={bool(spoken)} voiced={voiced} "
+        f"intro={bool(before)} written={bool(after)}"
+    )
+
+
 def _normalize_brazilian_phone(phone: str) -> str:
     """Normaliza números de telefone brasileiros para comparação segura (tratando o dígito 9 extra)."""
     clean = "".join(c for c in phone if c.isdigit())
@@ -8126,6 +8298,9 @@ def pre_gateway_dispatch(*args, **kwargs):
         if chat_id and _check_chat_silenced(chat_id):
             return {"action": "skip", "reason": "conversa-silenciada"}
 
+        if chat_id:
+            _followup_note_activity(chat_id, inbound=True)
+
         if chat_id and sender_id:
             _sender_to_chat[sender_id] = chat_id
 
@@ -8275,6 +8450,11 @@ def pre_llm_call(*args, **kwargs):
                     if old_tk:
                         _turn_sent.discard(old_tk)
                     logger.info(f"[pre_llm_call] Novo turno para {chat_id}: {user_msg[:40]!r}")
+                    if not _session_is_owner(sender_id or "") and not _session_is_owner(chat_id or ""):
+                        _followup_note_activity(chat_id, inbound=True)
+                        logger.info(
+                            f"[followup] armado chat={chat_id!r} em {_followup_silence_s()}s"
+                        )
 
     if platform != "whatsapp":
         return None
