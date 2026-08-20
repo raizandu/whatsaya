@@ -46,54 +46,28 @@ def _make_post_llm_kwargs(session_id, response_text, platform="whatsapp"):
 
 
 def _call_post(session_id, response_text, platform="whatsapp"):
-    """Valida o dedup no hook atual de entrega (`transform_llm_output`)."""
-    sent: list[str] = []
-    original_send = wm._human_send
-    original_sync = wm._HUMAN_DELIVER_SYNC
-    original_gate = wm._assert_delivery_allowed
-    original_voice_fn = wm._maybe_send_voice
-    original_persist = wm._persist_turn_sent_to_disk
-    original_voice = os.environ.get("WHATSAPP_AUTO_TTS")
-
-    def fake_send(_chat_id, text, *, automation=False):
-        sent.append(text)
-        return "mock-message-id"
-
-    import hashlib
-    chat_id = wm._sender_to_chat.get(session_id)
-    if not chat_id:
-        if "@" in session_id:
-            chat_id = session_id
-        else:
-            digits = str(int(hashlib.sha256(session_id.encode()).hexdigest()[:12], 16))[:12]
-            chat_id = f"55{digits}@s.whatsapp.net"
-            wm._sender_to_chat[session_id] = chat_id
-    if chat_id not in wm._turn_key and session_id not in wm._turn_key:
-        wm._turn_key[chat_id] = "test:" + hashlib.sha256(
-            f"{session_id}\0{response_text}".encode()
-        ).hexdigest()
-
-    wm._human_send = fake_send
-    wm._HUMAN_DELIVER_SYNC = True
-    wm._assert_delivery_allowed = lambda _chat_id: None
-    wm._maybe_send_voice = lambda _chat_id, _text: None
-    wm._persist_turn_sent_to_disk = lambda _turn_key: None
-    os.environ["WHATSAPP_AUTO_TTS"] = "false"
+    """Chama post_llm_call diretamente e retorna o resultado."""
+    # Desabilitar typing indicator (sem bridge real)
+    original_urlopen = None
     try:
-        wm.transform_llm_output(
-            platform=platform,
-            session_id=session_id,
-            assistant_response=response_text,
-        )
-    finally:
-        wm._human_send = original_send
-        wm._HUMAN_DELIVER_SYNC = original_sync
-        if original_voice is None:
-            os.environ.pop("WHATSAPP_AUTO_TTS", None)
-        else:
-            os.environ["WHATSAPP_AUTO_TTS"] = original_voice
+        import urllib.request
+        original_urlopen = urllib.request.urlopen
+        urllib.request.urlopen = lambda *a, **kw: (_ for _ in ()).throw(Exception("mock"))
+    except Exception:
+        pass
 
-    return {"assistant_response": sent[0] if sent else ""}
+    import time as _time
+    original_sleep = _time.sleep
+    _time.sleep = lambda *a, **kw: None
+
+    try:
+        result = wm.post_llm_call(**_make_post_llm_kwargs(session_id, response_text, platform))
+    finally:
+        if original_urlopen:
+            urllib.request.urlopen = original_urlopen
+        _time.sleep = original_sleep
+
+    return result
 
 
 def _clear_state():
@@ -116,12 +90,12 @@ class TestSessionDedup(unittest.TestCase):
         self.assertNotEqual(resp, "")
         print("  [OK] primeira chamada passa")
 
-    def test_segunda_chamada_nova_mensagem_na_mesma_session_passa(self):
+    def test_segunda_chamada_mesma_session_suprimida(self):
         _call_post("272335554773018@s.whatsapp.net", "primeira resposta")
-        r2 = _call_post("272335554773018@s.whatsapp.net", "segunda resposta de outro turno")
+        r2 = _call_post("272335554773018@s.whatsapp.net", "segunda resposta (deve ser suprimida)")
         resp = (r2 or {}).get("assistant_response", "X")
-        self.assertNotEqual(resp, "")
-        print("  [OK] mesma session aceita nova mensagem/turno")
+        self.assertEqual(resp, "")
+        print("  [OK] segunda chamada mesma session suprimida")
 
     def test_sessions_diferentes_passam(self):
         r1 = _call_post("session-A", "resposta A")
@@ -138,8 +112,8 @@ class TestSessionDedup(unittest.TestCase):
         r1 = _call_post("272335554773018@s.whatsapp.net", "oi")
         r2 = _call_post("272335554773018@s.whatsapp.net", "oi de novo")
         self.assertNotEqual((r1 or {}).get("assistant_response", "X"), "")
-        self.assertNotEqual((r2 or {}).get("assistant_response", "X"), "")
-        print("  [OK] número +27 mantém turnos independentes")
+        self.assertEqual((r2 or {}).get("assistant_response", "X"), "")
+        print("  [OK] número +27 dedup correto")
 
     def test_numero_internacional_594(self):
         """Número da Guiana Francesa +594 não vaza."""
@@ -147,13 +121,12 @@ class TestSessionDedup(unittest.TestCase):
         r1 = _call_post("5940090822813@s.whatsapp.net", "oi")
         r2 = _call_post("5940090822813@s.whatsapp.net", "oi de novo")
         self.assertNotEqual((r1 or {}).get("assistant_response", "X"), "")
-        self.assertNotEqual((r2 or {}).get("assistant_response", "X"), "")
-        print("  [OK] número +594 mantém turnos independentes")
+        self.assertEqual((r2 or {}).get("assistant_response", "X"), "")
+        print("  [OK] número +594 dedup correto")
 
     def test_thread_race_condition(self):
         """Concorrência: somente uma thread envia, outras são suprimidas."""
         _clear_state()
-        wm._turn_key["272335554773018@s.whatsapp.net"] = "turn-race"
         results = []
         lock = threading.Lock()
 
