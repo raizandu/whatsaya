@@ -13,11 +13,13 @@
 #   reverso que preferir (Caddy, Nginx, Traefik standalone) na frente das
 #   portas publicadas abaixo. Sem domínio, acesse via IP:porta direto.
 #
-# Volume compartilhado: hermes_data → /opt/data
+# Dados: bind mount /opt/whatsaya/data → /opt/data (ver `volumes:` do serviço).
+#   Bind mount, não volume Docker nomeado — trocar por um nomeado num host que já
+#   tem dados aqui faz o container subir com volume novo e VAZIO, silenciosamente.
 #   /opt/data/.hermes/plugins/  → plugins carregados pelo gateway
 #   /opt/data/.hermes/platforms/whatsapp/bridge/bridge.js  → bridge Node.js
 #   /opt/data/.hermes/platforms/whatsapp/session/          → sessão WhatsApp
-#   /opt/data/workspace/        → repositórios clonados (ex: whatsappkit)
+#   /opt/data/workspace/        → repositórios clonados
 # ==============================================================================
 #
 # ██████████████████████████████████████████████████████████████████████████████
@@ -67,9 +69,7 @@
 #   Preencher CONFIG_REPO apontando para um repo que não existe faz o plugin avisar
 #   o dono no WhatsApp a cada contato salvo e a cada venda — preencha os dois ou
 #   nenhum. Para backup sem GitHub use deploy/backup-whatsaya.sh (snapshot local).
-#                          → sem repo/token o plugin nem tenta o push, então não gera
-#                            aviso no WhatsApp do dono. O aviso só aparece quando o sync
-#                            está configurado e falhou de verdade.
+#   Com os dois vazios o plugin nem tenta o push — nenhum aviso chega no WhatsApp.
 #
 # ██████████████████████████████████████████████████████████████████████████████
 # ▶ VARIÁVEIS OPCIONAIS
@@ -174,9 +174,9 @@
 # ==============================================================================
 #
 # 📂 MAPA DE PERSISTÊNCIA:
-#   /opt/data         → volume hermes_data  (workspace, SOUL.md, support_rules.md, .hermes/)
+#   /opt/data         → bind /opt/whatsaya/data       (workspace, SOUL.md, support_rules.md, .hermes/)
 #   /opt/data/.hermes → HERMES_HOME (plugins, plataformas, sessão WhatsApp, banco SQLite)
-#   /root/.hermes     → volume hermes_root  (config.yaml e .env criados pelo setup.sh)
+#   /root/.hermes     → bind /opt/whatsaya/root-hermes (config.yaml e .env criados pelo setup.sh)
 # ==============================================================================
 
 services:
