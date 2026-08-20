@@ -54,11 +54,19 @@
 #   WHATSAPP_OWNER_NAME    Nome do dono usado nos prompts e respostas (ex: Leo Alves)
 #                          → substitui o nome que antes estava fixo no código
 #
-# 📦 SINCRONIZAÇÃO DE CONTEXTO VIA GITHUB (opcional)
-#   CONFIG_GITHUB_TOKEN    Token GitHub (PAT) com acesso ao CONFIG_REPO
-#                          → serve para versionar personal_contacts.json e as personas
-#                            num repositório privado. Sem ele o bot funciona normalmente
-#                            com os arquivos do volume; só não há backup nem histórico.
+# 📦 SINCRONIZAÇÃO DE CONTEXTO VIA GITHUB (opt-in, desligado por padrão)
+#   O GitHub aqui é do produto: o template vive em raizandu/whatsaya e é de lá que
+#   personas e código chegam. Contato, venda e catálogo são dados de operação do
+#   cliente — não sobem para repositório nenhum a menos que você peça.
+#
+#   CONFIG_REPO            Repositório PRIVADO para versionar personal_contacts.json,
+#                          sales.json e as personas. Vazio = desligado (padrão), e o
+#                          bot roda 100% com os arquivos do volume.
+#   CONFIG_GITHUB_TOKEN    PAT com Contents: Read and write nesse repositório.
+#
+#   Preencher CONFIG_REPO apontando para um repo que não existe faz o plugin avisar
+#   o dono no WhatsApp a cada contato salvo e a cada venda — preencha os dois ou
+#   nenhum. Para backup sem GitHub use deploy/backup-whatsaya.sh (snapshot local).
 #                          → sem repo/token o plugin nem tenta o push, então não gera
 #                            aviso no WhatsApp do dono. O aviso só aparece quando o sync
 #                            está configurado e falhou de verdade.
@@ -118,7 +126,7 @@
 #   HERMES_SETUP_GITHUB_USER  Dono do GitHub de onde o plugin é clonado (padrão: raizandu)
 #   HERMES_SETUP_GITHUB_REPO  Nome do repositório do plugin (padrão: whatsaya)
 #   KEEP_LOCAL_PLUGIN         true/1 = não faz fetch/reset no boot (patch local no volume)
-#   CONFIG_REPO               Nome do repositório com contextos/contatos (padrão: hermes_agent_context_contatcs)
+#   CONFIG_REPO               Repositório privado de contexto do cliente (padrão: vazio = desligado)
 #
 # ⏱️ TIMEOUTS E OUTROS
 #   TZ                         Fuso horário (padrão: America/Sao_Paulo)
@@ -559,7 +567,10 @@ services:
       - WHATSAPP_FOLLOWUP_ENABLED=${WHATSAPP_FOLLOWUP_ENABLED:-true}
       - WHATSAPP_FOLLOWUP_SILENCE_MIN=${WHATSAPP_FOLLOWUP_SILENCE_MIN:-30}
       - WHATSAPP_HOME_CHANNEL=${WHATSAPP_HOME_CHANNEL:-}
-      - CONFIG_REPO=${CONFIG_REPO:-hermes_agent_context_contatcs}
+      # Vazio de propósito: dado de operação do cliente não vai para o GitHub sem
+      # decisão explícita. O default antigo apontava para um repo que nunca era criado,
+      # e o boot gastava 8 requisições em 404 fingindo que havia backup.
+      - CONFIG_REPO=${CONFIG_REPO:-}
       - CONFIG_GITHUB_TOKEN=${CONFIG_GITHUB_TOKEN:-}
 
       # Limite de passos por resposta — evita loops e controla custo

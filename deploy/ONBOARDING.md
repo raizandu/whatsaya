@@ -58,7 +58,9 @@ Mínimo para o bot responder:
 - `WHATSAPP_PIX_KEY` se houver venda no chat
 - `HERMES_SETUP_GITHUB_USER` — ver passo 4
 
-`CONFIG_REPO` + `CONFIG_GITHUB_TOKEN` são opcionais (backup de contatos/personas). Sem eles o bot funciona no volume.
+`CONFIG_REPO` + `CONFIG_GITHUB_TOKEN` vêm **vazios** e o normal é deixar assim: o GitHub do projeto é do produto (código e templates), não dos dados de operação do cliente. Se for preencher, preencha **os dois** — só um faz o dono receber "não consegui sincronizar" no WhatsApp a cada contato salvo e venda registrada.
+
+Backup nesse modo é local: instale `deploy/backup-whatsaya.sh` no cron (instruções no cabeçalho do próprio arquivo). Ele inclui a sessão do Baileys, então restaurar não obriga a reparear o número.
 
 ---
 
