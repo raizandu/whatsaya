@@ -2,7 +2,7 @@
 # Diagnóstico: conflito entre o plugin whatsapp-manager (bridge.js próprio)
 # e a plataforma WhatsApp nativa do Hermes Agent >= 0.19 ("Quicksilver").
 #
-# Roda dentro do container hermes (Portainer → Console, ou `docker exec -it hermes bash`).
+# Roda dentro do container hermes (`docker exec -it hermes bash`).
 # Somente leitura — não mata processos nem altera arquivos.
 #
 # Uso: bash diagnose_native_whatsapp_conflict.sh [porta]

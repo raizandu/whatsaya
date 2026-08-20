@@ -41,7 +41,7 @@ client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
 
 if not client_id or not client_secret:
     print("❌ GOOGLE_CLIENT_ID e GOOGLE_CLIENT_SECRET não encontrados.")
-    print(f"   Configure-os em {DOTENV_PATH} ou nas variáveis de ambiente do Portainer.")
+    print(f"   Configure-os em {DOTENV_PATH}.")
     sys.exit(1)
 
 try:

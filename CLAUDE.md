@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## O que é este repositório
 
-Plugin **`whatsapp-manager`** (v1.1) para o **Hermes Agent v2026** — não é uma aplicação autônoma. Não existe entrypoint local: nada de `npm start`. O código é instalado dentro do container do Hermes, que carrega `whatsapp_manager.py` e chama `register(ctx)` (final do arquivo) para registrar hooks. Deploy é via docker-compose no Portainer/Swarm ou EasyPanel.
+Plugin **`whatsapp-manager`** (v1.1) para o **Hermes Agent v2026** — não é uma aplicação autônoma. Não existe entrypoint local: nada de `npm start`. O código é instalado dentro do container do Hermes, que carrega `whatsapp_manager.py` e chama `register(ctx)` (final do arquivo) para registrar hooks. Deploy é SSH + `docker compose` direto na VPS — sem painel.
 
 Licença **BUSL-1.1** (Licensor: André Alencar, Change Date 2031-06-25 → MIT). Copiar/modificar/redistribuir é permitido; o Additional Use Grant limita o uso a "development, evaluation, and personal testing" — uso em produção exige licença comercial do autor.
 
@@ -60,8 +60,8 @@ Desde o Hermes Agent v0.19 ("Quicksilver"), o **core** (`hermes_plugins.whatsapp
 
 São mecanismos distintos, em camadas diferentes:
 
-- **Pausa global** — `stop_bot` / `start_bot` (sinônimos `!pausar`, `!retomar`, `!parar`, `!iniciar`). Aplicada no Node (`bridge.js`), persistida em `bot_state.json` dentro de `SESSION_DIR`. Descarta na origem mensagens de qualquer um que não seja o dono. **Só funciona se enviada pelo dono no self-chat** — digitar na conversa de cliente não faz nada.
-- **Silêncio de 10 min** (`WHATSAPP_SILENCE_DURATION_MIN`) — por chat individual. Dois gatilhos: o dono **lê** a conversa (detectado por `chats.update` quando não-lidas cai para `0`/`-1`), ou o dono **envia mensagem manual** (`fromMe: true` e o id não está em `recentlySentIds`). Mensagens começando com `!` ou comandos de controle não disparam o silêncio.
+- **Pausa global** — `stop_bot` / `start_bot` (sinônimos `!pausar`, `!retomar`, `!parar`, `!iniciar`). Aplicada no Node (`bridge.js`), persistida em `bot_state.json` dentro de `SESSION_DIR`. Descarta na origem mensagens de qualquer um que não seja o dono. **Só funciona se enviada pelo dono no self-chat** — digitar na conversa de cliente não faz nada. Estado consultável via `GET /bot-status` (`{ botPaused, uptime }`).
+- **Silêncio de 10 min** (`WHATSAPP_SILENCE_DURATION_MIN`) — por chat individual. Dois gatilhos: o dono **lê** a conversa (detectado por `chats.update` quando não-lidas cai para `0`/`-1`), ou o dono **envia mensagem manual** (`fromMe: true` e o id não está em `recentlySentIds`). Mensagens começando com `!` ou comandos de controle não disparam o silêncio. Consultável via `GET /chat-status/:chatId`; `POST /chat-unsilence` limpa manualmente antes dos 10 min.
 
 `DESIGN.md` tem o fluxograma completo em Mermaid.
 
@@ -85,7 +85,11 @@ O mesmo arquivo existe em vários caminhos — edite o certo:
 
 ## Deploy de alterações
 
-O runbook completo está em `.gemini/skills/deploy-plugin/SKILL.md` (escrito para o Gemini CLI, mas o procedimento é agnóstico): commit e push no `main` → botão **Pull** do plugin na aba *Plugins* do Dashboard do Hermes → **Restart** do container no Portainer → conferir `grep "whatsapp-manager" /opt/data/.hermes/logs/hermes.log | tail -20` procurando por `bridge.js atualizado` → testar com `stop_bot` no WhatsApp. Alterações no plugin só carregam após o restart. `bot_state.json` sobrevive ao restart.
+O runbook completo está em `.gemini/skills/deploy-plugin/SKILL.md` (escrito para o Gemini CLI, mas o procedimento é agnóstico e roda por SSH, sem painel): commit e push no `main` → dentro do container, `git pull` no clone do plugin (`docker exec hermes sh -c 'cd /opt/data/.hermes/plugins/whatsapp-manager && git pull --ff-only origin main'`) → `docker restart hermes` (ou `docker compose restart`, do host) → conferir `grep "whatsapp-manager" /opt/data/.hermes/logs/hermes.log | tail -20` procurando por `bridge.js atualizado` → testar com `stop_bot` no WhatsApp. Alterações no plugin só carregam após o restart. `bot_state.json` sobrevive ao restart.
+
+**Restart não é sempre suficiente.** `docker restart` reexecuta o `Cmd` já gravado no container — pega mudança de *código* (o plugin git-pulled acima), mas **não** pega mudança no próprio `docker-compose.yml`/`.env` (chave nova, provider novo, porta nova). Pra isso precisa `docker compose up -d` no host, que recria o container com o `Cmd`/env atualizados.
+
+**`bridge.js` tem uma flakiness conhecida no boot:** o bootstrap do plugin (`shutil.copy2`) às vezes falha com `Permission denied` ao copiar `bridge.js` do clone pros caminhos que o Node realmente lê (`platforms/whatsapp/bridge/`, `scripts/whatsapp-bridge/`, `profiles/whatsapp/scripts/whatsapp-bridge/` — o processo em execução usa o último). Parece uma race transitória do bind mount, não reproduz sob demanda. Se depois de um restart `grep -c` de uma mudança recente em `bridge.js` der 0 nesses 3 caminhos, copie manualmente (`docker exec hermes cp <clone>/bridge.js <caminho>`) e reinicie de novo.
 
 ## Grafo de conhecimento (graphify)
 
@@ -110,11 +114,11 @@ Tudo o que muda por cliente é **variável de ambiente** + os templates em `depl
 
 Fora as envs, só os arquivos de conteúdo: `deploy/SOUL.md`, `SOUL_WHATSAPP.md`, `SOUL_EMAIL.md` e `support_rules.md` são **templates com placeholders `{{...}}`**. Preencha antes de subir — placeholder não substituído vai literal para o cliente, e um `support_rules.md` com produto errado faz o bot inventar oferta que não existe.
 
-URL do plugin: `config.plugin_git_url` / `config.plugin_raw_root`. Caminho oficial: [`deploy/ONBOARDING.md`](deploy/ONBOARDING.md). `PASSO_A_PASSO.md` e `deploy/README.md` apontam para lá; Portainer/EasyPanel são extra.
+URL do plugin: `config.plugin_git_url` / `config.plugin_raw_root`. Caminho oficial: [`deploy/ONBOARDING.md`](deploy/ONBOARDING.md).
 
 ## Como o código chega na VPS
 
-O `command:` do `deploy/docker-compose.easypanel.yml` clona `raizandu/whatsaya` (ou `HERMES_SETUP_GITHUB_*`) a cada boot, salvo `KEEP_LOCAL_PLUGIN`. Fluxo de atualização: `git push` na `main` → restart. O Swarm/`docker-compose.yml` não clona: só injeta as mesmas envs para o auto-update do plugin.
+O `command:` do `deploy/docker-compose.yml` clona `raizandu/whatsaya` (ou `HERMES_SETUP_GITHUB_*`) a cada boot, salvo `KEEP_LOCAL_PLUGIN`. Fluxo de atualização: `git push` na `main` → restart do container (recreate só é necessário se o `docker-compose.yml`/env vars mudaram).
 
 Duas decisões deliberadas nesse bloco:
 - **É clone, não download de arquivos avulsos.** O `setup.sh` original baixava 9 arquivos individuais e não criava `.git`, o que fazia `_self_update_plugin_code()` cair no fallback de lista fixa — arquivos novos nunca chegavam.

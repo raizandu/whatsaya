@@ -20,7 +20,7 @@ Guia completo de referência sobre como o sistema funciona: onde estão as crede
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                        PORTINGER                            │
+│                    .env (host, via SSH)                     │
 │                  (Variáveis de Ambiente)                    │
 └──────────┬──────────────┬──────────────────┬────────────────┘
            │              │                  │
@@ -36,7 +36,7 @@ Guia completo de referência sobre como o sistema funciona: onde estão as crede
 
 ### 1. WhatsApp
 
-**Localização:** Variáveis de ambiente no Portainer (não em arquivos)
+**Localização:** `.env` no host, na mesma pasta do `docker-compose.yml` (ex: `/opt/whatsaya/.env`) — lido automaticamente pelo `docker compose`, não em arquivos dentro do container
 
 **Variáveis esperadas:**
 ```
@@ -78,7 +78,7 @@ curl -s http://127.0.0.1:3000/whatsapp/status   # teste funcional direto, não d
 
 **ATENÇÃO:** O sistema de email NÃO usa IMAP/SMTP. Usa a **Google Gmail API** via OAuth2.
 
-**Localização:** Variáveis de ambiente no Portainer
+**Localização:** mesmo `.env` do host (ver seção WhatsApp acima)
 
 **Variáveis esperadas:**
 ```
@@ -258,7 +258,7 @@ cat /opt/data/.hermes/auth.json | python3 -c "import json,sys; d=json.load(sys.s
 
 ## ⚠️ Patches de Visão (MiniMax) — Efêmeros
 
-O arquivo `/opt/hermes/agent/auxiliary_client.py` é **efêmero** — todo rebuild do container o sobrescreve. Os patches abaixo precisam ser re-aplicados após cada rebuild manual via Portainer.
+O arquivo `/opt/hermes/agent/auxiliary_client.py` é **efêmero** — todo rebuild do container o sobrescreve. Os patches abaixo precisam ser re-aplicados após cada rebuild manual (`docker compose up -d` / imagem nova).
 
 ### Patch 1 — Adicionar `minimax` a `_PROVIDERS_WITHOUT_VISION`
 
@@ -410,7 +410,7 @@ cat /opt/data/.hermes/auth.json | python3 -c "import json,sys; d=json.load(sys.s
 
 ### Credenciais não aparecem no ambiente
 - **Causa:** Reinício do container wipeou variáveis temporárias
-- **Solução:** Verificar no Portainer se as variáveis estão configuradas no container
+- **Solução:** `docker exec hermes sh -c 'echo $VAR_NAME'` pra confirmar que o valor chegou dentro do container; se estiver vazio, conferir o `.env` no host e rodar `docker compose up -d` (recreate, não só restart)
 
 ### GitHub push: token removido do remote URL
 - **Causa:** Após `git remote set-url origin https://github.com/...` (sem token), o push falha com `Authentication failed`

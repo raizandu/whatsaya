@@ -88,8 +88,7 @@ Volume Compartilhado: /opt/data
 ├── bridge.js                    # Bridge WhatsApp (Node.js + Baileys)
 ├── plugin.yaml                  # Manifesto do plugin
 ├── deploy/
-│   ├── docker-compose.yml       # Swarm / Portainer (Single container + setup auto)
-│   ├── docker-compose.easypanel.yml  # Easypanel (Single container + setup auto)
+│   ├── docker-compose.yml       # Container único + setup automático (SSH, `docker compose up -d`)
 │   ├── setup.sh                 # Setup inicial de 1 clique
 │   ├── SOUL.md                  # Persona base do dono (Engenheiro/Assistente)
 │   ├── SOUL_WHATSAPP.md         # Persona de atendimento aos clientes
@@ -112,29 +111,21 @@ Volume Compartilhado: /opt/data
 - Número do dono, nome, catálogo e (se vender no chat) chave Pix
 - Um provider de modelo (OpenRouter, Gemini ou Codex no dashboard) — não preencha duas chaves da cadeia Google → OpenAI → OpenRouter
 
-Portainer / EasyPanel + domínio continuam abaixo como caminho extra.
+Domínio é opcional — detalhes abaixo.
 
 ---
 
-### Deploy via Portainer (Swarm)
+### Deploy manual (resumo — o passo a passo completo está em ONBOARDING.md)
 
-1. No Portainer → **Stacks** → **Add stack**.
-2. Cole o conteúdo de [`deploy/docker-compose.yml`](deploy/docker-compose.yml).
-3. Preencha as variáveis de ambiente essenciais:
-   - `GOOGLE_API_KEY`: Chave da API Gemini
-   - `WHATSAPP_OWNER_NUMBER`: Seu número sem `+` (ex: `5511999999999`)
-   - `WHATSAPP_OWNER_NAME`: Seu nome (ex: `André`)
-   - `CONFIG_GITHUB_TOKEN`: PAT do GitHub para sincronização dos contatos
-4. Clique em **Deploy the stack**. O container irá subir, aplicar as configurações de segurança, e iniciar a bridge interna.
-
----
-
-### Deploy via Easypanel
-
-1. No Easypanel → **New Service** → **Compose**.
-2. Cole o conteúdo de [`deploy/docker-compose.easypanel.yml`](deploy/docker-compose.easypanel.yml).
-3. Na aba *Environment*, adicione as variáveis e certifique-se de marcar **"Criar arquivo .env"**.
-4. Clique em **Deploy**.
+1. SSH na VPS, `cd` até onde vai ficar o compose (ex: `/opt/whatsaya`).
+2. Copie [`deploy/docker-compose.yml`](deploy/docker-compose.yml) pra lá.
+3. Crie um `.env` na mesma pasta com as variáveis essenciais:
+   - Um provider de modelo (`OPENROUTER_API_KEY`, `GOOGLE_API_KEY`, ou Codex OAuth)
+   - `WHATSAPP_OWNER_NUMBER`: seu número sem `+` (ex: `5511999999999`)
+   - `WHATSAPP_OWNER_NAME`: seu nome (ex: `André`)
+   - `CONFIG_GITHUB_TOKEN`: opcional, PAT do GitHub para sincronização dos contatos
+4. `docker compose up -d`. O container sobe, aplica as configurações de segurança, e inicia a bridge interna.
+5. Domínio é opcional — coloque o proxy reverso que preferir (Caddy, Nginx, Traefik) na frente das portas publicadas.
 
 ---
 

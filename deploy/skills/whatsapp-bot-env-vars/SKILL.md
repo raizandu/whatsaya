@@ -60,21 +60,16 @@ pre_llm_call → aplica persona (Modo A = André, Modo B = Cliente)
 ## Onde as Variáveis são Lidas
 
 ### 1. `WHATSAPP_OWNER_NUMBER` (CRÍTICA)
-**Onde configurar:** Portainer → Stack → Environment Variables
+**Onde configurar:** arquivo `.env` na mesma pasta do `docker-compose.yml` do host (ex: `/opt/whatsaya/.env`). O `docker compose` lê esse arquivo automaticamente e substitui os `${VAR}` do compose — não precisa de nenhuma UI.
 
-| Ambiente | Valor |
-|---|---|
-| Produção (Portainer) | `5586981612061` (setado na stack) |
-| Docker-compose fallback | `${WHATSAPP_OWNABLE_NUMBER:-5586981612061}` |
+**O que faz:** Número do dono. O plugin `whatsapp-manager` usa essa variável para decidir se uma mensagem é do dono (comportamento admin) ou de um cliente (comportamento suporte).
 
-**O que faz:** Número do dono (André). O plugin `whatsapp-manager` — gerenciado pelo dashboard do Hermes — usa essa variável para decidir se uma mensagem é do dono (comportamento admin) ou de um cliente (comportamento suporte).
-
-**Importante:** Não é lida do `.env` — é definida diretamente nas env vars da stack no Portainer.
+**Importante:** mudar essa variável exige `docker compose up -d` (recreate) — `docker restart` sozinho não recarrega env vars novas, só reexecuta o `Cmd` já gravado no container.
 
 ---
 
 ### 2. `HERMES_HOME`
-**Onde configurar:** Portainer → Environment Variables da stack
+**Onde configurar:** mesmo `.env` acima.
 
 | Padrão | Valor atual |
 |---|---|
@@ -87,7 +82,7 @@ pre_llm_call → aplica persona (Modo A = André, Modo B = Cliente)
 ---
 
 ### 3. `WHATSAPP_HOME_CHANNEL`
-**Onde configurar:** Portainer → Environment Variables
+**Onde configurar:** mesmo `.env` acima.
 
 **O que faz:** Define o canal padrão pra onde mensagens são enviadas.
 
@@ -95,22 +90,22 @@ pre_llm_call → aplica persona (Modo A = André, Modo B = Cliente)
 
 ## Arquivos de Configuração
 
-### Docker-compose (`/opt/data/workspace/whatsappkit/docker-compose.yml`)
-Template da stack. Variáveis SEM fallback hardcoded — o valor real vem só do Portainer:
+### Docker-compose (`deploy/docker-compose.yml` no repo do plugin)
+Template do serviço. Variáveis sem fallback hardcoded onde importa (segredos/número real):
 ```yaml
 environment:
   - WHATSAPP_OWNER_NUMBER=${WHATSAPP_OWNER_NUMBER}
   - HERMES_HOME=${HERMES_HOME:-/opt/data/.hermes}
 ```
 
-**Nunca coloque fallback com número real no docker-compose.** Tokens e credenciais também não devem aparecer no repo — use variáveis de ambiente externas.
+**Nunca coloque fallback com número real no docker-compose.** Tokens e credenciais também não devem aparecer no repo — ficam só no `.env` do host, que não é versionado.
 
-### Plugin (`/opt/data/.hermes/plugins/whatsapp-manager/__init__.py`)
+### Plugin (`/opt/data/.hermes/plugins/whatsapp-manager/whatsapp_manager.py`)
 Lê variáveis com `os.getenv()`. Se `WHATSAPP_OWNER_NUMBER` vier vazia, o plugin retorna `None` prematuramente e **não injeta histórico**.
-O arquivo do plugin é instalado/atualizado pelo dashboard do Hermes, não pelo `setup.sh`.
+O arquivo do plugin é um clone git de verdade, atualizado via `git pull` dentro do container (por SSH) — não por UI de painel.
 
-### `.env` (`/opt/data/.env`)
-Arquivo local de desenvolvimento. **Não é usado em produção** — o Portainer define as variáveis diretamente na stack. O `env_file` não deve ser adicionado ao docker-compose de produção.
+### `.env` (no host, ao lado do `docker-compose.yml`; ex: `/opt/whatsaya/.env`)
+**É a fonte real das variáveis em produção.** O `docker compose` lê esse arquivo por convenção (mesma pasta do compose) e interpola nos `${VAR}` do `environment:`. Confirme com `docker exec hermes sh -c 'echo $VAR_NAME'` que o valor realmente chegou dentro do container antes de assumir que "está configurado" — uma variável presente no `.env` mas vazia (`VAR=`) ainda aparece no `env` do container, só que sem valor.
 
 ---
 
@@ -240,7 +235,7 @@ print(format_history_for_context(msgs, '558681612061'))
 2. `ps aux | grep whatsapp_message` — server rodando?
 3. `curl "http://127.0.0.1:18732/chat/<LID>/messages?limit=3"` — histórico retorna?
 4. `sqlite3 /opt/data/.hermes/whatsapp_messages.db "SELECT COUNT(*) FROM messages"` — DB tem dados?
-5. Se mudou plugin → restart stack no Portainer
+5. Se mudou plugin → `docker restart hermes` (via SSH)
 
 ## GitHub Repo
 
@@ -279,9 +274,9 @@ Após o fix: **minimax → openrouter → gemini** (via `google/gemini-3-flash-p
 
 **⚠️ Patches de Visão no Caminho Efêmero**
 
-`/opt/hermes/agent/auxiliary_client.py` é efêmero — todo rebuild sobrescreve. Patches aplicados previamente (minimax em `_PROVIDERS_WITHOUT_VISION`, gemini em `_VISION_AUTO_PROVIDER_ORDER`) precisam ser re-aplicados após rebuild manual via Portainer.
+`/opt/hermes/agent/auxiliary_client.py` é efêmero — todo rebuild sobrescreve. Patches aplicados previamente (minimax em `_PROVIDERS_WITHOUT_VISION`, gemini em `_VISION_AUTO_PROVIDER_ORDER`) precisam ser re-aplicados após rebuild manual (`docker compose up -d` / imagem nova).
 
-**Se o gateway travar ao restart, NÃO reinicie** — verificar se Portainer congelou.
+**Se o gateway travar ao restart, NÃO reinicie de novo direto** — verifique primeiro se o container ficou preso num estado transitório (`docker ps`, `docker logs hermes --since 2m`).
 
 > Ver `hermes-architecture` para solução completa de visão (mini-max → gemini fallback).
 
@@ -303,7 +298,7 @@ curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/
 # 4. VERIFICAR PATCHES DE VISÃO (p符didos em todo restart)
 grep '"minimax"' /opt/hermes/agent/auxiliary_client.py | grep "_PROVIDERS_WITHOUT_VISION" || echo "PATCH MISSING: minimax not in _PROVIDERS_WITHOUT_VISION"
 grep '"gemini"' /opt/hermes/agent/auxiliary_client.py | grep "_VISION_AUTO_PROVIDER_ORDER" || echo "PATCH MISSING: gemini not in _VISION_AUTO_PROVIDER_ORDER"
-# Se missing → avisar usuário que precisa restartar pelo Portainer para re-aplicar patches
+# Se missing → avisar usuário que precisa restartar o container (SSH: docker restart hermes) para re-aplicar patches
 
 # 5. Imagens (testar enviar imagem no WhatsApp)
 grep "não consegui visualizar" /opt/data/.hermes/logs/gateway.log | tail -3

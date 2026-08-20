@@ -47,11 +47,11 @@ if client_id and client_secret:
     print(f'✅ GOOGLE_CLIENT_SECRET: {client_secret[:6]}...')
 else:
     print('❌ Credenciais não encontradas no ambiente.')
-    print('   Configure GOOGLE_CLIENT_ID e GOOGLE_CLIENT_SECRET no Portainer.')
+    print('   Configure GOOGLE_CLIENT_ID e GOOGLE_CLIENT_SECRET no .env do host.')
 "
 ```
 
-Se as credenciais não existirem → instruir o usuário a configurá-las no Portainer antes de continuar.
+Se as credenciais não existirem → instruir o usuário a configurá-las no `.env` do host (mesma pasta do `docker-compose.yml`), seguido de `docker compose up -d` pra recriar o container, antes de continuar.
 
 ---
 
@@ -235,4 +235,4 @@ Se as credenciais ainda não existem:
 1. Acesse https://console.cloud.google.com/apis/credentials
 2. Crie um **OAuth 2.0 Client ID** do tipo **"Aplicativo para computador"** (Desktop app)
 3. Baixe o JSON e extraia `client_id` e `client_secret`
-4. Configure no Portainer Stack como `GOOGLE_CLIENT_ID` e `GOOGLE_CLIENT_SECRET`
+4. Configure no `.env` do host como `GOOGLE_CLIENT_ID` e `GOOGLE_CLIENT_SECRET`, depois `docker compose up -d` pra recriar o container

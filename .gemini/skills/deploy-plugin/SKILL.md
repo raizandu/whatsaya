@@ -28,7 +28,7 @@ Use quando o usuário disser algo como:
 - O repositório local está no workspace ativo
 - O remote `origin` aponta para o repositório no GitHub
 - O servidor Hermes tem o plugin clonado em `/opt/data/.hermes/plugins/whatsapp-manager`
-- Acesso ao Dashboard do Hermes e ao Portainer do servidor
+- Acesso SSH ao host que roda o container `hermes` (não precisa de painel nenhum)
 
 ---
 
@@ -63,45 +63,36 @@ Se der erro de divergência, usar `git pull --rebase origin main` antes do push.
 
 ---
 
-## Etapa 2 — Git Pull no Dashboard do Hermes
+## Etapa 2 — Git Pull dentro do container (SSH)
 
-O plugin é atualizado diretamente pelo painel do Hermes, na aba de Plugins.
+O plugin é um clone git de verdade dentro do volume — atualiza com um `git pull` comum, via SSH.
 
-### 2.1 Acessar o Dashboard do Hermes
+**Antes de puxar: `git fetch origin` e comparar com o `main` local.** Se outra sessão/agente também estiver trabalhando neste repo, `origin/main` pode ter avançado com commits que você não tem localmente — nesse caso, integre (`git log --oneline main..origin/main`) antes de dar push, ou seu commit vai divergir e o pull no servidor vai falhar/conflitar.
 
-1. Acesse o Dashboard do Hermes
-2. Navegue até a aba **Plugins**
+```bash
+ssh <host-da-vps>
+docker exec hermes sh -c 'cd /opt/data/.hermes/plugins/whatsapp-manager && git fetch origin && git pull --ff-only origin main && git log --oneline -1'
+```
 
-### 2.2 Atualizar o plugin
-
-1. Localize o plugin `whatsapp-manager` na lista
-2. Clique no botão de **Pull** / **Atualizar** do plugin
-3. Aguarde a confirmação de que o pull foi concluído
-
-> **Verificar:** Confirme que a mensagem de sucesso aparece. Se aparecer `Already up to date`, o push da Etapa 1 pode não ter sido concluído.
+> **Verificar:** o `git log` no fim deve mostrar o commit que você acabou de dar push. Se o `pull --ff-only` falhar, o clone do servidor tem commits locais não sincronizados — investigue antes de forçar (`reset --hard` descarta trabalho, só use se tiver certeza).
 
 ---
 
-## Etapa 3 — Restart do Container
+## Etapa 3 — Restart (ou recreate) do Container
 
-As alterações no plugin só são carregadas quando o Hermes reinicia.
-
-### Opção A — Pelo Portainer (Recomendado)
-
-1. Acesse o Portainer do servidor
-2. Vá em **Containers** → selecione o container do Hermes
-3. Clique em **Restart**
-4. Aguarde o container subir (status `running`)
-
-### Opção B — Pelo Portainer Stack
-
-1. Vá em **Stacks** → selecione a stack do Hermes
-2. Clique em **Update the stack** → **Update**
-
-### Opção C — Via CLI (se tiver acesso SSH ao host)
+As alterações no plugin só são carregadas quando o Hermes reinicia. Isso é feito por SSH:
 
 ```bash
 docker restart hermes
+# ou, se o container for gerenciado por docker compose:
+docker compose restart hermes    # (a partir da pasta com o docker-compose.yml)
+```
+
+**Atenção — restart não é sempre suficiente.** `docker restart` reexecuta o `Cmd` já gravado no container, então pega mudança de *código* (o `git pull` da Etapa 2). Mas se a mudança envolveu o `docker-compose.yml`/`.env` (nova variável de ambiente, novo valor de uma existente), o `Cmd`/env do container ficam desatualizados até você recriar de verdade:
+
+```bash
+cd /opt/whatsaya   # ou onde estiver o docker-compose.yml deste host
+docker compose up -d   # recria o container com o Cmd/env atualizados
 ```
 
 ---
@@ -110,18 +101,22 @@ docker restart hermes
 
 ### Conferir se o container subiu
 
-No Portainer → Containers → verificar que o status é `running` e que o uptime é recente (poucos segundos/minutos).
+```bash
+docker ps --filter name=hermes --format '{{.Status}}'
+```
+
+Deve mostrar `Up` com poucos segundos/minutos de uptime.
 
 ### Conferir logs do plugin
 
-No terminal do container (via Console do Portainer):
-
 ```bash
-grep "whatsapp-manager" /opt/data/.hermes/logs/hermes.log | tail -20
+docker exec hermes grep "whatsapp-manager" /opt/data/.hermes/logs/hermes.log | tail -20
+# ou, se esse arquivo não existir na versão atual do Hermes:
+docker logs hermes --since 1m | grep -i "whatsapp-manager\|bridge.js"
 ```
 
 Procurar por:
-- `✓ bridge.js atualizado` — confirma que o bridge foi copiado
+- `✓ bridge.js atualizado` (ou `bridge.js atualizado em <path>`) — confirma que o bridge foi copiado
 - `✓ Skills registradas` — confirma que as skills carregaram
 - Ausência de erros `⚠️` ou `❌`
 
@@ -135,10 +130,11 @@ Envie `start_bot` ou `stop_bot` no WhatsApp para confirmar que o bridge está re
 
 | Problema | Solução |
 |----------|---------|
-| `git pull` dá conflito no container | `cd /opt/data/.hermes/plugins/whatsapp-manager && git reset --hard origin/main` |
-| Container não sobe após restart | Verificar logs no Portainer → Containers → Logs |
-| Plugin não carrega as alterações | Conferir se o `git pull` trouxe os arquivos e se o container foi reiniciado |
-| `bridge.js` não atualiza no bridge | O `register()` do plugin copia automaticamente no boot — verificar logs por `bridge.js atualizado` |
+| `git pull --ff-only` falha no container | `git fetch origin && git log --oneline origin/main -5` — provavelmente outra sessão pushou commits que você não integrou local antes de dar push. Puxe pro seu repo local, resolva, dê push de novo, então repita a Etapa 2. Só use `git reset --hard origin/main` se tiver certeza de que não há trabalho a preservar no clone do servidor |
+| Container não sobe após restart | `docker logs hermes --since 2m` |
+| Plugin não carrega as alterações | Conferir se o `git pull` trouxe os arquivos (`git log --oneline -1` no clone do servidor) e se o container foi reiniciado |
+| Mudou env var/`docker-compose.yml` mas não pegou | `docker restart` não recarrega env/Cmd — precisa `docker compose up -d` (recreate) |
+| `bridge.js` não atualiza no bridge, ou boot loga `Permission denied` copiando `bridge.js` | Flakiness conhecida do bootstrap (`shutil.copy2`, provável race no bind mount). Copie manualmente pros 3 caminhos que o Node pode estar lendo e reinicie: `docker exec hermes sh -c 'for T in /opt/data/.hermes/platforms/whatsapp/bridge/bridge.js /opt/data/.hermes/scripts/whatsapp-bridge/bridge.js /opt/data/.hermes/profiles/whatsapp/scripts/whatsapp-bridge/bridge.js; do cp /opt/data/.hermes/plugins/whatsapp-manager/bridge.js "$T"; done'` |
 | Push rejeitado por divergência | `git pull --rebase origin main && git push origin main` |
 
 ---

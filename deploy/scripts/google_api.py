@@ -3,13 +3,8 @@
 google_api.py — Auxiliar de autenticação OAuth2 para a Gmail API
 Usado por: support_agent.py
 
-⚠️  ATENÇÃO — CÓPIA DE MANUTENÇÃO
-Este arquivo é uma cópia de /google_api.py (raiz do projeto).
-NÃO EDITE DIRETAMENTE. Faça alterações no arquivo raiz e execute:
-    cp ../../google_api.py deploy/scripts/google_api.py
-
 Fluxo:
-  1. Lê GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET do ambiente (Portainer stack env ou .env)
+  1. Lê GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET do ambiente (.env)
   2. Carrega/salva o refresh_token em /opt/data/.hermes/google_token.json
   3. Devolve um Resource object da googleapiclient pronto para uso
 
@@ -43,7 +38,7 @@ try:
     from dotenv import load_dotenv
     load_dotenv(DOTENV_PATH)
 except ImportError:
-    pass  # variáveis já devem estar no ambiente via Portainer
+    pass  # variáveis já devem estar no ambiente
 
 # ---------------------------------------------------------------------------
 # build_service — ponto de entrada principal
@@ -75,7 +70,7 @@ def build_service(api_name: str = "gmail", api_version: str = "v1"):
     if not client_id or not client_secret:
         raise RuntimeError(
             "GOOGLE_CLIENT_ID e GOOGLE_CLIENT_SECRET não encontrados. "
-            "Configure-os no Portainer (stack env vars) ou em /opt/data/.env"
+            "Configure-os em /opt/data/.env"
         )
 
     creds = None

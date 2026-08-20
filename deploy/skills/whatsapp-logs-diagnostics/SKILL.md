@@ -46,7 +46,7 @@ print(domain or "DOMINIO_NAO_CONFIGURADO")
 '
 ```
 
-* Nota: Se o domínio retornar `DOMINIO_NAO_CONFIGURADO`, informe ao usuário que ele precisa configurar a variável `HERMES_SERVER_DOMAIN` na stack do Portainer (ou arquivo `.env`) para conseguir visualizar via browser externo.
+* Nota: Se o domínio retornar `DOMINIO_NAO_CONFIGURADO`, informe ao usuário que ele precisa configurar a variável `HERMES_SERVER_DOMAIN` no arquivo `.env` do host para conseguir visualizar via browser externo.
 
 ---
 

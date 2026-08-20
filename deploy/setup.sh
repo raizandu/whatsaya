@@ -323,7 +323,7 @@ else
     fi
 fi
 
-# Permite configurar max_turns via variável de ambiente da stack (Portainer/Easypanel)
+# Permite configurar max_turns via variável de ambiente (.env)
 ENV_MAX_TURNS="${MAX_TURNS:-$HERMES_MAX_TURNS}"
 if [ -n "$ENV_MAX_TURNS" ] && [ -f "$BASE_DIR/config.yaml" ]; then
     echo "⚙️ Configurando max_turns para $ENV_MAX_TURNS conforme variável de ambiente da stack..."

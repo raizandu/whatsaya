@@ -2,7 +2,7 @@
 
 Este é o caminho oficial para replicar o kit. Você opera o servidor; o cliente só entrega conteúdo (persona, catálogo, número, Pix).
 
-Portainer, EasyPanel e domínio são caminhos extras — ver [README.md](README.md) e [DEPLOY_EASYPANEL.md](DEPLOY_EASYPANEL.md). Não comece por eles.
+Deploy é SSH + `docker compose` na VPS, sem painel — se você (ou seu agente de IA) tem acesso SSH ao host, não precisa de mais nada. Domínio é opcional (veja README.md).
 
 Agente: use a skill `whatsaya-onboard` para executar este roteiro e `whatsaya-diagnose` quando o bot já está no ar e o comportamento está errado.
 
@@ -32,7 +32,7 @@ Não copie CNPJ, preço ou nome de outro cliente para o código. Cliente novo = 
 - IP basta. Domínio é opcional.
 - Portas no host: `9119` (dashboard + `/whatsapp/qr`) e, se for usar a API, `8642`.
 
-Use [`docker-compose.easypanel.yml`](docker-compose.easypanel.yml) neste caminho (funciona com `docker compose up`, sem Swarm). O [`docker-compose.yml`](docker-compose.yml) é Swarm/Portainer.
+Use [`docker-compose.yml`](docker-compose.yml) — funciona com `docker compose up -d` puro, sem Swarm, sem painel. Um `.env` na mesma pasta preenche as variáveis `${VAR}` do compose.
 
 No `.env` do host, mapeie as portas se o compose não publicar `HOST:CONTAINER`:
 
@@ -44,14 +44,14 @@ No `.env` do host, mapeie as portas se o compose não publicar `HOST:CONTAINER`:
 
 ## 3. Ambiente
 
-Lista completa e defaults: cabeçalho de [`docker-compose.easypanel.yml`](docker-compose.easypanel.yml). Tabela curta: [CLAUDE.md — Ao replicar](../CLAUDE.md#ao-replicar-este-kit-para-outro-cliente).
+Lista completa e defaults: cabeçalho de [`docker-compose.yml`](docker-compose.yml). Tabela curta: [CLAUDE.md — Ao replicar](../CLAUDE.md#ao-replicar-este-kit-para-outro-cliente).
 
 Mínimo para o bot responder:
 
 - `API_SERVER_KEY` — `openssl rand -hex 32`
 - `WHATSAPP_OWNER_NUMBER` / `WHATSAPP_OWNER_NAME`
 - **Um** provider de modelo. A cadeia do plugin é Google → OpenAI → OpenRouter e para na primeira chave preenchida. Deixe as outras vazias.
-  - OpenRouter: `OPENROUTER_API_KEY` (default da stack EasyPanel)
+  - OpenRouter: `OPENROUTER_API_KEY` (default da stack)
   - Gemini: `GOOGLE_API_KEY`
   - Codex OAuth: autentique no dashboard do Hermes (fluxo “Other” / Codex). Não misture com chave OpenAI preenchida se a intenção for Codex.
 - `WHATSAPP_PIX_KEY` se houver venda no chat
@@ -109,9 +109,12 @@ Zero matches. Depois: restart do container para o plugin reler.
 
 ## 6. Parear o WhatsApp
 
-1. Suba com `WHATSAPP_ENABLED=true` só depois do plugin e das personas existirem. Para o *primeiro* QR, se o gateway ficar instável, use `false`, pareie, depois volte para `true` — detalhe em [DEPLOY_EASYPANEL.md](DEPLOY_EASYPANEL.md).
-2. Abra `http://IP:9119/whatsapp/qr` (ou `?format=png`) e `…/whatsapp/status`.
-3. No celular: **Aparelhos conectados → Conectar um aparelho**.
+A URL `/whatsapp/qr` serve para **reconexão**, não para o primeiro pareamento. Para o primeiro QR:
+
+1. Suba com `WHATSAPP_ENABLED=false` (mantém o gateway estável enquanto plugin/personas terminam de ser conferidos).
+2. Por SSH: `docker compose exec hermes hermes whatsapp` e escaneie o QR que aparece no terminal — **Aparelhos conectados → Conectar um aparelho** no celular.
+3. Mude `WHATSAPP_ENABLED=true` no `.env` e `docker compose up -d` de novo (recreate — variável de ambiente não pega só com restart).
+4. Daí em diante `http://IP:9119/whatsapp/qr` (ou `?format=png`) e `…/whatsapp/status` funcionam para reconexões futuras.
 
 O card do dashboard (Bot / Self-chat) lê `WHATSAPP_MODE` do `.env` do Hermes (`/opt/data/.hermes/.env`). O número `15551234567` é só placeholder da UI — a allowlist real é `WHATSAPP_ALLOWED_USERS`. **Deixe Mode = Bot.** Self-chat nativo do Hermes atende só você mesmo e corta os clientes. Comando do dono no “mensagem para si” (`quais comandos`, `stop_bot`) já funciona em modo Bot, via plugin. O compose regrava isso no boot para não sumir no reset.
 
@@ -136,6 +139,12 @@ Não declare o cliente no ar sem isto:
 | Texto com `[confident]` / `[empathetic]` / `[happy]` | Cliente **não** vê a tag. Se vazar, o strip do `_human_send` / adapter não está no plugin que está rodando |
 
 Sessão de teste suja o histórico. Apague a sessão Hermes daquele JID se for repetir o teste do zero.
+
+**Riscos conhecidos:**
+- Transcrição de áudio de cliente via OpenRouter não foi validada exaustivamente em produção. O PTT do WhatsApp é OGG/Opus e a documentação do OpenRouter cita `wav`/`mp3` para `input_audio`. O código tenta `input_audio` e, se falhar, refaz a chamada com data URI. Se não funcionar, o log mostra `[media] OpenRouter falhou (tentativa N/2): ...`. Saída: converter pra `mp3` antes de enviar, ou usar `GOOGLE_API_KEY` só pra mídia — mas preencher `GOOGLE_API_KEY` faz o Gemini vencer a cadeia **para tudo**, não só áudio.
+- `test_find_product_matches_partial_keyword` falha por motivo desconhecido (mockado, sem dependência de path/rede). Afeta casamento parcial de nome de produto ("mini pc" vs "Mini Pc Acemagic Ryzen 7"). Confirme no ambiente Linux antes de confiar no registro automático de vendas.
+- `git: dubious ownership` no boot é corrigido automaticamente pelo próprio `command:` do compose (`git config --global --add safe.directory`) — não é erro.
+- `Cannot find package '@whiskeysockets/baileys'` ao rodar os testes locais significa que o `npm install` do bridge não rodou (o `package-lock.json` é gitignorado de propósito) — rode `npm install` antes de `npm test`.
 
 ---
 
@@ -181,35 +190,12 @@ Voz de resposta: Fish Audio, modelo `s2.1-pro-free` (campanha grátis até 31/08
 
 ## 10. Depois do ar
 
-- Atualizar plugin: push neste repo → restart. Confira no log `bridge.js atualizado` / `whatsapp-manager`.
+- Atualizar plugin: push neste repo → `docker restart hermes` (ou `docker compose restart`) já basta — o boot faz `fetch` + `reset --hard` do plugin. Confira no log `bridge.js atualizado` / `whatsapp-manager`.
+- Mudou env var ou o próprio `docker-compose.yml`? `docker restart` **não** pega — precisa `docker compose up -d` (recria o container com o `Cmd`/env novos).
 - Mudar só persona/catálogo: edite `/opt/data/SOUL_WHATSAPP.md` e `support_rules.md` (ou o `CONFIG_REPO`) e reinicie.
 - `stop_bot` / `start_bot` só valem no self-chat do dono.
 - Cliente seguinte: volte ao passo 1. Código igual; mudam env + templates.
 
 ---
 
-## 9. Fullsync e triagem inicial do cliente
-
-Depois do primeiro pareamento e de o status ficar `connected`, execute o pipeline descrito em [`WHATSAPP_HISTORY_TRIAGE.md`](WHATSAPP_HISTORY_TRIAGE.md):
-
-```bash
-python3 deploy/scripts/whatsapp_history_triage.py \
-  --config deploy/scripts/whatsapp_history_triage.yaml run
-```
-
-O pipeline aguarda o lote histórico, cria snapshot/CSV e deixa o prompt para a skill `whatsapp-client-triage`. Depois da classificação, ele gera:
-
-```text
-/opt/data/.hermes/workspace/whatsapp_triagem_revisao_cliente_YYYY-MM-DD.md
-```
-
-O Markdown deve ser revisado pelo dono antes de qualquer flag ser aplicada. Envio ao self-chat é explícito:
-
-```bash
-python3 deploy/scripts/whatsapp_history_triage.py \
-  --config deploy/scripts/whatsapp_history_triage.yaml send \
-  --report /opt/data/.hermes/workspace/whatsapp_triagem_revisao_cliente_YYYY-MM-DD.md \
-  --chat-id <JID_DO_DONO>
-```
-
-Não envie snapshot bruto ao cliente. Não deixe mensagens históricas acionarem o LLM.
+Aviso histórico: este kit não é o fork `leoalvesia/whatsappkit` (Comunidade Empreendedor Serial, Portainer, Gemini, `setup.sh` via curl). Não faça fork de `whatsappkit` nem rode aquele `setup.sh` apontando pra este projeto — não é o mesmo fluxo.
