@@ -4399,6 +4399,17 @@ def _find_contact_matches(identifier: str) -> list[tuple[str, str, str]]:
     return matches
 
 
+def _is_contact_blocked(chat_id: str) -> bool:
+    """True se o dono bloqueou esse contato (campo 'blocked' em personal_contacts.json).
+
+    O campo é gravado por _update_contact_fields, que já espelha entre a chave @lid e
+    @s.whatsapp.net do mesmo contato — então basta olhar a entrada da chave recebida.
+    """
+    if not chat_id:
+        return False
+    return bool((_load_personal_contacts().get(str(chat_id)) or {}).get("blocked"))
+
+
 def _update_contact_fields(identifier: str, fields: dict) -> str:
     """Atualiza campos específicos de um contato em personal_contacts.json pelo nome ou número.
 
@@ -5438,6 +5449,12 @@ def _ensure_contact_ai_access(
     """
     if is_historical:
         return False, "historical-import"
+
+    # Bloqueio manual do dono tem prioridade sobre qualquer outra regra do gate —
+    # sem isso um contato marcado como bloqueado ainda gerava chamada ao LLM (e
+    # gastava a quota do provider) enquanto o gate só olhava legado/novo lead.
+    if _is_contact_blocked(chat_id):
+        return False, "owner-blocked"
 
     with _CONTACT_AI_POLICY_LOCK:
         contacts: dict = {}
@@ -7292,6 +7309,57 @@ def pre_gateway_dispatch(*args, **kwargs):
             logger.info(f"[contact-card] Cartão guardado: name='{card_name}' phone='{card_phone}'")
         return {"action": "skip", "reason": "contact-card-stored"}
 
+    # Comando: bloquear / desbloquear / listar bloqueados — determinístico (sem LLM).
+    # "desbloquear" contém "bloquear" como substring, então checa ele primeiro.
+    _unblock_match = is_owner and is_self_chat and re.match(r"^desbloquear\s+(.+)$", msg_text, re.IGNORECASE)
+    _block_match = (
+        is_owner and is_self_chat and not _unblock_match
+        and re.match(r"^bloquear\s+(.+)$", msg_text, re.IGNORECASE)
+    )
+    _list_blocked_cmd = is_owner and is_self_chat and normalized_msg in (
+        "listar bloqueados", "listar contatos bloqueados", "contatos bloqueados",
+        "quem esta bloqueado", "quem está bloqueado",
+    )
+
+    if _unblock_match:
+        chat_id_cmd = str(event.source.chat_id) if event.source.chat_id else ""
+        identifier = _unblock_match.group(1).strip()
+        result = _update_contact_fields(identifier, {"blocked": False})
+        reply = "🔓 Contato desbloqueado. O bot volta a responder normalmente." if result.startswith("✅") else result
+        if chat_id_cmd:
+            _human_send(chat_id_cmd, reply)
+        return {"action": "skip", "reason": "unblock-contact-command"}
+
+    if _block_match:
+        chat_id_cmd = str(event.source.chat_id) if event.source.chat_id else ""
+        identifier = _block_match.group(1).strip()
+        result = _update_contact_fields(identifier, {"blocked": True})
+        if result.startswith("✅"):
+            reply = (
+                "🚫 Contato bloqueado. O bot vai ignorar mensagens desse número (sem chamar "
+                f"o LLM) até você mandar `desbloquear {identifier}`."
+            )
+        else:
+            reply = result
+        if chat_id_cmd:
+            _human_send(chat_id_cmd, reply)
+        return {"action": "skip", "reason": "block-contact-command"}
+
+    if _list_blocked_cmd:
+        chat_id_cmd = str(event.source.chat_id) if event.source.chat_id else ""
+        contacts = _load_personal_contacts()
+        blocked_names = [
+            (data.get("name") or key) for key, data in contacts.items()
+            if isinstance(data, dict) and data.get("blocked") and "@lid" not in key
+        ]
+        reply = (
+            "🚫 Contatos bloqueados:\n" + "\n".join(f"• {n}" for n in blocked_names)
+            if blocked_names else "Nenhum contato bloqueado no momento."
+        )
+        if chat_id_cmd:
+            _human_send(chat_id_cmd, reply)
+        return {"action": "skip", "reason": "list-blocked-command"}
+
     sync_keywords = [
         "sync contacts", "sync contatos", "sincronizar contatos",
         "sincronize contatos", "sincronize os contatos", "sincronizar os contatos",
@@ -7366,7 +7434,10 @@ def pre_gateway_dispatch(*args, **kwargs):
             "• `start_bot` — reativa o atendimento a clientes\n"
             "• `sincronizar contatos` — classifica novos contatos e sincroniza com o GitHub\n"
             "• `fazer follow` — manda 1 follow nos leads que estão sem responder "
-            "(o automático só roda uma vez; o lead responder reseta)\n\n"
+            "(o automático só roda uma vez; o lead responder reseta)\n"
+            "• `bloquear <nome ou número>` — ignora esse contato completamente (nem chama o LLM)\n"
+            "• `desbloquear <nome ou número>` — volta a responder esse contato normalmente\n"
+            "• `listar bloqueados` — mostra quem está bloqueado agora\n\n"
             "*👤 ATUALIZAR CONTATO*\n"
             "• Em linguagem natural: _\"a Isabel é minha filha, apelido Bebel\"_\n"
             "• Comando direto: `update contact <nome> campo=valor`\n"
@@ -8624,6 +8695,16 @@ _ACTION_CLAIM_PATTERNS = [
     r"(fiz|feit[oa]|execut|realiz)\b.*\b(isso|alteraç|ediç|inclusão)",
     r"já (adicion|inclu|registr|atualiz|salv)",
 ]
+# Mensagens que o core do Hermes gera quando o provider do modelo falha (429, auth,
+# conexão, etc.) depois das retries — texto fixo de agent/turn_finalizer.py, nunca deve
+# chegar no cliente. Suprimido em transform_llm_output; dono é avisado no lugar.
+_GATEWAY_PROVIDER_ERROR_PATTERNS = [
+    r"provider authentication failed",
+    r"model provider rejected the request",
+    r"model provider is rate-limiting requests",
+    r"model server is not responding",
+    r"model provider failed after retries",
+]
 # Prompt Mestre §17 — vazamento técnico/interno (filtro por linha).
 _INTERNAL_LEAK_PATTERNS = [
     r"self[- \u2010-\u2015]?improvement",
@@ -8704,7 +8785,12 @@ _HERMES_STATUS_RE = re.compile(
     r"/sethome|"
     r"no home channel is set|"
     r"home channel is where hermes|"
-    r"type /sethome",
+    r"type /sethome|"
+    r"provider authentication failed|"
+    r"model provider rejected the request|"
+    r"model provider is rate-limiting requests|"
+    r"model server is not responding|"
+    r"model provider failed after retries",
     re.I,
 )
 _CNPJ_PATTERN = re.compile(r"\b\d{2}\.?\d{3}\.?\d{3}/\d{4}-?\d{2}\b")
@@ -8870,6 +8956,26 @@ def _assert_delivery_allowed(chat_id: str) -> None:
         raise DeliveryBlocked("takeover ativo ou estado do chat indisponível")
 
 
+def _notify_owner_gateway_error(chat_id: str, error_text: str) -> None:
+    """Avisa o dono quando o provider do modelo falha (429, auth, conexão) e a resposta
+    de erro do core do Hermes foi suprimida antes de chegar no cliente. Sem isso o dono
+    nunca saberia que um contato ficou sem resposta."""
+    owner_number = config.whatsapp_owner_number
+    if not owner_number:
+        return
+    contact_name = (_load_personal_contacts().get(str(chat_id)) or {}).get("name") or chat_id
+    owner_chat = f"{owner_number}@s.whatsapp.net"
+    try:
+        _human_send(
+            owner_chat,
+            f"⚠️ O provider do modelo falhou respondendo {contact_name} e a mensagem de "
+            f"erro foi bloqueada — o cliente não recebeu nada.\nMotivo: {str(error_text).strip()}\n\n"
+            "Confira os logs do Hermes ou responda manualmente se for urgente."
+        )
+    except Exception as err:
+        logger.error(f"[gateway-error] Falha ao notificar dono: {err}")
+
+
 def _reserve_contact_send(session_id: str, chat_id: str, preview: str) -> tuple[bool, str]:
     """Reserva um turno sem marcá-lo como entregue antes do `messageId`."""
     session_clean = session_id
@@ -8928,11 +9034,17 @@ def transform_llm_output(*args, **kwargs):
     if _session_is_owner(session_id):
         return None
 
+    chat_id = _resolve_mapped_chat_id(session_id)
+
+    if any(re.search(p, str(response_text), re.IGNORECASE) for p in _GATEWAY_PROVIDER_ERROR_PATTERNS):
+        logger.warning(f"[transform_llm_output] erro de provider/gateway suprimido chat={chat_id!r}: {response_text!r}")
+        _notify_owner_gateway_error(chat_id, str(response_text))
+        return "\n"
+
     clean_text = _prepare_contact_reply(str(response_text))
     if not clean_text:
         return "\n"
 
-    chat_id = _resolve_mapped_chat_id(session_id)
     if not chat_id:
         logger.error("[delivery-gate] sessão sem destinatário canônico: %r", session_id)
         _log_suppressed("RECIPIENT_UNRESOLVED", session_id, "", clean_text)

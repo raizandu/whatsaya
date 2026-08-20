@@ -1615,6 +1615,11 @@ function isSystemError(message) {
       lowercaseMsg.includes('unauthorized access') ||
       lowercaseMsg.includes('rate limited') ||
       lowercaseMsg.includes('rate limit') ||
+      lowercaseMsg.includes('rate-limiting') ||
+      lowercaseMsg.includes('provider authentication failed') ||
+      lowercaseMsg.includes('model provider rejected the request') ||
+      lowercaseMsg.includes('model server is not responding') ||
+      lowercaseMsg.includes('model provider failed after retries') ||
       lowercaseMsg.includes('failed to generate') ||
       lowercaseMsg.includes('connection failed') ||
       lowercaseMsg.includes('bad gateway') ||
