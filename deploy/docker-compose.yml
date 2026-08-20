@@ -75,10 +75,14 @@
 #
 # 🤖 MODELOS POR FUNÇÃO (padrão: OpenRouter)
 #   Use slugs do OpenRouter no formato vendor/modelo.
-#   WHATSAPP_OWNER_MODEL          Uso interno / perfil default (padrão gpt-5.6-sol)
-#   WHATSAPP_OWNER_PROVIDER       Provider do dono             (padrão openai-codex)
-#   WHATSAPP_CLIENT_MODEL         WhatsApp clientes            (padrão gpt-5.6-luna)
-#   WHATSAPP_CLIENT_PROVIDER      Provider de clientes         (padrão openai-codex)
+#   WHATSAPP_OWNER_MODEL              Uso interno / perfil default (padrão gpt-5.6-luna)
+#   WHATSAPP_OWNER_PROVIDER           Provider do dono             (padrão openai-codex)
+#   WHATSAPP_OWNER_REASONING_EFFORT   Esforço de raciocínio do dono (padrão high — deepseek-v4-flash
+#                                     do fallback nem sempre suporta "max", varia por rota do OpenRouter)
+#   WHATSAPP_CLIENT_MODEL             WhatsApp clientes            (padrão gpt-5.6-luna)
+#   WHATSAPP_CLIENT_PROVIDER          Provider de clientes         (padrão openai-codex)
+#   WHATSAPP_CLIENT_REASONING_EFFORT  Esforço de raciocínio do cliente (padrão medium —
+#                                     mais barato que max; suba se as respostas ficarem rasas)
 #   WHATSAPP_CLIENT_MEDIA_MODEL   Transcrição de áudio e leitura de imagem
 #                                 (padrão google/gemini-3.1-flash-lite — precisa ser
 #                                  multimodal; DeepSeek aceita só texto e falharia)
@@ -231,8 +235,10 @@ services:
         # cliente continuar chamando o Gemini mesmo com tudo configurado para OpenRouter.
         client_model = os.environ.get('WHATSAPP_CLIENT_MODEL') or 'gpt-5.6-luna'
         client_provider = os.environ.get('WHATSAPP_CLIENT_PROVIDER') or 'openai-codex'
-        owner_model = os.environ.get('WHATSAPP_OWNER_MODEL') or 'gpt-5.6-sol'
+        client_reasoning_effort = os.environ.get('WHATSAPP_CLIENT_REASONING_EFFORT') or 'medium'
+        owner_model = os.environ.get('WHATSAPP_OWNER_MODEL') or 'gpt-5.6-luna'
         owner_provider = os.environ.get('WHATSAPP_OWNER_PROVIDER') or client_provider
+        owner_reasoning_effort = os.environ.get('WHATSAPP_OWNER_REASONING_EFFORT') or 'high'
         wa_mode = os.environ.get('WHATSAPP_MODE') or 'bot'
         wa_allowed = os.environ.get('WHATSAPP_ALLOWED_USERS') or '*'
 
@@ -308,6 +314,9 @@ services:
             cfg['display'] = disp
             cfg['model'] = {'default': owner_model, 'provider': owner_provider}
             cfg['fallback_providers'] = fallback_chain
+            agent_cfg = cfg.get('agent') if isinstance(cfg.get('agent'), dict) else {}
+            agent_cfg['reasoning_effort'] = owner_reasoning_effort
+            cfg['agent'] = agent_cfg
             sk = cfg.get('skills') if isinstance(cfg.get('skills'), dict) else {}
             off = ['architecture-diagram', 'ascii-art', 'ascii-video', 'baoyu-infographic', 'claude-design', 'comfyui', 'design-md', 'excalidraw', 'humanizer', 'manim-video', 'p5js', 'popular-web-designs', 'pretext', 'sketch', 'songwriting-and-ai-music', 'touchdesigner-mcp', 'gif-search', 'heartmula', 'songsee', 'youtube-content', 'claude-code', 'codex', 'computer-use', 'merge-reconciler', 'opencode', 'yuanbao', 'hermes-desktop-plugins', 'audiocraft-audio-generation', 'evaluating-llms-harness', 'huggingface-hub', 'llama-cpp', 'segment-anything-model', 'serving-llms-vllm', 'weights-and-biases', 'jupyter-live-kernel', 'openhue', 'xurl', 'obsidian', 'polymarket', 'petdex', 'airtable', 'box', 'teams-meeting-pipeline', 'product-price-monitor', 'powerpoint', 'xlsx', 'arxiv', 'llm-wiki', 'research-paper-writing', 'blocked-page-recovery', 'blogwatcher', 'competitor-news-monitor', 'codebase-inspection', 'github-auth', 'github-code-review', 'github-issue-to-pr', 'github-issues', 'github-pr-workflow', 'github-repo-management', 'dogfood', 'hermes-agent-skill-authoring', 'inspecting-hermes-desktop-dom', 'node-inspect-debugger', 'python-debugpy', 'requesting-code-review', 'simplify-code', 'spike', 'systematic-debugging', 'test-driven-development']
             sk['disabled'] = sorted(set(sk.get('disabled') or []) | set(off))
@@ -424,7 +433,7 @@ services:
             yaml.dump({
                 'model': {'default': client_model, 'provider': client_provider},
                 'fallback_providers': fallback_chain,
-                'agent': {'tool_use_enforcement': 'disabled'},
+                'agent': {'tool_use_enforcement': 'disabled', 'reasoning_effort': client_reasoning_effort},
                 'gateway': {'delivery_ledger': False},
                 'compression': {'codex_gpt55_autoraise_notice': False},
                 'toolsets': [], 'disabled_toolsets': disabled, 'tools': [],
@@ -506,10 +515,12 @@ services:
       # Os slugs abaixo precisam ser os do OpenRouter (vendor/modelo). DeepSeek aceita
       # apenas texto, então mídia (áudio e imagem) tem de ir para um modelo multimodal —
       # daí o Gemini via OpenRouter no MEDIA_MODEL.
-      - WHATSAPP_OWNER_MODEL=${WHATSAPP_OWNER_MODEL:-gpt-5.6-sol}
+      - WHATSAPP_OWNER_MODEL=${WHATSAPP_OWNER_MODEL:-gpt-5.6-luna}
       - WHATSAPP_OWNER_PROVIDER=${WHATSAPP_OWNER_PROVIDER:-openai-codex}
+      - WHATSAPP_OWNER_REASONING_EFFORT=${WHATSAPP_OWNER_REASONING_EFFORT:-high}
       - WHATSAPP_CLIENT_MODEL=${WHATSAPP_CLIENT_MODEL:-gpt-5.6-luna}
       - WHATSAPP_CLIENT_PROVIDER=${WHATSAPP_CLIENT_PROVIDER:-openai-codex}
+      - WHATSAPP_CLIENT_REASONING_EFFORT=${WHATSAPP_CLIENT_REASONING_EFFORT:-medium}
       - WHATSAPP_CLIENT_MEDIA_MODEL=${WHATSAPP_CLIENT_MEDIA_MODEL:-google/gemini-3.1-flash-lite}
       - WHATSAPP_CONTACT_CLASSIFIER_MODEL=${WHATSAPP_CONTACT_CLASSIFIER_MODEL:-deepseek/deepseek-v4-flash}
 

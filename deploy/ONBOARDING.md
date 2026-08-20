@@ -118,7 +118,7 @@ A URL `/whatsapp/qr` serve para **reconexão**, não para o primeiro pareamento.
 
 O card do dashboard (Bot / Self-chat) lê `WHATSAPP_MODE` do `.env` do Hermes (`/opt/data/.hermes/.env`). O número `15551234567` é só placeholder da UI — a allowlist real é `WHATSAPP_ALLOWED_USERS`. **Deixe Mode = Bot.** Self-chat nativo do Hermes atende só você mesmo e corta os clientes. Comando do dono no “mensagem para si” (`quais comandos`, `stop_bot`) já funciona em modo Bot, via plugin. O compose regrava isso no boot para não sumir no reset.
 
-Modelo persistente: clientes/WhatsApp = `WHATSAPP_CLIENT_MODEL` (padrão `gpt-5.6-luna`, reasoning high). Uso interno no perfil default = `WHATSAPP_OWNER_MODEL` (padrão `gpt-5.6-sol`). Sem isso o painel volta para o modelo que estiver no `config.yaml` antigo.
+Modelo persistente: clientes/WhatsApp = `WHATSAPP_CLIENT_MODEL` (padrão `gpt-5.6-luna`, `WHATSAPP_CLIENT_REASONING_EFFORT` padrão `medium`). Uso interno no perfil default = `WHATSAPP_OWNER_MODEL` (padrão `gpt-5.6-luna` também, `WHATSAPP_OWNER_REASONING_EFFORT` padrão `high` — não `max`, porque o `deepseek-v4-flash` do fallback nem sempre suporta esse nível). Sem isso o dashboard volta para o modelo que estiver no `config.yaml` antigo.
 
 Se `/whatsapp/qr` do dashboard não gerar o primeiro QR, o fallback que funcionou em campo é o fluxo pair-only da ponte na porta `8080` (processo à parte). Depois do scan: pare esse processo, deixe só o bridge do container, confirme `connected` em `/whatsapp/status`.
 
