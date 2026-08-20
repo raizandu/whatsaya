@@ -24,13 +24,19 @@ import { Boom } from '@hapi/boom';
 import pino from 'pino';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync, unlinkSync, rmSync } from 'fs';
-import { randomBytes } from 'crypto';
+import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync, unlinkSync, rmSync, renameSync } from 'fs';
+import { randomBytes, createHash } from 'crypto';
 import { execSync, spawn } from 'child_process';
 import { tmpdir } from 'os';
 import qrcode from 'qrcode';
 import qrcodeTerminal from 'qrcode-terminal';
 import { matchesAllowedUser, parseAllowedUsers } from './allowlist.js';
+import {
+  getStoredMessage,
+  initHistoryStore,
+  persistHistoryBatch,
+  persistLiveMessage,
+} from './history_bridge.js';
 
 // Load .env files if present (custom dotenv implementation)
 function loadEnv() {
@@ -186,6 +192,19 @@ const IMAGE_CACHE_DIR = path.join(process.env.HOME || '~', '.hermes', 'image_cac
 const DOCUMENT_CACHE_DIR = path.join(process.env.HOME || '~', '.hermes', 'document_cache');
 const AUDIO_CACHE_DIR = path.join(process.env.HOME || '~', '.hermes', 'audio_cache');
 const PAIR_ONLY = args.includes('--pair-only');
+let SCRIPT_HASH = '';
+try {
+  SCRIPT_HASH = createHash('sha256')
+    .update(readFileSync(fileURLToPath(import.meta.url)))
+    .digest('hex')
+    .slice(0, 16);
+} catch {}
+const SEND_READ_RECEIPTS = ['1', 'true', 'yes', 'on'].includes(
+  String(process.env.WHATSAPP_SEND_READ_RECEIPTS || '').toLowerCase(),
+);
+const HISTORY_PERSIST_DISABLED = ['1', 'true', 'yes', 'on'].includes(
+  String(process.env.WHATSAPP_HISTORY_PERSIST_DISABLED || '').toLowerCase(),
+);
 const WHATSAPP_MODE = getArg('mode', process.env.WHATSAPP_MODE || 'self-chat'); // "bot" or "self-chat"
 const ALLOWED_USERS = parseAllowedUsers(process.env.WHATSAPP_ALLOWED_USERS || '');
 const WHATSAPP_OWNER_NUMBER = (process.env.WHATSAPP_OWNER_NUMBER || '').replace(/\D/g, '');
@@ -313,6 +332,9 @@ mkdirSync(SESSION_DIR, { recursive: true });
 
 let botPaused = false;
 const BOT_STATE_FILE = path.join(SESSION_DIR, 'bot_state.json');
+const CHAT_SILENCE_STATE_FILE = path.join(SESSION_DIR, 'chat_silence_state.json');
+let silenceStateHealthy = true;
+let silenceStateError = null;
 
 function loadBotState() {
   try {
@@ -333,8 +355,111 @@ function saveBotState() {
   }
 }
 
+function saveSilencedChats() {
+  const now = Date.now();
+  const active = {};
+  for (const [chatId, rawUntil] of Object.entries(silencedChats)) {
+    const until = Number(rawUntil);
+    if (Number.isFinite(until) && until > now) {
+      active[normalizeWhatsAppId(chatId)] = until;
+    } else {
+      delete silencedChats[chatId];
+    }
+  }
+
+  const tmpFile = `${CHAT_SILENCE_STATE_FILE}.${process.pid}.tmp`;
+  try {
+    writeFileSync(
+      tmpFile,
+      JSON.stringify({ version: 1, updatedAt: now, silencedChats: active }),
+      { mode: 0o600 },
+    );
+    renameSync(tmpFile, CHAT_SILENCE_STATE_FILE);
+    silenceStateHealthy = true;
+    silenceStateError = null;
+    return true;
+  } catch (err) {
+    try { if (existsSync(tmpFile)) unlinkSync(tmpFile); } catch {}
+    silenceStateHealthy = false;
+    silenceStateError = err?.message || String(err);
+    console.error('⚠️ Falha ao persistir silêncio por chat:', silenceStateError);
+    return false;
+  }
+}
+
+function loadSilencedChats() {
+  for (const chatId of Object.keys(silencedChats)) delete silencedChats[chatId];
+  if (!existsSync(CHAT_SILENCE_STATE_FILE)) {
+    // Cria o estado vazio no boot para validar desde já que a persistência está gravável.
+    saveSilencedChats();
+    return 0;
+  }
+
+  try {
+    const parsed = JSON.parse(readFileSync(CHAT_SILENCE_STATE_FILE, 'utf8'));
+    const stored = parsed?.silencedChats;
+    if (!stored || typeof stored !== 'object' || Array.isArray(stored)) {
+      throw new Error('formato inválido em chat_silence_state.json');
+    }
+    const now = Date.now();
+    for (const [rawChatId, rawUntil] of Object.entries(stored)) {
+      const chatId = normalizeWhatsAppId(rawChatId);
+      const until = Number(rawUntil);
+      if (chatId && Number.isFinite(until) && until > now) {
+        silencedChats[chatId] = until;
+      }
+    }
+    silenceStateHealthy = true;
+    silenceStateError = null;
+    // Regrava para remover prazos expirados e normalizar o arquivo.
+    saveSilencedChats();
+    return Object.keys(silencedChats).length;
+  } catch (err) {
+    silenceStateHealthy = false;
+    silenceStateError = err?.message || String(err);
+    console.error('⚠️ Falha ao restaurar silêncio por chat; atendimento automático bloqueado:', silenceStateError);
+    return 0;
+  }
+}
+
+function silenceChat(chatId, until = Date.now() + SILENCE_DURATION_MS) {
+  const normalized = normalizeWhatsAppId(chatId);
+  if (!normalized) return 0;
+  silencedChats[normalized] = Number(until);
+  saveSilencedChats();
+  return silencedChats[normalized] || 0;
+}
+
+function unsilenceChat(chatId) {
+  const normalized = normalizeWhatsAppId(chatId);
+  if (!normalized) return false;
+  const existed = Object.prototype.hasOwnProperty.call(silencedChats, normalized);
+  delete silencedChats[normalized];
+  saveSilencedChats();
+  return existed;
+}
+
+function getSilencedUntil(chatId) {
+  const normalized = normalizeWhatsAppId(chatId);
+  const until = Number(silencedChats[normalized] || 0);
+  if (until > Date.now()) return until;
+  if (Object.prototype.hasOwnProperty.call(silencedChats, normalized)) {
+    delete silencedChats[normalized];
+    saveSilencedChats();
+  }
+  return 0;
+}
+
+function automationBlockReason(chatId) {
+  if (!silenceStateHealthy) return 'silence_state_unavailable';
+  if (botPaused) return 'bot_paused';
+  if (getSilencedUntil(chatId) > Date.now()) return 'chat_silenced';
+  return null;
+}
+
 // Load initial bot state
 loadBotState();
+loadSilencedChats();
 
 // Build LID → phone reverse map from session files (lid-mapping-{phone}.json)
 function buildLidMap() {
@@ -510,8 +635,11 @@ let onChatsUpdate = (updates) => {
       const chatNumber = chatId.replace(/@.*/, '');
       const isSelfChat = (myNumber && chatNumber === myNumber) || (myLid && chatNumber === myLid);
       if (isSelfChat) continue;
+      // Em modo bot, unread=0 dispara quando o dono só abre o chat pra olhar.
+      // Silêncio vale só se o dono escrever (fromMe fora de recentlySentIds).
+      if (WHATSAPP_MODE === 'bot') continue;
 
-      silencedChats[chatId] = Date.now() + SILENCE_DURATION_MS;
+      silenceChat(chatId);
       console.log(`🔇 Chat ${chatId} silenciado por ${WHATSAPP_SILENCE_DURATION_MIN} min (chats.update unread=0).`);
     }
   }
@@ -547,6 +675,9 @@ let onMessagesUpsert = async ({ messages, type }) => {
     let chatId = msg.key.remoteJid;
     if (chatId === 'status@broadcast' || (chatId && chatId.includes('status'))) {
       continue;
+    }
+    if (!HISTORY_PERSIST_DISABLED) {
+      persistLiveMessage(msg);
     }
     if (WHATSAPP_DEBUG) {
       try {
@@ -620,7 +751,7 @@ let onMessagesUpsert = async ({ messages, type }) => {
       } else if (['start_bot', '!retomar', '!iniciar'].includes(textLower)) {
         botPaused = false;
         saveBotState();
-        delete silencedChats[chatId]; // Unsilence this specific chat!
+        unsilenceChat(chatId); // Unsilence this specific chat!
         console.log(`▶️ Bot activated by owner command. Chat ${chatId} unsilenced.`);
         try {
           const sent = await sendWithTimeout(chatId, { text: '▶️ *Atendimento do WhatsApp ativo.* A IA voltará a responder os clientes automaticamente.' });
@@ -660,11 +791,11 @@ let onMessagesUpsert = async ({ messages, type }) => {
         if (isCommand) {
           console.log(`ℹ️ Chat ${chatId} não silenciado porque a mensagem é um comando: "${textLower}"`);
           if (['start_bot', '!retomar', '!iniciar', '!suporte on'].includes(textLower)) {
-            delete silencedChats[chatId];
+            unsilenceChat(chatId);
             console.log(`🔊 Chat ${chatId} reativado/unsilenced via comando.`);
           }
         } else {
-          silencedChats[chatId] = Date.now() + SILENCE_DURATION_MS;
+          silenceChat(chatId);
           console.log(`🔇 Chat ${chatId} silenciado por ${WHATSAPP_SILENCE_DURATION_MIN} minutos (dono enviou mensagem manualmente).`);
         }
       }
@@ -818,9 +949,9 @@ let onMessagesUpsert = async ({ messages, type }) => {
     }
 
     // Persist owner's manual messages to SQLite for style learning (works for @lid and @s.whatsapp.net)
-    if (msg.key.fromMe && !isGroup && !isSelfChat && body && body.trim() && !recentlySentIds.has(msg.key.id)) {
+    if (!HISTORY_PERSIST_DISABLED && msg.key.fromMe && !isGroup && !isSelfChat && body && body.trim() && !recentlySentIds.has(msg.key.id)) {
       try {
-        const _dbPath = '/opt/data/.hermes/whatsapp_messages.db';
+        const _dbPath = process.env.WHATSAPP_HISTORY_DB_PATH || '/opt/data/.hermes/whatsapp_messages.db';
         const _ts = Math.floor((msg.messageTimestamp?.toNumber ? msg.messageTimestamp.toNumber() : Number(msg.messageTimestamp)) || Date.now() / 1000);
         const _msgId = msg.key.id || `owner_${chatId}_${_ts}`;
         const _ownerSid = process.env.WHATSAPP_OWNER_NUMBER || chatId;
@@ -843,9 +974,9 @@ let onMessagesUpsert = async ({ messages, type }) => {
     }
 
     // Persistir mensagens recebidas no SQLite para o style learning capturar contexto
-    if (!msg.key.fromMe && !isGroup && !isSelfChat && body && body.trim()) {
+    if (!HISTORY_PERSIST_DISABLED && !msg.key.fromMe && !isGroup && !isSelfChat && body && body.trim()) {
       try {
-        const _dbPath = '/opt/data/.hermes/whatsapp_messages.db';
+        const _dbPath = process.env.WHATSAPP_HISTORY_DB_PATH || '/opt/data/.hermes/whatsapp_messages.db';
         const _ts = Math.floor((msg.messageTimestamp?.toNumber ? msg.messageTimestamp.toNumber() : Number(msg.messageTimestamp)) || Date.now() / 1000);
         const _msgId = msg.key.id || `recv_${chatId}_${_ts}`;
         const _senderName = msg.pushName || senderId.replace(/@.*/, '');
@@ -1049,7 +1180,7 @@ function handleContactsUpdate(updates) {
   }
 }
 
-function handleMessagingHistorySet({ contacts }) {
+async function handleMessagingHistorySet({ contacts, messages, syncType }) {
   if (contacts) {
     for (const contact of contacts) {
       if (!contact.id) continue;
@@ -1060,6 +1191,14 @@ function handleMessagingHistorySet({ contacts }) {
         const phone = _phoneFromLidContact(cleanJid, contacts);
         if (phone) _persistLidMapping(cleanJid, phone);
       }
+    }
+  }
+  if (messages?.length) {
+    try {
+      const result = await persistHistoryBatch(messages, syncType);
+      console.log(`[history] lote histórico salvo: recebido=${result.received} inserido=${result.inserted} ignorado=${result.skipped} tipo=${syncType ?? 'unknown'}`);
+    } catch (err) {
+      console.error(`[history] falha ao salvar lote histórico: ${err.message}`);
     }
   }
 }
@@ -1117,6 +1256,12 @@ function handleConnectionUpdate(update) {
 }
 
 async function startSocket() {
+  try {
+    await initHistoryStore();
+    console.log(`[history] SQLite pronto: ${process.env.WHATSAPP_HISTORY_DB_PATH || '/opt/data/.hermes/whatsapp_messages.db'}`);
+  } catch (err) {
+    console.error(`[history] não foi possível inicializar o SQLite: ${err.message}`);
+  }
   const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
   const { version } = await fetchLatestBaileysVersion();
 
@@ -1126,10 +1271,12 @@ async function startSocket() {
     logger,
     printQRInTerminal: false,
     browser: [WHATSAPP_CONNECTION_NAME, 'Chrome', '120.0'],
-    syncFullHistory: false,
+    syncFullHistory: true,
+    shouldSyncHistoryMessage: () => true,
     markOnlineOnConnect: false,
     getMessage: async (key) => {
-      return { conversation: '' };
+      const stored = await getStoredMessage(key);
+      return stored || { conversation: '' };
     },
   });
 
@@ -1201,7 +1348,13 @@ adminRouter.get('/bot-status', (req, res) => {
 
 adminRouter.get('/chat-status/:chatId', (req, res) => {
   const chatId = normalizeWhatsAppId(req.params.chatId);
-  const silencedUntil = silencedChats[chatId] || 0;
+  if (!silenceStateHealthy) {
+    return res.status(503).json({
+      error: 'chat silence state unavailable',
+      detail: silenceStateError,
+    });
+  }
+  const silencedUntil = getSilencedUntil(chatId);
   const isSilenced = silencedUntil > Date.now();
   res.json({
     chatId,
@@ -1217,7 +1370,7 @@ adminRouter.post('/chat-unsilence', (req, res) => {
     return res.status(400).json({ error: 'chatId is required' });
   }
   const normalized = normalizeWhatsAppId(chatId);
-  delete silencedChats[normalized];
+  unsilenceChat(normalized);
   console.log(`🔊 Chat ${normalized} reativado manualmente.`);
   res.json({ success: true, chatId: normalized });
 });
@@ -1471,14 +1624,37 @@ function isSystemError(message) {
       lowercaseMsg.includes('compression model') ||
       lowercaseMsg.includes('compression threshold') ||
       lowercaseMsg.includes('auto-lowered') ||
+      lowercaseMsg.includes('auto-compaction') ||
+      lowercaseMsg.includes('autoraise') ||
+      lowercaseMsg.includes('caps context') ||
+      lowercaseMsg.includes('hermes config set') ||
+      lowercaseMsg.includes('codex_gpt55') ||
+      lowercaseMsg.includes('compaction was raised') ||
+      lowercaseMsg.includes('/sethome') ||
+      lowercaseMsg.includes('no home channel is set') ||
+      lowercaseMsg.includes('home channel is where hermes') ||
+      lowercaseMsg.includes('type /sethome') ||
       lowercaseMsg.includes('still working') ||
       lowercaseMsg.includes('waiting for provider response') ||
       lowercaseMsg.includes('waiting for model response') ||
       lowercaseMsg.includes('iteration budget') ||
       lowercaseMsg.includes('asking model to') ||
       lowercaseMsg.includes('budget exhausted') ||
+      lowercaseMsg.includes('interrupting current task') ||
+      lowercaseMsg.includes("i'll respond to your message shortly") ||
+      lowercaseMsg.includes('i will respond to your message shortly') ||
+      lowercaseMsg.includes('queued for the next turn') ||
+      lowercaseMsg.includes('steered into current run') ||
+      lowercaseMsg.includes('redirected current run') ||
+      lowercaseMsg.includes('subagent working') ||
+      lowercaseMsg.includes('gateway restarted during delivery') ||
+      lowercaseMsg.includes('recovered reply') ||
+      lowercaseMsg.includes('may be a duplicate') ||
       lowercaseMsg.includes('session automatically reset') ||
       lowercaseMsg.includes('conversation history cleared') ||
+      /⏳\s*working/.test(lowercaseMsg) ||
+      /working\s+[—–-]\s*\d+\s*min/.test(lowercaseMsg) ||
+      /iteration\s+\d+\s*\/\s*\d+/.test(lowercaseMsg) ||
       trimmedMessage.includes('◆ Model:') ||
       trimmedMessage.includes('◆ Provider:') ||
       trimmedMessage.includes('◆ Context:')) {
@@ -1490,11 +1666,15 @@ function isSystemError(message) {
     return true;
   }
 
-  // 1. Exact status messages from self-improvement / memory skills
-  if (trimmedMessage.startsWith('💾') && (lowercaseMsg.includes('self-improvement') || lowercaseMsg.includes('memory updated') || lowercaseMsg.includes('memory update'))) {
-    return true;
-  }
-  if (trimmedMessage === '💾 Memory updated' || trimmedMessage === '💾 Self-improvement review: Memory updated') {
+  // 1. Status from self-improvement / memory / user-profile skills.
+  // Hermes 0.20 posts "💾 Self-improvement review: User profile updated" after a turn.
+  if (
+    lowercaseMsg.includes('self-improvement') ||
+    lowercaseMsg.includes('user profile updated') ||
+    lowercaseMsg.includes('memory updated') ||
+    lowercaseMsg.includes('memory update') ||
+    (trimmedMessage.includes('💾') && (lowercaseMsg.includes('profile') || lowercaseMsg.includes('review') || lowercaseMsg.includes('memory')))
+  ) {
     return true;
   }
 
@@ -1545,9 +1725,15 @@ messagingRouter.post('/send', async (req, res) => {
     return res.status(503).json({ error: 'Not connected to WhatsApp' });
   }
 
-  const { chatId, message, replyTo } = req.body;
+  const { chatId, message, replyTo, automation } = req.body;
   if (!chatId || !message) {
     return res.status(400).json({ error: 'chatId and message are required' });
+  }
+  if (automation === true) {
+    const blocked = automationBlockReason(chatId);
+    if (blocked) {
+      return res.status(409).json({ error: 'automation_blocked', reason: blocked });
+    }
   }
 
   try {
@@ -1577,8 +1763,8 @@ messagingRouter.post('/send', async (req, res) => {
       return res.json({ success: true, info: 'System status/error message blocked and logged' });
     }
 
-    // Strip EXEC: lines before sending — they are system commands, never user-visible
-    const cleanedMessage = stripExecLines(message);
+    // Strip EXEC: lines and Fish intonation tags before sending.
+    const cleanedMessage = stripFishCues(stripExecLines(message));
     if (cleanedMessage !== message) {
       console.log(`[bridge] EXEC: lines stripped from outgoing message to ${chatId}`);
     }
@@ -1673,9 +1859,15 @@ messagingRouter.post('/send-media', async (req, res) => {
     return res.status(503).json({ error: 'Not connected to WhatsApp' });
   }
 
-  const { chatId, filePath, mediaType, caption, fileName } = req.body;
+  const { chatId, filePath, mediaType, caption, fileName, automation } = req.body;
   if (!chatId || !filePath) {
     return res.status(400).json({ error: 'chatId and filePath are required' });
+  }
+  if (automation === true) {
+    const blocked = automationBlockReason(chatId);
+    if (blocked) {
+      return res.status(409).json({ error: 'automation_blocked', reason: blocked });
+    }
   }
 
   try {
@@ -1912,6 +2104,10 @@ diagnosticsRouter.get('/health', (req, res) => {
     status: connectionState,
     queueLength: messageQueue.length,
     uptime: process.uptime(),
+    scriptHash: SCRIPT_HASH,
+    sendReadReceipts: SEND_READ_RECEIPTS,
+    silenceStateHealthy,
+    silencedChatsActive: Object.values(silencedChats).filter((until) => Number(until) > Date.now()).length,
   });
 });
 
@@ -1956,6 +2152,10 @@ export {
   setBotPaused,
   getSilencedChats,
   clearSilencedChats,
+  loadSilencedChats,
+  saveSilencedChats,
+  getSilenceStateHealth,
+  automationBlockReason,
   getRecentlySentIds,
   getMessageQueue,
   setSock,
@@ -1966,12 +2166,19 @@ export {
   runSelfDiagnostics,
   clearRecentlyProcessedIds,
   stripExecLines,
+  stripFishCues,
 };
 
 function getBotPaused() { return botPaused; }
 function setBotPaused(val) { botPaused = val; }
 function getSilencedChats() { return silencedChats; }
-function clearSilencedChats() { for (const k in silencedChats) delete silencedChats[k]; }
+function clearSilencedChats() {
+  for (const k in silencedChats) delete silencedChats[k];
+  saveSilencedChats();
+}
+function getSilenceStateHealth() {
+  return { healthy: silenceStateHealthy, error: silenceStateError, file: CHAT_SILENCE_STATE_FILE };
+}
 function getRecentlySentIds() { return recentlySentIds; }
 function getMessageQueue() { return messageQueue; }
 function setSock(s) { sock = s; }
@@ -1979,4 +2186,11 @@ function getRecentLogs() { return recentLogs; }
 function clearRecentlyProcessedIds() { recentlyProcessedIds.clear(); }
 function stripExecLines(text) {
   return (text || '').replace(/^EXEC:\s*\S+.*$/gim, '').replace(/\n{3,}/g, '\n\n').trim();
+}
+function stripFishCues(text) {
+  return String(text || '')
+    .replace(/\[\s*(?!(?:n[uú]mero omitido)\])(?:very |slightly |extremely |a bit |um pouco )?[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ0-9 ,\-]{0,48}\s*\]/gi, '')
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/ *\n */g, '\n')
+    .trim();
 }

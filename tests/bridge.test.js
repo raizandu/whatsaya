@@ -2,8 +2,14 @@ import test from 'node:test';
 import assert from 'node:assert';
 import fs from 'node:fs';
 import path from 'node:path';
+const TEST_ROOT = path.join('/tmp', `whatsaya-bridge-test-${process.pid}`);
+fs.mkdirSync(TEST_ROOT, { recursive: true });
+process.on('exit', () => fs.rmSync(TEST_ROOT, { recursive: true, force: true }));
+process.env.HOME = TEST_ROOT;
+process.env.WHATSAPP_HISTORY_DB_PATH = path.join(TEST_ROOT, 'whatsapp_messages.db');
+process.env.WHATSAPP_HISTORY_PERSIST_DISABLED = 'true';
 process.env.WHATSAPP_OWNER_NUMBER = '99999';
-process.env.WHATSAPP_ALLOWED_USERS = 'client123';
+process.env.WHATSAPP_ALLOWED_USERS = 'client123,client456,client789';
 process.env.WHATSAPP_MODE = 'bot';
 process.env.WHATSAPP_DEBOUNCE_INITIAL_MS = '0';
 
@@ -14,6 +20,9 @@ const {
   setBotPaused,
   getSilencedChats,
   clearSilencedChats,
+  loadSilencedChats,
+  getSilenceStateHealth,
+  automationBlockReason,
   getRecentlySentIds,
   getMessageQueue,
   setSock,
@@ -52,6 +61,7 @@ const mockSock = {
 setSock(mockSock);
 
 test('WhatsApp Bridge Regression Tests', async (t) => {
+  t.after(() => fs.rmSync(TEST_ROOT, { recursive: true, force: true }));
   
   t.beforeEach(() => {
     setBotPaused(false);
@@ -83,6 +93,11 @@ test('WhatsApp Bridge Regression Tests', async (t) => {
     });
 
     assert.strictEqual(getBotPaused(), true, 'Bot should be paused after stop_bot in self-chat');
+    assert.strictEqual(
+      automationBlockReason('client123@s.whatsapp.net'),
+      'bot_paused',
+      'Bridge must atomically block automated sends while globally paused',
+    );
     assert.ok(mockSock.sentMessages.length > 0, 'Should send pause confirmation message');
     assert.ok(mockSock.sentMessages[0].payload.text.includes('pausado'), 'Confirmation should contain paused text');
 
@@ -106,6 +121,11 @@ test('WhatsApp Bridge Regression Tests', async (t) => {
     });
 
     assert.strictEqual(getBotPaused(), false, 'Bot should be resumed after start_bot in self-chat');
+    assert.strictEqual(
+      automationBlockReason('client123@s.whatsapp.net'),
+      null,
+      'Bridge should release automation after a confirmed resume with no takeover',
+    );
     assert.ok(mockSock.sentMessages.length > 0, 'Should send resume confirmation message');
     assert.ok(mockSock.sentMessages[0].payload.text.includes('ativo'), 'Confirmation should contain active text');
   });
@@ -160,6 +180,61 @@ test('WhatsApp Bridge Regression Tests', async (t) => {
     const duration = silenced[clientJid] - Date.now();
     assert.ok(duration > 0, 'Client chat should be silenced after manual message');
     assert.ok(duration > 590000 && duration <= 600000, `Silence duration should be ~10 minutes, got ${duration} ms`);
+    assert.strictEqual(
+      automationBlockReason(clientJid),
+      'chat_silenced',
+      'Bridge must atomically block automated sends during takeover',
+    );
+  });
+
+  await t.test('3b. Each manual owner message should reset the 10-minute window', async () => {
+    const clientJid = 'client-reset@s.whatsapp.net';
+    const ownerJid = '12345@s.whatsapp.net';
+
+    await onMessagesUpsert({
+      messages: [{
+        key: { id: 'msg-reset-1', fromMe: true, remoteJid: clientJid, participant: ownerJid },
+        message: { conversation: 'Primeira resposta humana' },
+      }],
+      type: 'notify',
+    });
+    const firstDeadline = getSilencedChats()[clientJid];
+
+    await new Promise(resolve => setTimeout(resolve, 20));
+    await onMessagesUpsert({
+      messages: [{
+        key: { id: 'msg-reset-2', fromMe: true, remoteJid: clientJid, participant: ownerJid },
+        message: { conversation: 'Segunda resposta humana' },
+      }],
+      type: 'notify',
+    });
+    const secondDeadline = getSilencedChats()[clientJid];
+
+    assert.ok(secondDeadline > firstDeadline, 'Second manual message must extend the deadline');
+    const remaining = secondDeadline - Date.now();
+    assert.ok(remaining > 590000 && remaining <= 600000, `Reset duration should be ~10 minutes, got ${remaining} ms`);
+  });
+
+  await t.test('3c. Silence deadline should survive an in-memory reset like a bridge restart', async () => {
+    const clientJid = 'client-persist@s.whatsapp.net';
+    const ownerJid = '12345@s.whatsapp.net';
+
+    await onMessagesUpsert({
+      messages: [{
+        key: { id: 'msg-persist-1', fromMe: true, remoteJid: clientJid, participant: ownerJid },
+        message: { conversation: 'Atendimento humano em andamento' },
+      }],
+      type: 'notify',
+    });
+    const savedDeadline = getSilencedChats()[clientJid];
+    delete getSilencedChats()[clientJid];
+
+    const restoredCount = loadSilencedChats();
+
+    assert.ok(restoredCount >= 1, 'At least one active silence should be restored from disk');
+    assert.strictEqual(getSilencedChats()[clientJid], savedDeadline, 'Persisted deadline must be restored exactly');
+    assert.strictEqual(getSilenceStateHealth().healthy, true, 'Persisted silence state should remain healthy');
+    assert.ok(fs.existsSync(getSilenceStateHealth().file), 'Silence state file should exist');
   });
 
   await t.test('4. Command starting with ! in client chat should NOT trigger temporary silence', async () => {
@@ -185,7 +260,7 @@ test('WhatsApp Bridge Regression Tests', async (t) => {
     assert.strictEqual(silenced[clientJid], undefined, 'Client chat should NOT be silenced for commands starting with !');
   });
 
-  await t.test('5. chats.update with unreadCount=0 should trigger temporary silence', async () => {
+  await t.test('5. chats.update with unreadCount=0 should not trigger takeover in bot mode', async () => {
     const clientJid = 'client@s.whatsapp.net';
 
     await onChatsUpdate([{
@@ -194,9 +269,11 @@ test('WhatsApp Bridge Regression Tests', async (t) => {
     }]);
 
     const silenced = getSilencedChats();
-    const duration = silenced[clientJid] - Date.now();
-    assert.ok(duration > 0, 'Client chat should be silenced when owner reads it');
-    assert.ok(duration > 590000 && duration <= 600000, `Silence duration should be ~10 minutes, got ${duration} ms`);
+    assert.strictEqual(
+      silenced[clientJid],
+      undefined,
+      'Reading alone must not silence a client chat in bot mode; takeover requires a manual owner message',
+    );
   });
 
   await t.test('6. chats.update with unreadCount=0 in self-chat should NOT trigger silence', async () => {
@@ -276,6 +353,34 @@ test('WhatsApp Bridge Regression Tests', async (t) => {
     const queue = getMessageQueue();
     assert.strictEqual(queue.length, 1, 'Owner message should bypass allowlist and be enqueued');
     assert.strictEqual(queue[0].body, 'Hello bot, please list files', 'Enqueued message body should match');
+  });
+
+  await t.test('8b. Three allowed contacts remain isolated when messages arrive concurrently', async () => {
+    const contacts = ['client123', 'client456', 'client789'];
+    await Promise.all(contacts.map((contact, index) => onMessagesUpsert({
+      messages: [{
+        key: {
+          id: `msg-parallel-${index + 1}`,
+          fromMe: false,
+          remoteJid: `${contact}@s.whatsapp.net`,
+        },
+        message: {
+          conversation: `parallel-body-${index + 1}`,
+        },
+      }],
+      type: 'notify',
+    })));
+
+    const queue = getMessageQueue();
+    assert.strictEqual(queue.length, 3, 'Each contact should create exactly one queued event');
+    const routed = new Map(queue.map(item => [item.chatId, item.body]));
+    contacts.forEach((contact, index) => {
+      assert.strictEqual(
+        routed.get(`${contact}@s.whatsapp.net`),
+        `parallel-body-${index + 1}`,
+        `Body must remain attached to ${contact}`,
+      );
+    });
   });
 
   await t.test('9. Client not in allowlist should be ignored and not enqueued', async () => {

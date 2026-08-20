@@ -245,6 +245,12 @@ services:
                          'basic_auth': {'username': usr, 'password_hash': hash_password(pwd)}})
             cfg['dashboard'] = dash
             cfg['session_reset'] = {'notify_user': False}
+            gateway_cfg = cfg.get('gateway') if isinstance(cfg.get('gateway'), dict) else {}
+            gateway_cfg['delivery_ledger'] = False
+            cfg['gateway'] = gateway_cfg
+            compression = cfg.get('compression') if isinstance(cfg.get('compression'), dict) else {}
+            compression['codex_gpt55_autoraise_notice'] = False
+            cfg['compression'] = compression
             disp = cfg.get('display')
             if not isinstance(disp, dict):
                 disp = {}
@@ -270,6 +276,8 @@ services:
             yaml.dump({
                 'model': {'default': client_model, 'provider': client_provider},
                 'agent': {'tool_use_enforcement': 'disabled'},
+                'gateway': {'delivery_ledger': False},
+                'compression': {'codex_gpt55_autoraise_notice': False},
                 'toolsets': [], 'disabled_toolsets': disabled, 'tools': [],
                 'skills': {'enabled': False},
                 'terminal': {'backend': 'disabled'},

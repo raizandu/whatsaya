@@ -7,15 +7,23 @@ import json
 import shutil
 import sqlite3
 import base64
+import hashlib
 import time
 import threading
 import datetime
+import subprocess
+import tempfile
+import importlib.util
 import urllib.request
 import urllib.error
 import urllib.parse
 import unicodedata
+import fcntl
+import socket
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+
+from commercial_followups import FollowupEngine, render_contextual_message
 
 import logging
 
@@ -245,13 +253,66 @@ _sender_to_chat: dict[str, str] = {}
 # Controle de resposta por turno: { chat_id -> session_key } do turno atual
 # pre_llm_call registra o turno; post_llm_call só envia se ainda não enviou neste turno.
 _turn_key: dict[str, str] = {}       # chat_id → chave do turno atual
-_turn_sent: set[str] = set()         # chaves de turnos que já foram enviados
+_turn_sent: set[str] = set()         # turnos confirmados com messageId real
+_turn_inflight: set[str] = set()     # reservados enquanto a entrega está em andamento
 _turn_lock = threading.Lock()
 
-# Dedup por sessão Hermes: garante que cada session_id só envia UMA resposta.
-# Segunda camada de proteção independente do turn-based dedup.
+# Dedup por sessão Hermes: NÃO usar como bloqueio de turno seguinte.
+# O Hermes reusa o mesmo session_id na conversa inteira; bloquear aqui
+# trava a 2ª mensagem ("Sessão já respondida"). O _turn_sent já cobre
+# o reenvio do mesmo user_message.
 _responded_sessions: set[str] = set()
 _responded_sessions_lock = threading.Lock()
+
+# Buffer de entrada: espera um instante e junta duas mensagens seguidas.
+_inbound_buf: dict[str, list[str]] = {}
+_inbound_leader: dict[str, bool] = {}
+_inbound_locks: dict[str, threading.Lock] = {}
+_inbound_locks_guard = threading.Lock()
+
+
+def _inbound_lock_for(chat_id: str) -> threading.Lock:
+    with _inbound_locks_guard:
+        lock = _inbound_locks.get(chat_id)
+        if lock is None:
+            lock = threading.Lock()
+            _inbound_locks[chat_id] = lock
+        return lock
+
+
+def _coalesce_contact_inbound(chat_id: str, text: str) -> str | None:
+    """Espera um instante e junta mensagens seguidas. None = esta chamada só alimenta o buffer."""
+    if not chat_id:
+        return text
+    try:
+        wait_s = float(os.getenv("WHATSAPP_INBOUND_BUFFER_S", "2"))
+    except ValueError:
+        wait_s = 2.0
+    if wait_s <= 0:
+        return text
+
+    blob = (text or "").strip()
+    lock = _inbound_lock_for(chat_id)
+    with lock:
+        _inbound_buf.setdefault(chat_id, []).append(blob)
+        if _inbound_leader.get(chat_id):
+            logger.info(f"[inbound-buf] +1 em {chat_id!r} (aguarda o lote)")
+            return None
+        _inbound_leader[chat_id] = True
+
+    time.sleep(wait_s)
+
+    with lock:
+        parts = [p for p in _inbound_buf.pop(chat_id, []) if p]
+        _inbound_leader.pop(chat_id, None)
+    if not parts:
+        return blob
+    # Dedupe vizinhos iguais (eco de áudio + texto)
+    merged: list[str] = []
+    for part in parts:
+        if not merged or merged[-1] != part:
+            merged.append(part)
+    return "\n".join(merged)
 
 # Dedup de mensagens recebidas: evita processar a mesma mensagem do WhatsApp duas vezes
 _seen_message_ids: set[str] = set()
@@ -269,6 +330,454 @@ _DEDUP_LOG_PATH = Path("/opt/data/.hermes/dedup_suppressed.log")
 # Formato: { turn_key: timestamp_float }  — entradas com mais de 1h são descartadas
 _TURN_SENT_PATH = Path("/opt/data/.hermes/turn_sent_state.json")
 _TURN_SENT_TTL_S = 3600  # 1 hora
+
+# Follow-up de silêncio: se o cliente não fala por N minutos, manda uma mensagem.
+# O tick de verdade é o cron Hermes (`tick_whatsapp_followups.py --no-agent`).
+# A thread daqui é backup e só um processo segura o lock.
+_FOLLOWUP_PATH = Path("/opt/data/.hermes/whatsapp_followups.json")
+_FOLLOWUP_LOCK_PATH = Path("/opt/data/.hermes/whatsapp_followups.lock")
+_FOLLOWUP_LOOP_LOCK_PATH = Path("/opt/data/.hermes/whatsapp_followup_loop.lock")
+_FOLLOWUP_DB_PATH = Path(
+    os.getenv("WHATSAPP_FOLLOWUP_DB", "/opt/data/.hermes/commercial_followups.db")
+)
+_FOLLOWUP_ENGINE: FollowupEngine | None = None
+_FOLLOWUP_ENGINE_LOCK = threading.Lock()
+_FOLLOWUP_OPT_OUT_RE = re.compile(
+    r"\b(?:n[aã]o\s+(?:me\s+)?(?:chame|mande\s+mais\s+mensagens?|entre\s+em\s+contato)|"
+    r"pare\s+de\s+(?:me\s+)?mandar|remova\s+(?:meu\s+)?contato|quero\s+sair)\b",
+    re.IGNORECASE,
+)
+_FOLLOWUP_SKIP_REL = {
+    "amigo", "amigoproximo", "parente", "filho", "pessoal",
+    "namorada", "namorado", "esposa", "marido",
+    "mãe", "mae", "pai", "filha", "irmão", "irmao", "irmã", "irma",
+}
+_LID_MAP_DIR = Path("/opt/data/.hermes/platforms/whatsapp/session")
+_MSG_DB_PATH = Path("/opt/data/.hermes/whatsapp_messages.db")
+
+
+def _followup_enabled() -> bool:
+    # Fail-closed: exige ativação global explícita e ativação por lead no SQLite.
+    flag = _followup_env("WHATSAPP_FOLLOWUP_ENABLED", "false").strip().lower()
+    return flag in {"1", "true", "yes", "on"}
+
+
+def _followup_env(name: str, default: str = "") -> str:
+    val = os.getenv(name)
+    if val:
+        return val
+    for path in (Path("/opt/data/.hermes/.env"), Path("/opt/data/.hermes/profiles/whatsapp/.env")):
+        try:
+            if not path.exists():
+                continue
+            for line in path.read_text(encoding="utf-8").splitlines():
+                raw = line.strip()
+                if raw.startswith("#") or "=" not in raw:
+                    continue
+                key, _, value = raw.partition("=")
+                if key.strip() == name:
+                    return value.strip().strip('"').strip("'")
+        except OSError:
+            continue
+    return default
+
+
+def _followup_engine() -> FollowupEngine:
+    global _FOLLOWUP_ENGINE
+    with _FOLLOWUP_ENGINE_LOCK:
+        if _FOLLOWUP_ENGINE is None:
+            _FOLLOWUP_ENGINE = FollowupEngine(_FOLLOWUP_DB_PATH)
+        return _FOLLOWUP_ENGINE
+
+
+def _followup_silence_s() -> int:
+    try:
+        minutes = int(_followup_env("WHATSAPP_FOLLOWUP_SILENCE_MIN", "30"))
+    except (TypeError, ValueError):
+        minutes = 30
+    return max(60, minutes * 60)
+
+
+def _canonical_followup_jid(chat_id: str) -> str:
+    """LID e JID de telefone viram a mesma chave (telefone@s.whatsapp.net)."""
+    raw = (chat_id or "").strip()
+    if not raw:
+        return ""
+    if raw.endswith("@g.us") or raw.endswith("@broadcast"):
+        return raw
+    local, _, domain = raw.partition("@")
+    local = local.split(":")[0]
+    domain = domain or "s.whatsapp.net"
+    digits = "".join(c for c in local if c.isdigit())
+    phone = _lid_to_phone.get(local) or _lid_to_phone.get(digits)
+    if not phone and digits:
+        for name in (f"lid-mapping-{digits}_reverse.json", f"lid-mapping-{local}_reverse.json"):
+            path = _LID_MAP_DIR / name
+            if not path.is_file():
+                continue
+            try:
+                mapped = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError, json.JSONDecodeError):
+                continue
+            if isinstance(mapped, str):
+                phone = mapped
+                break
+    if phone:
+        phone_digits = "".join(c for c in str(phone) if c.isdigit())
+        if phone_digits:
+            return f"{phone_digits}@s.whatsapp.net"
+    if domain == "lid" and 10 <= len(digits) <= 13:
+        return f"{digits}@s.whatsapp.net"
+    if digits and domain in {"s.whatsapp.net", "lid"}:
+        return f"{digits}@s.whatsapp.net"
+    return raw
+
+
+def _followup_lock():
+    _FOLLOWUP_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    fh = open(_FOLLOWUP_LOCK_PATH, "a+")
+    fcntl.flock(fh, fcntl.LOCK_EX)
+    return fh
+
+
+def _followup_unlock(fh) -> None:
+    try:
+        fcntl.flock(fh, fcntl.LOCK_UN)
+    finally:
+        fh.close()
+
+
+def _followup_load() -> dict:
+    try:
+        if _FOLLOWUP_PATH.exists():
+            data = json.loads(_FOLLOWUP_PATH.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+    except (OSError, ValueError, json.JSONDecodeError):
+        pass
+    return {}
+
+
+def _followup_save(data: dict) -> None:
+    _FOLLOWUP_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = _FOLLOWUP_PATH.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(_FOLLOWUP_PATH)
+
+
+def _followup_rekey(data: dict) -> dict:
+    """Junta LID e telefone na mesma chave para o tick não enviar no JID errado."""
+    out: dict = {}
+    for raw_id, rec in list(data.items()):
+        if not isinstance(rec, dict):
+            continue
+        key = _canonical_followup_jid(str(raw_id)) or str(raw_id)
+        prev = out.get(key)
+        if not prev:
+            rec = dict(rec)
+            rec["aliases"] = sorted({str(raw_id), key} | set(rec.get("aliases") or []))
+            out[key] = rec
+            continue
+        for field in ("last_client", "last_activity"):
+            a, b = prev.get(field), rec.get(field)
+            if a is None:
+                prev[field] = b
+            elif b is not None:
+                prev[field] = max(float(a), float(b))
+        if rec.get("followup_sent_at") and not prev.get("followup_sent_at"):
+            prev["followup_sent_at"] = rec.get("followup_sent_at")
+        if rec.get("auto_sent") or prev.get("auto_sent"):
+            prev["auto_sent"] = True
+        aliases = set(prev.get("aliases") or [])
+        aliases.update(rec.get("aliases") or [])
+        aliases.update({str(raw_id), key})
+        prev["aliases"] = sorted(aliases)
+    return out
+
+
+def _followup_is_due(rec: dict, now: float, silence_s: int) -> bool:
+    last_client = rec.get("last_client")
+    if not last_client:
+        return False
+    if rec.get("auto_sent") or rec.get("followup_sent_at"):
+        return False
+    return (now - float(last_client)) >= silence_s
+
+
+def _followup_is_silent(rec: dict, now: float, silence_s: int) -> bool:
+    """Silencioso agora — serve pro follow manual do You chat, mesmo já tendo auto."""
+    last_client = rec.get("last_client")
+    if not last_client:
+        return False
+    return (now - float(last_client)) >= silence_s
+
+
+def _followup_note_activity(
+    chat_id: str,
+    *,
+    inbound: bool = False,
+    message_id: str | None = None,
+    text: str | None = None,
+) -> None:
+    """Cancela jobs no primeiro sinal de inbound, mesmo com automação global off."""
+    if not chat_id or not inbound:
+        return
+    key = _canonical_followup_jid(chat_id) or str(chat_id)
+    engine = _followup_engine()
+    engine.note_inbound(key, message_id=message_id)
+    if text and _FOLLOWUP_OPT_OUT_RE.search(_normalize_text(text)):
+        engine.configure_lead(
+            key,
+            automation_enabled=False,
+            opt_out=True,
+            now=datetime.datetime.now(datetime.UTC),
+        )
+        logger.info("[followup] opt-out determinístico registrado chat=%r", key)
+
+
+def _followup_ensure(chat_id: str) -> None:
+    """Compatibilidade: outbound sem ID real nunca arma follow-up."""
+    if chat_id:
+        logger.debug("[followup] outbound sem message_id ignorado (fail-closed)")
+
+
+def _followup_configure_lead(chat_id: str, **changes):
+    """Ponto explícito para CRM/ops habilitar contexto e cadência de um lead."""
+    key = _canonical_followup_jid(chat_id) or str(chat_id)
+    return _followup_engine().configure_lead(key, **changes)
+
+
+def _followup_register_outbound(chat_id: str, message_id: str) -> list[int]:
+    """Registra somente envio confirmado pela bridge; sem contexto não agenda nada."""
+    if not chat_id or not isinstance(message_id, (str, int)) or not str(message_id):
+        return []
+    key = _canonical_followup_jid(chat_id) or str(chat_id)
+    return _followup_engine().note_outbound(key, message_id=str(message_id))
+
+
+def _followup_cancel(chat_id: str) -> None:
+    if not chat_id:
+        return
+    key = _canonical_followup_jid(chat_id) or str(chat_id)
+    _followup_engine().note_human_takeover(key)
+
+
+def _followup_mark_sent(chat_id: str, *, auto: bool) -> None:
+    """API legada mantida para callers antigos; jobs novos são marcados por ID."""
+    logger.debug("[followup] _followup_mark_sent legado ignorado chat=%r auto=%s", chat_id, auto)
+
+
+def _followup_bridge_send(chat_id: str, text: str) -> str:
+    payload = json.dumps({
+        "chatId": chat_id,
+        "message": text,
+        "automation": True,
+    }).encode("utf-8")
+    req = urllib.request.Request(f"{BRIDGE_URL}/send", data=payload, method="POST")
+    req.add_header("Content-Type", "application/json")
+    with urllib.request.urlopen(req, timeout=10) as response:
+        data = json.loads(response.read().decode("utf-8") or "{}")
+    message_id = data.get("messageId")
+    if not message_id:
+        raise RuntimeError("bridge não retornou messageId; envio não será confirmado")
+    return str(message_id)
+
+
+def _followup_lead_label(chat_id: str) -> str:
+    name = ""
+    try:
+        pc_path = Path("/opt/data/personal_contacts.json")
+        if pc_path.exists():
+            pc = json.loads(pc_path.read_text(encoding="utf-8"))
+            info = pc.get(chat_id) or {}
+            if not info:
+                local = chat_id.split("@")[0]
+                for raw, row in pc.items():
+                    if str(raw).split("@")[0].split(":")[0] == local:
+                        info = row
+                        break
+            name = (info.get("spoken_name") or info.get("nickname") or info.get("name") or "").strip()
+    except Exception:
+        name = ""
+    local = chat_id.split("@")[0]
+    return f"{name} ({local})" if name else local
+
+
+def _followup_collect(now: float, silence_s: int, *, manual: bool) -> list[tuple[str, dict]]:
+    out: list[tuple[str, dict]] = []
+    fh = _followup_lock()
+    try:
+        data = _followup_rekey(_followup_load())
+        if not manual:
+            data = _followup_backfill_from_db(data, now)
+            _followup_save(data)
+        for chat_id, rec in list(data.items()):
+            if not isinstance(rec, dict):
+                continue
+            if _followup_is_owner_chat(chat_id):
+                continue
+            if manual:
+                if not _followup_is_silent(rec, now, silence_s):
+                    continue
+            elif not _followup_is_due(rec, now, silence_s):
+                continue
+            if _check_chat_silenced(chat_id) or _followup_skip_contact(chat_id):
+                continue
+            out.append((chat_id, dict(rec)))
+    finally:
+        _followup_unlock(fh)
+    return out
+
+
+def _followup_text(chat_id: str) -> str:
+    name = ""
+    try:
+        pc_path = Path("/opt/data/personal_contacts.json")
+        if pc_path.exists():
+            pc = json.loads(pc_path.read_text(encoding="utf-8"))
+            info = pc.get(chat_id) or {}
+            if not info:
+                local = chat_id.split("@")[0]
+                for raw, row in pc.items():
+                    if str(raw).split("@")[0].split(":")[0] == local:
+                        info = row
+                        break
+            name = (info.get("spoken_name") or info.get("nickname") or info.get("name") or "").strip()
+            if name and not _is_usable_person_name(name):
+                name = ""
+    except Exception:
+        name = ""
+    if name:
+        return f"{name}, ainda tá por aí? qualquer coisa é só chamar"
+    return "ainda tá por aí? qualquer coisa é só chamar"
+
+
+def _followup_skip_contact(chat_id: str) -> bool:
+    try:
+        pc_path = Path("/opt/data/personal_contacts.json")
+        if not pc_path.exists():
+            return False
+        pc = json.loads(pc_path.read_text(encoding="utf-8"))
+        info = pc.get(chat_id) or {}
+        if not info:
+            local = chat_id.split("@")[0]
+            for raw, row in pc.items():
+                if str(raw).split("@")[0].split(":")[0] == local:
+                    info = row
+                    break
+        rel = f"{info.get('relationship') or ''} {info.get('manual_relationship') or ''}".lower()
+        return any(token in rel for token in _FOLLOWUP_SKIP_REL)
+    except Exception:
+        return False
+
+
+def _followup_is_owner_chat(chat_id: str) -> bool:
+    return _session_is_owner(chat_id)
+
+
+def _followup_backfill_from_db(data: dict, now: float) -> dict:
+    """Depois de restart, arma last_client com o último inbound do SQLite."""
+    if not _MSG_DB_PATH.is_file():
+        return data
+    try:
+        con = sqlite3.connect(str(_MSG_DB_PATH))
+        try:
+            rows = con.execute(
+                """
+                SELECT chat_id,
+                       MAX(CASE WHEN from_me=0 THEN timestamp END) AS last_in
+                FROM messages
+                WHERE timestamp > ?
+                  AND chat_id NOT LIKE '%@g.us'
+                  AND chat_id NOT LIKE '%@broadcast'
+                GROUP BY chat_id
+                HAVING last_in IS NOT NULL
+                   AND MAX(CASE WHEN from_me=1 THEN timestamp END) IS NOT NULL
+                """,
+                (now - 86400,),
+            ).fetchall()
+        finally:
+            con.close()
+    except sqlite3.Error as err:
+        logger.warning(f"[followup] backfill sqlite: {err}")
+        return data
+
+    for raw_id, last_in in rows:
+        key = _canonical_followup_jid(str(raw_id)) or str(raw_id)
+        if not key or _followup_is_owner_chat(key):
+            continue
+        try:
+            ts = float(last_in)
+        except (TypeError, ValueError):
+            continue
+        if ts > 10_000_000_000:
+            ts = ts / 1000.0
+        rec = data.setdefault(key, {})
+        if rec.get("last_client"):
+            continue
+        rec["last_client"] = ts
+        rec["last_activity"] = rec.get("last_activity") or ts
+        rec["followup_sent_at"] = rec.get("followup_sent_at")
+        aliases = set(rec.get("aliases") or [])
+        aliases.update({str(raw_id), key})
+        rec["aliases"] = sorted(aliases)
+        logger.info(f"[followup] backfill chat={key!r} last_client={int(now - ts)}s atrás")
+    return data
+
+
+def _tick_followups() -> int:
+    """Processa jobs com lease, revalidação e resultado terminal por tentativa."""
+    if not _followup_enabled() or _check_bot_paused():
+        return 0
+    engine = _followup_engine()
+    now = datetime.datetime.now(datetime.UTC)
+    due = engine.claim_due(now=now, worker_id=f"gateway-{os.getpid()}")
+    sent = 0
+    for job in due:
+        validated = engine.revalidate_claim(
+            job["id"], job["lease_token"], now=datetime.datetime.now(datetime.UTC)
+        )
+        if not validated:
+            continue
+        try:
+            text = render_contextual_message(validated)
+            bridge_message_id = _followup_bridge_send(validated["chat_id"], text)
+        except (TimeoutError, socket.timeout) as err:
+            engine.mark_uncertain(job["id"], f"timeout: {err}", job["lease_token"])
+            logger.warning("[followup] envio incerto job=%s: %s", job["id"], err)
+            continue
+        except urllib.error.URLError as err:
+            if isinstance(getattr(err, "reason", None), (TimeoutError, socket.timeout)):
+                engine.mark_uncertain(job["id"], f"timeout: {err}", job["lease_token"])
+            else:
+                engine.mark_failed(job["id"], str(err), job["lease_token"])
+            logger.warning("[followup] falha de bridge job=%s: %s", job["id"], err)
+            continue
+        except Exception as err:
+            engine.mark_failed(job["id"], str(err), job["lease_token"])
+            logger.warning("[followup] falhou job=%s: %s", job["id"], err)
+            continue
+        engine.mark_sent(job["id"], bridge_message_id, job["lease_token"])
+        sent += 1
+        logger.info("[followup] enviado job=%s chat=%r", job["id"], validated["chat_id"])
+    if due:
+        logger.info("[followup] tick leased=%s sent=%s", len(due), sent)
+    return sent
+
+
+def _followup_manual_from_owner(owner_chat_id: str) -> str:
+    """Comando manual respeita o mesmo gate; nunca varre histórico ou ignora horário."""
+    if not _followup_enabled():
+        return "follow-up automático está desativado enquanto o QA de segurança não for aprovado"
+    sent = _tick_followups()
+    if sent:
+        return f"processados com segurança: {sent} follow(s)"
+    return "nenhum follow elegível agora; contexto, janela e estado foram revalidados"
+
+
+def _run_followup_loop() -> None:
+    """Não existe ticker concorrente: o cron é o único produtor de ticks."""
+    logger.info("[followup] loop interno desativado; cron transacional é o ticker único")
 
 
 def _load_turn_sent_from_disk() -> None:
@@ -343,7 +852,8 @@ _PENDING_SALE_ADDRESS_TTL_S: int = 1800  # 30 minutos
 _BOT_STATUS_TTL_S: int = int(os.getenv("WHATSAPP_BOT_STATUS_TTL_S", "5"))
 _bot_status_cache: dict = {"paused": False, "ts": 0.0}
 
-# Cache TTL para _check_chat_silenced() — evita HTTP a cada mensagem
+# Cache TTL somente para estados silenciados/indisponíveis. Respostas negativas
+# não são cacheadas para uma mensagem manual do dono ter efeito imediato.
 _CHAT_STATUS_TTL_S: int = int(os.getenv("WHATSAPP_CHAT_STATUS_TTL_S", "5"))
 _chat_status_cache: dict[str, dict] = {}  # chat_id -> {"silenced": bool, "ts": float}
 
@@ -711,45 +1221,118 @@ _BUBBLE_OPENER = re.compile(
     re.IGNORECASE,
 )
 _NO_AUTO_SPLIT = re.compile(r"https?://|\bpix\b", re.IGNORECASE)
+_CLAUSE_BREAK = re.compile(
+    r",\s+(?=porque\b|pois\b|já que\b|ja que\b|uma vez que\b)",
+    re.I,
+)
+_BUBBLE_CAP = 3
+
+
+def _looks_like_question(text: str) -> bool:
+    blob = (text or "").strip()
+    return blob.endswith("?") or blob[:1].lower() in {"q"} and "quer " in blob.lower()[:12]
+
+
+def _split_long_clause(text: str) -> list[str]:
+    """Frase longa com 'porque/pois' vira duas bolhas."""
+    blob = (text or "").strip()
+    if len(blob) < 140 or _NO_AUTO_SPLIT.search(blob):
+        return [blob] if blob else []
+    match = _CLAUSE_BREAK.search(blob)
+    if not match:
+        return [blob]
+    left = blob[: match.start()].strip()
+    right = blob[match.end() :].strip()
+    if len(left) < 28 or len(right) < 28:
+        return [blob]
+    return [left, right]
+
+
+def _split_sentences_for_bubbles(block: str) -> list[str]:
+    """Quebra um bloco longo em frases. PIX/link ficam juntos."""
+    text = (block or "").strip()
+    if not text:
+        return []
+    if _NO_AUTO_SPLIT.search(text):
+        return [text]
+    if len(text) <= 80:
+        return [text]
+    bits = [b.strip() for b in re.split(r"(?<=[.!?…])\s+", text) if b.strip()]
+    if len(bits) <= 1:
+        opener = _BUBBLE_OPENER.match(text)
+        if opener and len(text) - opener.end() >= 20:
+            return [opener.group(0).strip(), text[opener.end():].strip()]
+        return _split_long_clause(text)
+    merged: list[str] = []
+    for bit in bits:
+        glue = (
+            merged
+            and not _looks_like_question(bit)
+            and not merged[-1].endswith("?")
+            and len(merged[-1]) < 28
+            and len(merged[-1]) + len(bit) < 110
+        )
+        if glue:
+            merged[-1] = f"{merged[-1]} {bit}"
+        else:
+            merged.extend(_split_long_clause(bit))
+    return merged
 
 
 def _split_human_bubbles(message: str) -> list[str]:
-    """Quebra a resposta em 1–3 bolhas curtas, estilo WhatsApp humano.
+    """Quebra a resposta em bolhas curtas, estilo WhatsApp humano.
 
-    Prioridade: parágrafos separados por linha em branco; depois 2–3 linhas
-    curtas; por último um abridor curto ("oi", "eita") ou a primeira frase
-    de um bloco longo. Links e menções a PIX não são cortados no meio.
+    Corta tag de voz antes de fatiar. Parágrafo vira bolha; bloco longo
+    vira uma frase por bolha. No máximo 3 para não virar rajada.
     """
-    text = (message or "").strip()
+    text = _strip_fish_cues(message or "")
     if not text:
         return []
 
     parts = [p.strip() for p in re.split(r"\n\s*\n+", text) if p.strip()]
     if len(parts) == 1:
         lines = [p.strip() for p in text.split("\n") if p.strip()]
-        if 2 <= len(lines) <= 3 and all(len(line) <= 180 for line in lines):
+        if 2 <= len(lines) <= _BUBBLE_CAP and all(len(line) <= 180 for line in lines):
             parts = lines
 
-    if len(parts) == 1 and len(parts[0]) > 140:
-        block = parts[0]
-        opener = _BUBBLE_OPENER.match(block)
-        if opener and len(block) - opener.end() >= 20:
-            parts = [opener.group(0).strip(), block[opener.end():].strip()]
-        else:
-            sentence = re.search(r"^(.{20,140}?[.!?…])\s+", block)
-            if sentence and not _NO_AUTO_SPLIT.search(sentence.group(1)):
-                parts = [sentence.group(1).strip(), block[sentence.end():].strip()]
+    exploded: list[str] = []
+    for part in parts:
+        exploded.extend(_split_sentences_for_bubbles(part))
 
-    cleaned = [re.sub(r"[ \t]+\n", "\n", p).strip() for p in parts if p and p.strip()]
+    cleaned = [re.sub(r"[ \t]+\n", "\n", p).strip() for p in exploded if p and p.strip()]
     cleaned = [re.sub(r"[ \t]{2,}", " ", p) for p in cleaned]
-    if len(cleaned) > 3:
-        cleaned = cleaned[:2] + ["\n".join(cleaned[2:])]
+    if len(cleaned) > _BUBBLE_CAP:
+        cleaned = cleaned[: _BUBBLE_CAP - 1] + [" ".join(cleaned[_BUBBLE_CAP - 1 :])]
     return cleaned or [text]
 
 
-def _human_send(chat_id: str, message: str) -> None:
-    """Envia mensagem simulando comportamento humano: typing + delay + bolhas."""
+def isSystemError(message: str) -> bool:
+    """Firewall do adapter Hermes: status interno não pode ir para o WhatsApp."""
+    if not message or not isinstance(message, str):
+        return False
+    blob = message.strip()
+    if not blob:
+        return False
+    if _HERMES_STATUS_RE.search(blob):
+        return True
+    if "💾" in blob and _SYSTEM_STATUS_RE.search(blob):
+        return True
+    if blob.startswith("💾") and len(blob) < 160:
+        return True
+    return bool(_SYSTEM_STATUS_RE.search(blob))
+
+
+def _human_send(chat_id: str, message: str, *, automation: bool = False) -> str | None:
+    """Envia mensagem; `automation=True` revalida o gate antes de cada bolha."""
     import random
+
+    message = _strip_fish_cues(message)
+    if not message:
+        return
+
+    if isSystemError(message):
+        logger.warning(f"[human-send] status interno bloqueado chat={chat_id!r}: {message[:120]!r}")
+        return
 
     def _typing(cid: str) -> None:
         try:
@@ -761,24 +1344,303 @@ def _human_send(chat_id: str, message: str) -> None:
         except Exception:
             pass
 
-    def _send_one(cid: str, text: str) -> None:
-        payload = json.dumps({"chatId": cid, "message": text}).encode("utf-8")
+    def _send_one(cid: str, text: str) -> str | None:
+        if automation:
+            _assert_delivery_allowed(cid)
+        payload = json.dumps({
+            "chatId": cid,
+            "message": text,
+            "automation": automation,
+        }).encode("utf-8")
         req = urllib.request.Request(f"{BRIDGE_URL}/send", data=payload, method="POST")
         req.add_header("Content-Type", "application/json")
-        with urllib.request.urlopen(req, timeout=10):
-            pass
+        try:
+            with urllib.request.urlopen(req, timeout=10) as response:
+                try:
+                    data = json.loads(response.read().decode("utf-8") or "{}")
+                except (AttributeError, TypeError, ValueError, json.JSONDecodeError):
+                    data = {}
+        except urllib.error.HTTPError as err:
+            if err.code == 409:
+                raise DeliveryBlocked("bridge bloqueou automação por pausa/takeover") from err
+            raise
+        message_id = data.get("messageId") if isinstance(data, dict) else None
+        if not message_id:
+            raise RuntimeError("bridge não confirmou messageId do texto")
+        return str(message_id)
 
     parts = _split_human_bubbles(message)
     if not parts:
         return
+    parts = [p for p in parts if not isSystemError(p)]
+    if not parts:
+        return
     logger.info(f"[human-send] chat={chat_id!r} bubbles={len(parts)} sizes={[len(p) for p in parts]}")
-    for i, part in enumerate(parts):
+    try:
+        think_min = float(os.getenv("WHATSAPP_HUMAN_THINK_MIN_S", "3.5"))
+        think_max = float(os.getenv("WHATSAPP_HUMAN_THINK_MAX_S", "7.5"))
+        gap_min = float(os.getenv("WHATSAPP_HUMAN_GAP_MIN_S", "2.2"))
+        gap_max = float(os.getenv("WHATSAPP_HUMAN_GAP_MAX_S", "4.0"))
+    except (TypeError, ValueError):
+        think_min, think_max = 3.5, 7.5
+        gap_min, gap_max = 2.2, 4.0
+    if think_max < think_min:
+        think_max = think_min
+    if gap_max < gap_min:
+        gap_max = gap_min
+    fast_test = os.getenv("WHATSAPP_HUMAN_TEST_MODE", "").strip().lower() in {"1", "true", "yes"}
+    if not fast_test:
         _typing(chat_id)
-        delay = min(max(len(part) * 0.045 + random.uniform(0.4, 1.2), 0.8), 4.0)
-        time.sleep(delay)
-        _send_one(chat_id, part)
-        if i < len(parts) - 1:
-            time.sleep(random.uniform(0.6, 1.3))
+        time.sleep(random.uniform(think_min, think_max))
+    last_message_id = None
+    for i, part in enumerate(parts):
+        if not fast_test:
+            _typing(chat_id)
+            delay = min(max(len(part) * 0.085 + random.uniform(1.4, 2.4), 2.0), 8.0)
+            time.sleep(delay)
+        last_message_id = _send_one(chat_id, part) or last_message_id
+        if not fast_test and i < len(parts) - 1:
+            time.sleep(random.uniform(gap_min, gap_max))
+    return last_message_id
+
+
+def _fish_tts_path() -> Path | None:
+    env = os.getenv("WHATSAPP_FISH_TTS", "").strip()
+    candidates = []
+    if env:
+        candidates.append(Path(env))
+    hermes_home = Path(os.getenv("HERMES_HOME", "/opt/data/.hermes"))
+    here = Path(__file__).resolve().parent
+    candidates.extend([
+        hermes_home / "scripts" / "fish_tts.py",
+        here / "deploy" / "scripts" / "fish_tts.py",
+        here.parent / "deploy" / "scripts" / "fish_tts.py",
+    ])
+    for path in candidates:
+        if path.is_file():
+            return path
+    return None
+
+
+_fish_tts_mod = None
+
+
+def _load_fish_tts():
+    """Carrega deploy/scripts/fish_tts.py (written_only_reason + mesmo CLI do Hermes)."""
+    global _fish_tts_mod
+    if _fish_tts_mod is not None:
+        return _fish_tts_mod
+    path = _fish_tts_path()
+    if not path:
+        return None
+    spec = importlib.util.spec_from_file_location("_whatsaya_fish_tts", path)
+    if not spec or not spec.loader:
+        return None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    _fish_tts_mod = mod
+    return mod
+
+
+def _voice_reply_enabled() -> bool:
+    if not os.getenv("FISH_API_KEY", "").strip():
+        return False
+    flag = os.getenv("WHATSAPP_AUTO_TTS", "true").strip().lower()
+    return flag not in {"0", "false", "no", "off"}
+
+
+def _send_bridge_media(chat_id: str, file_path: str, media_type: str = "audio") -> str:
+    _assert_delivery_allowed(chat_id)
+    payload = json.dumps({
+        "chatId": chat_id,
+        "filePath": file_path,
+        "mediaType": media_type,
+        "automation": True,
+    }).encode("utf-8")
+    req = urllib.request.Request(f"{BRIDGE_URL}/send-media", data=payload, method="POST")
+    req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            try:
+                data = json.loads(resp.read().decode("utf-8") or "{}")
+            except (AttributeError, TypeError, ValueError, json.JSONDecodeError):
+                data = {}
+    except urllib.error.HTTPError as err:
+        if err.code == 409:
+            raise DeliveryBlocked("bridge bloqueou PTT por pausa/takeover") from err
+        raise
+    message_id = data.get("messageId") if isinstance(data, dict) else None
+    if not message_id:
+        raise RuntimeError("bridge não confirmou messageId do PTT")
+    return str(message_id)
+
+
+def _fish_call(name: str, default, *args):
+    try:
+        fish = _load_fish_tts()
+        fn = getattr(fish, name, None) if fish else None
+        if callable(fn):
+            return fn(*args)
+    except Exception as err:
+        logger.warning(f"[voice] {name} falhou: {err}")
+    return default(*args) if callable(default) else default
+
+
+# Mesma regra do fish_tts.strip_fish_cues. Fallback obrigatório: se o módulo
+# não carregar, _fish_call senão só faz .strip() e a tag vaza no WhatsApp.
+_FISH_CUE_FALLBACK = re.compile(
+    r"\[\s*(?!(?:n[uú]mero omitido)\])"
+    r"(?:very |slightly |extremely |a bit |um pouco )?"
+    r"[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ0-9 ,\-]{0,48}\s*\]",
+    re.I,
+)
+
+
+def _strip_fish_cues_fallback(blob: str) -> str:
+    cleaned = _FISH_CUE_FALLBACK.sub("", blob or "")
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    cleaned = re.sub(r" *\n *", "\n", cleaned)
+    return cleaned.strip()
+
+
+def _split_voice_and_text(text: str) -> tuple[str, str, str]:
+    """(spoken, intro_text, written_after) — spoken keeps Fish cues."""
+    return _fish_call("split_voice_and_text", lambda blob: ((blob or "").strip(), "", ""), text)
+
+
+def _strip_fish_cues(text: str) -> str:
+    return _fish_call("strip_fish_cues", _strip_fish_cues_fallback, text)
+
+
+def _prepare_spoken_for_tts(spoken: str) -> str:
+    return _fish_call("prepare_spoken_for_tts", lambda blob: (blob or "").strip(), spoken)
+
+
+def _maybe_send_voice(chat_id: str, text: str) -> str | None:
+    """Gera PTT e retorna o `messageId` confirmado; `None` aciona fallback em texto."""
+    if not _voice_reply_enabled():
+        return False
+    blob = (text or "").strip()
+    if not blob:
+        return False
+
+    script = _fish_tts_path()
+    if not script:
+        logger.info("[voice] fish_tts.py ausente — só texto")
+        return False
+
+    reason = _fish_call("written_only_reason", lambda _: None, blob)
+    if reason:
+        logger.info(f"[voice] skip tts: {reason}")
+        return False
+
+    spoken = _prepare_spoken_for_tts(blob)
+    if not spoken:
+        return False
+
+    try:
+        typing_payload = json.dumps({"chatId": chat_id}).encode("utf-8")
+        typing_req = urllib.request.Request(f"{BRIDGE_URL}/typing", data=typing_payload, method="POST")
+        typing_req.add_header("Content-Type", "application/json")
+        with urllib.request.urlopen(typing_req, timeout=5):
+            pass
+    except Exception:
+        pass
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="whatsaya-tts-") as tmp:
+            inp = Path(tmp) / "in.txt"
+            out = Path(tmp) / "out.ogg"
+            inp.write_text(spoken, encoding="utf-8")
+            proc = subprocess.run(
+                ["python3", str(script), str(inp), str(out), "ogg"],
+                capture_output=True,
+                text=True,
+                timeout=70,
+                env=os.environ.copy(),
+            )
+            err = (proc.stderr or "").strip()
+            if proc.returncode != 0 or not out.is_file() or out.stat().st_size < 64:
+                if "skip tts:" in err:
+                    logger.info(f"[voice] {err}")
+                else:
+                    logger.warning(f"[voice] fish_tts falhou rc={proc.returncode}: {err[-400:]}")
+                return False
+            message_id = _send_bridge_media(chat_id, str(out), "audio")
+            logger.info(
+                f"[voice] ptt enviado chat={chat_id!r} bytes={out.stat().st_size} "
+                f"message_id={message_id!r}"
+            )
+            return message_id
+    except Exception as err:
+        logger.warning(f"[voice] envio falhou: {err}")
+        return False
+
+
+def _deliver_contact_reply(chat_id: str, clean_text: str) -> str:
+    """Entrega contato e só retorna após receber ao menos um `messageId` real."""
+    _assert_delivery_allowed(chat_id)
+    spoken, before, after = _split_voice_and_text(clean_text)
+    last_message_id = None
+    if before:
+        last_message_id = _human_send(chat_id, before, automation=True) or last_message_id
+    voice_message_id = _maybe_send_voice(chat_id, spoken) if spoken else None
+    if voice_message_id:
+        last_message_id = voice_message_id
+    elif spoken:
+        last_message_id = _human_send(
+            chat_id,
+            _strip_fish_cues(spoken),
+            automation=True,
+        ) or last_message_id
+    if after:
+        last_message_id = _human_send(chat_id, after, automation=True) or last_message_id
+    if not last_message_id:
+        raise RuntimeError("entrega sem messageId confirmado")
+    try:
+        _followup_register_outbound(chat_id, last_message_id)
+    except Exception as err:
+        # CRM/follow-up nunca pode derrubar o atendimento normal.
+        logger.warning(f"[followup] registro outbound falhou: {err}")
+    logger.info(
+        f"[voice] deliver spoken={bool(spoken)} voiced={bool(voice_message_id)} "
+        f"intro={bool(before)} written={bool(after)} message_id={last_message_id!r}"
+    )
+    return str(last_message_id)
+
+
+# True só em teste: o hook devolve "\n" na hora e o envio humano roda
+# em thread. Sem isso o Hermes estoura o hook e manda o bloco inteiro.
+_HUMAN_DELIVER_SYNC = False
+
+
+def _schedule_contact_reply(chat_id: str, clean_text: str, turn_key: str) -> bool:
+    """Agenda entrega e fecha a reserva conforme resultado confirmado/ambíguo."""
+    def _run() -> bool:
+        try:
+            message_id = _deliver_contact_reply(chat_id, clean_text)
+        except DeliveryBlocked as err:
+            _complete_contact_send(turn_key, delivered=False, uncertain=False)
+            logger.warning(f"[delivery-gate] envio bloqueado chat={chat_id!r}: {err}")
+            return False
+        except Exception as err:
+            # Pode ter ocorrido envio antes do timeout. Torna o turno terminal
+            # para não repetir automaticamente sem idempotência do WhatsApp.
+            _complete_contact_send(turn_key, delivered=False, uncertain=True)
+            logger.warning(f"[transform_llm_output] envio incerto chat={chat_id!r}: {err}")
+            return False
+        _complete_contact_send(turn_key, delivered=bool(message_id), uncertain=False)
+        return bool(message_id)
+
+    if _HUMAN_DELIVER_SYNC:
+        return _run()
+
+    try:
+        threading.Thread(target=_run, daemon=True, name="wa-human-send").start()
+    except Exception:
+        _complete_contact_send(turn_key, delivered=False, uncertain=False)
+        raise
+    return True
 
 
 def _normalize_brazilian_phone(phone: str) -> str:
@@ -792,66 +1654,110 @@ def _normalize_brazilian_phone(phone: str) -> str:
     return clean
 
 
+_WA_DM_SESSION_RE = re.compile(r"whatsapp:dm:(\d{10,15})", re.I)
+
+
+def _whatsapp_digits_from_session(session_id: str) -> str:
+    """Extrai o número de um JID, de agent:main:whatsapp:dm:NUM ou do mapa sender→chat."""
+    if not session_id:
+        return ""
+    candidates = [str(session_id)]
+    mapped = _sender_to_chat.get(str(session_id))
+    if mapped and str(mapped) not in candidates:
+        candidates.append(str(mapped))
+    for text in candidates:
+        dm = _WA_DM_SESSION_RE.search(text)
+        if dm:
+            return dm.group(1)
+        if "@" in text:
+            local = text.split("@", 1)[0].split(":")[0]
+            digits = "".join(c for c in local if c.isdigit())
+            if 10 <= len(digits) <= 15:
+                return digits
+        if "whatsapp" in text.lower():
+            found = re.search(r"(\d{10,15})", text)
+            if found:
+                return found.group(1)
+    return ""
+
+
 def _session_is_owner(session_id: str) -> bool:
     """True se o session_id do Hermes é o WhatsApp do dono."""
     owner_number = config.whatsapp_owner_number
     if not owner_number or not session_id:
         return False
-    clean_session = "".join(c for c in session_id.split("@")[0].split(":")[0] if c.isdigit())
-    clean_owner = "".join(c for c in owner_number.split("@")[0].split(":")[0] if c.isdigit())
+    clean_session = _whatsapp_digits_from_session(session_id)
+    clean_owner = "".join(c for c in owner_number.split("@")[0] if c.isdigit())
     if clean_session and clean_owner:
         return _normalize_brazilian_phone(clean_session) == _normalize_brazilian_phone(clean_owner)
     return False
 
 
-def _check_bot_paused() -> bool:
-    """Verifica se o bot está pausado via endpoint do bridge e atualiza o mapa de LIDs.
+def _check_bot_paused(*, force: bool = False) -> bool:
+    """Consulta pausa global com fail-closed e sem cachear estado livre.
 
-    Resultado é cacheado por _BOT_STATUS_TTL_S segundos (padrão: 5s via env
-    WHATSAPP_BOT_STATUS_TTL_S) para evitar uma chamada HTTP a cada mensagem.
+    Apenas pausa/indisponibilidade positiva é cacheada. Assim, `start_bot`
+    libera na próxima consulta e uma falha do bridge nunca autoriza envio.
     """
     global _lid_to_phone, _bot_status_cache
     now = time.time()
-    if now - _bot_status_cache["ts"] < _BOT_STATUS_TTL_S:
-        return _bot_status_cache["paused"]
+    if (
+        not force
+        and _bot_status_cache.get("paused")
+        and now - float(_bot_status_cache.get("ts", 0)) < _BOT_STATUS_TTL_S
+    ):
+        return True
     try:
         url = f"{BRIDGE_URL}/bot-status"
         req = urllib.request.Request(url, headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=3) as resp:
             data = json.loads(resp.read().decode("utf-8"))
-            new_map = data.get("lidToPhone")
-            if isinstance(new_map, dict):
-                _lid_to_phone.update(new_map)
-            paused = data.get("botPaused", False)
-            _bot_status_cache = {"paused": paused, "ts": now}
-            return paused
-    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, OSError):
-        # Bridge offline ou resposta inválida — retorna padrão seguro
-        return False
+        if not isinstance(data, dict) or not isinstance(data.get("botPaused"), bool):
+            raise ValueError("resposta inválida do endpoint bot-status")
+        new_map = data.get("lidToPhone")
+        if isinstance(new_map, dict):
+            _lid_to_phone.update(new_map)
+        paused = data["botPaused"]
+        _bot_status_cache = {"paused": paused, "ts": now if paused else 0.0}
+        return paused
+    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, OSError, ValueError, TypeError) as exc:
+        _bot_status_cache = {"paused": True, "ts": now, "uncertain": True}
+        logger.warning("[delivery-gate] Estado global indisponível; bloqueando resposta da IA: %s", exc)
+        return True
 
 
-def _check_chat_silenced(chat_id: str) -> bool:
-    """Verifica se uma conversa específica está silenciada temporariamente.
+def _check_chat_silenced(chat_id: str, *, force: bool = False) -> bool:
+    """Verifica takeover por chat com fail-closed e cache apenas positivo.
 
-    Resultado é cacheado por _CHAT_STATUS_TTL_S segundos (padrão: 5s via env
-    WHATSAPP_CHAT_STATUS_TTL_S) para evitar uma chamada HTTP a cada mensagem.
+    `force=True` ignora cache para a revalidação imediatamente anterior ao envio.
     """
     now = time.time()
     cached = _chat_status_cache.get(chat_id)
-    if cached and now - cached["ts"] < _CHAT_STATUS_TTL_S:
-        return cached["silenced"]
+    if (
+        not force
+        and cached
+        and cached.get("silenced")
+        and now - cached["ts"] < _CHAT_STATUS_TTL_S
+    ):
+        return True
     try:
         safe_chat_id = urllib.parse.quote(chat_id)
         url = f"{BRIDGE_URL}/chat-status/{safe_chat_id}"
         req = urllib.request.Request(url, headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=3) as resp:
             data = json.loads(resp.read().decode("utf-8"))
-            silenced = data.get("isSilenced", False)
-            _chat_status_cache[chat_id] = {"silenced": silenced, "ts": now}
+            if not isinstance(data, dict) or not isinstance(data.get("isSilenced"), bool):
+                raise ValueError("resposta inválida do endpoint chat-status")
+            silenced = data["isSilenced"]
+            if silenced:
+                _chat_status_cache[chat_id] = {"silenced": True, "ts": now}
+            else:
+                _chat_status_cache.pop(chat_id, None)
             return silenced
-    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, OSError):
-        # Bridge offline ou resposta inválida — retorna padrão seguro
-        return False
+    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, OSError, ValueError, TypeError) as exc:
+        _chat_status_cache[chat_id] = {"silenced": True, "ts": now, "uncertain": True}
+        logger.warning("[takeover] Estado do chat indisponível; bloqueando resposta da IA para %s: %s", chat_id, exc)
+        return True
 
 
 def _fetch_chat_history(chat_id: str, limit: int = 50) -> str:
@@ -932,6 +1838,109 @@ def _best_contact_name(jid: str, bridge_name: str | None, db_name: str | None, p
     if not is_generic(db_name):
         return db_name.strip(), "log"
     return f"Contato {phone}", "fallback"
+
+
+_NOT_A_PERSON_NAME = {
+    "contato", "cliente", "user", "usuario", "usuário", "você", "voce", "you",
+    "whatsapp", "unknown", "null", "none", "undefined", "amigo", "amiga",
+    "beleza", "show", "ok", "opa", "oi", "oie", "sim", "nao", "não", "claro",
+    "perfeito", "valeu", "obrigado", "obrigada", "fechou", "combinado",
+    "entendi", "legal", "top", "blz", "tmj", "fala", "eita", "cara", "mano",
+    "bom", "dia", "tarde", "noite",
+}
+_SELF_INTRO_NAME = re.compile(
+    r"(?:meu\s+nome\s+[eé]\s+|me\s+chamo\s+|pode\s+me\s+chamar\s+de\s+|"
+    r"sou\s+[oa]\s+|aqui\s+[eé]\s+[oa]?\s*)"
+    r"([A-Za-zÀ-ÿ]{2,}(?:\s+[A-Za-zÀ-ÿ]{2,}){0,2})",
+    re.I,
+)
+_JUST_A_NAME = re.compile(r"^[A-Za-zÀ-ÿ]{2,20}[.!]?$")
+
+
+def _is_usable_person_name(name: str | None) -> bool:
+    """True se o rótulo serve para chamar a pessoa em voz (não número, LID, placeholder)."""
+    if not name or not isinstance(name, str):
+        return False
+    n = name.strip()
+    if len(n) < 2 or len(n) > 40:
+        return False
+    if "@" in n or n.startswith("+"):
+        return False
+    if n.lower().startswith("contato "):
+        return False
+    letters = re.sub(r"[^A-Za-zÀ-ÿ]", "", n)
+    if len(letters) < 2:
+        return False
+    if len(re.sub(r"\D", "", n)) >= 6:
+        return False
+    first = n.split()[0].lower()
+    return first not in _NOT_A_PERSON_NAME and n.lower() not in _NOT_A_PERSON_NAME
+
+
+def _spoken_first_name(name: str) -> str:
+    token = (name or "").strip().split()[0]
+    if not token:
+        return ""
+    return token[0].upper() + token[1:]
+
+
+def _resolve_lead_spoken_name(contact_info: dict | None, bridge_name: str | None = None) -> str | None:
+    """Primeiro nome falável: o que a pessoa disse > apelido > nome do WhatsApp."""
+    info = contact_info or {}
+    for candidate in (info.get("spoken_name"), info.get("nickname"), info.get("name"), bridge_name):
+        if _is_usable_person_name(candidate):
+            return _spoken_first_name(str(candidate))
+    return None
+
+
+def _extract_self_introduced_name(message: str) -> str | None:
+    """Pega o nome se a pessoa se apresentou. Não trata 'beleza'/'ok' como nome."""
+    blob = (message or "").strip()
+    if not blob:
+        return None
+    match = _SELF_INTRO_NAME.search(blob)
+    if match and _is_usable_person_name(match.group(1)):
+        return _spoken_first_name(match.group(1))
+    if _JUST_A_NAME.match(blob) and _is_usable_person_name(blob.rstrip(".!")):
+        return _spoken_first_name(blob.rstrip(".!"))
+    return None
+
+
+def _persist_spoken_name(key: str, name: str, contacts: dict) -> None:
+    if not key or not name:
+        return
+    rec = contacts.get(key) or {}
+    rec["spoken_name"] = name
+    if not _is_usable_person_name(rec.get("name")):
+        rec["name"] = name
+    contacts[key] = rec
+    try:
+        with open("/opt/data/personal_contacts.json", "w", encoding="utf-8") as f:
+            json.dump(contacts, f, indent=2, ensure_ascii=False)
+    except OSError as err:
+        logger.warning(f"[spoken-name] falha ao gravar: {err}")
+
+
+def _lead_name_prompt_block(spoken: str | None) -> str:
+    if spoken:
+        return (
+            "### NOME DO LEAD NA VOZ ###\n"
+            f"Nome para usar: {spoken}\n"
+            f"Use esse nome no áudio, natural, no máximo uma vez por resposta. "
+            f"Principalmente ao explicar o produto e ao falar de preço.\n"
+            f"Ex: \"Então {spoken}, funciona assim…\" / "
+            f"\"{spoken}, o investimento é R$997 de implementação e R$397 por mês…\"\n"
+            "Não force em toda frase. Não invente outro nome.\n\n"
+        )
+    return (
+        "### NOME DO LEAD NA VOZ ###\n"
+        "Nome: AUSENTE (WhatsApp sem nome claro).\n"
+        "Não invente nome. Não use número, LID nem a palavra Contato.\n"
+        "Depois de responder o que a pessoa perguntou, pergunte uma vez: "
+        "\"como posso te chamar?\"\n"
+        "Se ela já disse o nome nesta conversa, use-o.\n\n"
+    )
+
 
 def _extract_json_from_text(text: str) -> dict:
     """Extrai o primeiro objeto JSON válido de um texto usando balanceamento de chaves."""
@@ -1020,7 +2029,11 @@ def _merge_records_field_level(remote_records: dict, local_records: dict) -> dic
         if isinstance(local_val, dict):
             for field, lv in local_val.items():
                 rv = record.get(field)
-                if (rv is None or rv == "") and lv not in (None, ""):
+                if field in _CONTACT_AI_OPERATIONAL_FIELDS:
+                    # Política de atendimento é local e explícita. Pull/sync remoto
+                    # nunca pode ligar um contato que foi desabilitado localmente.
+                    record[field] = lv
+                elif (rv is None or rv == "") and lv not in (None, ""):
                     record[field] = lv
         merged[key] = record
     for key, local_val in local_records.items():
@@ -1941,6 +2954,20 @@ def _merge_contact_entries(primary: dict, secondary: dict) -> None:
     if secondary.get("manual_relationship") and not primary.get("manual_relationship"):
         primary["manual_relationship"] = secondary["manual_relationship"]
 
+    # Política operacional: um alias desabilitado mantém o contato desabilitado.
+    # Sync/dedup nunca pode transformar ausência de flag em habilitação.
+    for field in _CONTACT_AI_OPERATIONAL_FIELDS:
+        if field not in primary and field in secondary:
+            primary[field] = secondary[field]
+    if primary.get("ai_enabled") is False or secondary.get("ai_enabled") is False:
+        primary["ai_enabled"] = False
+        primary["in_flow"] = False
+        primary["ai_disabled_reason"] = (
+            primary.get("ai_disabled_reason")
+            or secondary.get("ai_disabled_reason")
+            or "legacy_sync_not_in_flow"
+        )
+
     # relationship: secondary vence se primary não tem manual_relationship
     if not primary.get("manual_relationship"):
         sec_rel = secondary.get("manual_relationship") or secondary.get("relationship")
@@ -2343,6 +3370,11 @@ def _sync_contacts_from_db_internal(force: bool = True) -> str:
                     "intent": existing_data.get("intent") or "Contato inicial.",
                     "frequency": existing_data.get("frequency") or "esporádica",
                     "guidelines": guide_val,
+                    **_contact_ai_policy_fields(
+                        existing_data,
+                        default_enabled=False,
+                        default_origin="legacy_sync",
+                    ),
                     "last_interaction": max_ts or existing_data.get("last_interaction", 0)
                 }
                 continue
@@ -2379,6 +3411,11 @@ def _sync_contacts_from_db_internal(force: bool = True) -> str:
                     "intent": existing_data.get("intent") or "Contato recente.",
                     "frequency": existing_data.get("frequency") or "esporádica",
                     "guidelines": guide_val,
+                    **_contact_ai_policy_fields(
+                        existing_data,
+                        default_enabled=False,
+                        default_origin="legacy_sync",
+                    ),
                     "last_interaction": max_ts or existing_data.get("last_interaction", 0)
                 }
                 continue
@@ -2503,6 +3540,11 @@ def _sync_contacts_from_db_internal(force: bool = True) -> str:
                 "intent": classification.get("intent", "Suporte/Atendimento."),
                 "frequency": classification.get("frequency", "esporádica"),
                 "guidelines": classification.get("guidelines", "Responda de forma prestativa."),
+                **_contact_ai_policy_fields(
+                    existing_data,
+                    default_enabled=False,
+                    default_origin="legacy_sync",
+                ),
                 "last_interaction": max_ts or existing_data.get("last_interaction", 0)
             }
         else:
@@ -2524,6 +3566,11 @@ def _sync_contacts_from_db_internal(force: bool = True) -> str:
                 "intent": existing_data.get("intent") or classification.get("intent", "Suporte/Atendimento."),
                 "frequency": existing_data.get("frequency") or classification.get("frequency", "esporádica"),
                 "guidelines": existing_data.get("guidelines") or classification.get("guidelines", "Responda de forma prestativa."),
+                **_contact_ai_policy_fields(
+                    existing_data,
+                    default_enabled=False,
+                    default_origin="legacy_sync",
+                ),
                 "last_interaction": max_ts or existing_data.get("last_interaction", 0)
             }
         added_count += 1
@@ -3766,7 +4813,22 @@ def _pull_and_merge_configurations():
     dev_user = config.dev_github_user
 
     if not config_repo:
-        config_repo = "hermes_agent_context_contatcs"
+        logger.info("[config-sync] CONFIG_REPO vazio — mantendo personas e JSON locais.")
+        try:
+            import shutil
+            soul_whatsapp_path = Path("/opt/data/SOUL_WHATSAPP.md")
+            profile_wa_soul = Path("/opt/data/.hermes/profiles/whatsapp/SOUL.md")
+            if soul_whatsapp_path.exists():
+                profile_wa_soul.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(soul_whatsapp_path, profile_wa_soul)
+            soul_email_path = Path("/opt/data/SOUL_EMAIL.md")
+            profile_em_soul = Path("/opt/data/.hermes/profiles/email/SOUL.md")
+            if soul_email_path.exists():
+                profile_em_soul.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(soul_email_path, profile_em_soul)
+        except Exception as copy_err:
+            logger.error(f"Falha ao copiar personas para perfis locais: {copy_err}")
+        return
 
     if "/" in config_repo:
         repo_parts = config_repo.split("/")
@@ -4254,6 +5316,177 @@ def _load_personal_contacts() -> dict:
     return {}
 
 
+_PERSONAL_CONTACTS_PATH = Path("/opt/data/personal_contacts.json")
+_CONTACT_AI_POLICY_VERSION = 1
+_CONTACT_AI_POLICY_LOCK = threading.Lock()
+_CONTACT_AI_OPERATIONAL_FIELDS = frozenset({
+    "ai_enabled",
+    "in_flow",
+    "flow_origin",
+    "ai_disabled_reason",
+    "ai_policy_version",
+    "first_live_inbound_at",
+})
+
+
+def _write_personal_contacts_atomic(contacts: dict) -> None:
+    """Grava a política por contato sem deixar JSON parcial em caso de queda."""
+    path = _PERSONAL_CONTACTS_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(contacts, fh, ensure_ascii=False, indent=2)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    finally:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except OSError:
+            pass
+
+
+def _contact_ai_policy_fields(
+    existing: dict | None,
+    *,
+    default_enabled: bool,
+    default_origin: str,
+) -> dict:
+    """Preserva flags operacionais; import/sync nunca habilita por inferência."""
+    current = existing if isinstance(existing, dict) else {}
+    enabled = current.get("ai_enabled") if "ai_enabled" in current else bool(default_enabled)
+    in_flow = current.get("in_flow") if "in_flow" in current else bool(default_enabled)
+    result = {
+        "ai_enabled": bool(enabled),
+        "in_flow": bool(in_flow),
+        "flow_origin": current.get("flow_origin") or default_origin,
+        "ai_policy_version": _CONTACT_AI_POLICY_VERSION,
+    }
+    if not result["ai_enabled"]:
+        result["ai_disabled_reason"] = current.get("ai_disabled_reason") or "legacy_sync_not_in_flow"
+    if current.get("first_live_inbound_at"):
+        result["first_live_inbound_at"] = current["first_live_inbound_at"]
+    return result
+
+
+def _contact_identity_candidates(*values: str) -> tuple[set[str], set[str]]:
+    exact: set[str] = set()
+    phones: set[str] = set()
+    for value in values:
+        raw = str(value or "").strip()
+        if not raw:
+            continue
+        exact.add(raw)
+        exact.add(raw.replace(":", "@"))
+        try:
+            resolved = _resolve_phone_from_jid(raw)
+        except Exception:
+            resolved = raw
+        if resolved:
+            exact.add(str(resolved))
+        for candidate in (raw, str(resolved or "")):
+            if "@lid" in candidate:
+                continue
+            digits = "".join(ch for ch in candidate.split("@")[0].split(":")[0] if ch.isdigit())
+            if digits:
+                phones.add(_normalize_brazilian_phone(digits))
+    return exact, phones
+
+
+def _find_contact_ai_record(contacts: dict, chat_id: str, sender_id: str) -> tuple[str | None, dict | None]:
+    exact, phones = _contact_identity_candidates(chat_id, sender_id)
+    for key, raw_record in contacts.items():
+        if not isinstance(raw_record, dict):
+            continue
+        key_str = str(key)
+        if key_str in exact or str(raw_record.get("lid") or "") in exact:
+            return key_str, raw_record
+        if "@lid" not in key_str:
+            digits = "".join(ch for ch in key_str.split("@")[0].split(":")[0] if ch.isdigit())
+            if digits and _normalize_brazilian_phone(digits) in phones:
+                return key_str, raw_record
+    return None, None
+
+
+def _canonical_new_contact_key(chat_id: str, sender_id: str) -> str:
+    for value in (chat_id, sender_id):
+        raw = str(value or "").strip()
+        if not raw:
+            continue
+        try:
+            resolved = _resolve_phone_from_jid(raw)
+        except Exception:
+            resolved = raw
+        return str(resolved or raw)
+    return ""
+
+
+def _ensure_contact_ai_access(
+    chat_id: str,
+    sender_id: str,
+    *,
+    is_historical: bool = False,
+) -> tuple[bool, str]:
+    """Gate de atendimento: legado/importado off; contato novo realtime on.
+
+    Um registro existente sem `ai_enabled=true` é fail-closed. Assim, sync,
+    classificação ou update de container nunca habilitam contatos antigos por
+    acidente. Somente um contato ainda desconhecido chegando em tempo real
+    entra automaticamente no funil.
+    """
+    if is_historical:
+        return False, "historical-import"
+
+    with _CONTACT_AI_POLICY_LOCK:
+        contacts: dict = {}
+        if _PERSONAL_CONTACTS_PATH.exists():
+            try:
+                raw = json.loads(_PERSONAL_CONTACTS_PATH.read_text(encoding="utf-8"))
+                if not isinstance(raw, dict):
+                    raise ValueError("personal_contacts.json não contém objeto")
+                contacts = raw
+            except (OSError, json.JSONDecodeError, ValueError) as exc:
+                logger.error("[contact-policy] Falha ao ler política; bloqueando IA: %s", exc)
+                return False, "contact-policy-unavailable"
+
+        key, record = _find_contact_ai_record(contacts, chat_id, sender_id)
+        if record is not None:
+            if "ai_enabled" not in record:
+                record.update(_contact_ai_policy_fields(
+                    record,
+                    default_enabled=False,
+                    default_origin="legacy_sync",
+                ))
+                try:
+                    _write_personal_contacts_atomic(contacts)
+                except OSError as exc:
+                    logger.error("[contact-policy] Falha ao persistir default-off: %s", exc)
+                    return False, "contact-policy-write-failed"
+            enabled = record.get("ai_enabled") is True and record.get("in_flow") is not False
+            return enabled, "explicit-flow" if enabled else "legacy-contact-disabled"
+
+        key = _canonical_new_contact_key(chat_id, sender_id)
+        if not key:
+            return False, "contact-identity-uncertain"
+        now = time.time()
+        contacts[key] = {
+            "ai_enabled": True,
+            "in_flow": True,
+            "flow_origin": "new_live_inbound",
+            "ai_policy_version": _CONTACT_AI_POLICY_VERSION,
+            "first_live_inbound_at": now,
+            "last_interaction": now,
+        }
+        try:
+            _write_personal_contacts_atomic(contacts)
+        except OSError as exc:
+            logger.error("[contact-policy] Falha ao cadastrar novo lead; bloqueando IA: %s", exc)
+            return False, "contact-policy-write-failed"
+        return True, "new-live-inbound"
+
+
 _PRODUCT_CATALOG_PATH = Path("/opt/data/product_catalog.json")
 
 
@@ -4719,6 +5952,9 @@ def _find_product_in_recent_messages(
     else:
         # Sem timestamp parsável: fallback para 7 dias a partir de agora
         messages = _find_recent_all_messages(chat_id, minutes=60 * 24 * 7, limit=50)
+        if not messages:
+            # Compatibilidade com bancos/fontes que expõem somente inbound do cliente.
+            messages = _find_recent_client_messages(chat_id, minutes=60 * 24 * 7, limit=50)
         logger.info("[sale-detect] Janela não ancorada (payment_datetime não parsável): usando 7 dias")
     texts = ([caption_text] if caption_text else []) + messages
 
@@ -4777,8 +6013,10 @@ def _find_product_in_recent_messages(
         text_words = set(text_norm.split())
         for _key, item in active_items:
             name = item.get("name", "")
-            keywords = [w for w in _normalize_text(name).split() if len(w) > 5]
-            if keywords and any(w in text_words for w in keywords) and name not in candidates:
+            name_words = [w for w in _normalize_text(name).split() if len(w) >= 2]
+            matched = [w for w in name_words if w in text_words]
+            strong_match = any(len(w) > 5 for w in matched) or len(matched) >= 2
+            if strong_match and name not in candidates:
                 candidates.append(name)
     if len(candidates) == 1:
         logger.info(f"[sale-detect] Produto identificado via heurística (único match): '{candidates[0]}'")
@@ -5302,9 +6540,13 @@ def _build_support_prompt(
         )
         contact_block = "\n".join(lines) + "\n\n"
 
+    spoken = _resolve_lead_spoken_name(contact_info)
+    name_block = _lead_name_prompt_block(spoken)
+
     return {
         "context": (
             f"{_datetime_context_block()}"
+            f"{name_block}"
             "### PERSONA E DIRETRIZES DO SUPORTE WHATSAPP ###\n"
             f"{whatsapp_soul}\n\n"
             "### IDIOMA: APENAS PORTUGUÊS BRASILEIRO ###\n"
@@ -5530,8 +6772,10 @@ def _live_classify_contact(
     if not man_rel and contact_info and contact_info.get("relationship") in ["Vendedor", "Amigo", "AmigoProximo", "Parente", "Filho"]:
         man_rel = contact_info.get("relationship")
 
+    spoken_kept = (contact_info or {}).get("spoken_name")
     new_data = {
         "name": name,
+        "spoken_name": spoken_kept,
         "relationship": man_rel or classification.get("relationship", "Cliente"),
         "manual_relationship": man_rel,
         "notes": contact_info.get("notes") if contact_info else None,
@@ -5544,6 +6788,11 @@ def _live_classify_contact(
         "intent": classification.get("intent", "Suporte/Atendimento."),
         "frequency": classification.get("frequency", "esporádica"),
         "guidelines": classification.get("guidelines", "Responda de forma prestativa."),
+        **_contact_ai_policy_fields(
+            contact_info or {},
+            default_enabled=True,
+            default_origin="new_live_inbound",
+        ),
         "last_interaction": time.time(),
     }
 
@@ -5756,6 +7005,8 @@ def pre_gateway_dispatch(*args, **kwargs):
             _raw_msg = _ast.literal_eval(_raw_msg)
         except Exception:
             _raw_msg = {}
+    if not isinstance(_raw_msg, dict):
+        _raw_msg = {}
     _is_from_me = bool(_raw_msg.get("fromMe") or _raw_msg.get("from_me"))
 
     # Identificar chat
@@ -5766,8 +7017,29 @@ def pre_gateway_dispatch(*args, **kwargs):
     is_owner = (_normalize_brazilian_phone(clean_sender) == _normalize_brazilian_phone(clean_owner))
     is_self_chat = (clean_sender == clean_chat) and is_owner
 
-    # Comprovante de pagamento detectado num cliente — registra a venda (pendente de revisão),
-    # confirma o pedido pro cliente na hora, e avisa o dono no self-chat.
+    # Gate de atendimento por contato. Importação/sync nunca cria atendimento;
+    # contatos legados existentes ficam desligados até habilitação explícita.
+    _is_historical_event = bool(
+        getattr(event, "is_historical", False)
+        or _raw_msg.get("is_historical")
+        or _raw_msg.get("isHistorical")
+    )
+    if not is_owner and not _is_from_me:
+        ai_allowed, ai_reason = _ensure_contact_ai_access(
+            chat_id,
+            sender_id,
+            is_historical=_is_historical_event,
+        )
+        if not ai_allowed:
+            try:
+                _followup_cancel(chat_id)
+            except Exception:
+                pass
+            logger.info("[contact-policy] IA bloqueada chat=%r reason=%s", chat_id, ai_reason)
+            return {"action": "skip", "reason": ai_reason}
+
+    # Comprovante detectado — registra como pendente, acusa recebimento sem confirmar
+    # pagamento/pedido e avisa o dono no self-chat.
     if sale_detection and sale_detection.get("is_payment_receipt") and not is_owner:
         try:
             personal_contacts = _load_personal_contacts()
@@ -5818,7 +7090,10 @@ def pre_gateway_dispatch(*args, **kwargs):
                 _pending_sale_address[chat_id] = {"sale_id": sale_id, "created_at": time.time()}
 
             if chat_id:
-                _human_send(chat_id, "Recebemos seu comprovante! Pedido confirmado 🙏")
+                _human_send(
+                    chat_id,
+                    "Recebemos seu comprovante! Agora vamos aguardar a confirmação da equipe. Te avisamos por aqui.",
+                )
 
             owner_number_clean = clean_owner
             if owner_number_clean:
@@ -5979,6 +7254,14 @@ def pre_gateway_dispatch(*args, **kwargs):
             sender_name=config.whatsapp_owner_name or "dono",
         )
 
+    # fromMe não reconhecido como eco do bot pelo bridge é takeover manual do dono.
+    if _is_from_me and not is_owner:
+        try:
+            _followup_cancel(chat_id)
+        except Exception as err:
+            logger.warning(f"[followup] takeover fromMe não persistido: {err}")
+        return {"action": "skip", "reason": "from-me-echo"}
+
     msg_text = (event.text or "").strip()
 
     # Comando para sincronizar e importar contatos do SQLite para personal_contacts.json e GitHub
@@ -6045,6 +7328,21 @@ def pre_gateway_dispatch(*args, **kwargs):
         
         return {"action": "skip", "reason": "sync-contacts-command"}
 
+    _follow_cmd = (
+        "fazer follow", "faz follow", "fazer o follow",
+        "follow nos leads", "follow com leads", "follow nos silenciosos",
+        "leads sem responder", "leads silenciosos",
+    )
+    if is_owner and is_self_chat and any(kw in normalized_msg for kw in _follow_cmd):
+        chat_id = str(event.source.chat_id) if event.source.chat_id else ""
+        reply = _followup_manual_from_owner(chat_id)
+        if chat_id:
+            try:
+                _followup_bridge_send(chat_id, reply)
+            except Exception as send_err:
+                logger.error(f"[followup] you-chat: {send_err}")
+        return {"action": "skip", "reason": "followup-manual-command"}
+
     # Comando: ajuda / como funciona — detectado por keywords sem LLM para baixa latência
     _help_keywords = [
         "quais comandos", "que comandos", "quais os comandos", "quais sao os comandos",
@@ -6066,7 +7364,9 @@ def pre_gateway_dispatch(*args, **kwargs):
             "*📋 COMANDOS DE CONTROLE*\n"
             "• `stop_bot` — pausa o atendimento a clientes (você continua usando normalmente)\n"
             "• `start_bot` — reativa o atendimento a clientes\n"
-            "• `sincronizar contatos` — classifica novos contatos e sincroniza com o GitHub\n\n"
+            "• `sincronizar contatos` — classifica novos contatos e sincroniza com o GitHub\n"
+            "• `fazer follow` — manda 1 follow nos leads que estão sem responder "
+            "(o automático só roda uma vez; o lead responder reseta)\n\n"
             "*👤 ATUALIZAR CONTATO*\n"
             "• Em linguagem natural: _\"a Isabel é minha filha, apelido Bebel\"_\n"
             "• Comando direto: `update contact <nome> campo=valor`\n"
@@ -6083,8 +7383,8 @@ def pre_gateway_dispatch(*args, **kwargs):
             "e dá pra emendar mais detalhes (ex: um link) antes de confirmar\n"
             "• O bot usa o catálogo pra responder clientes/amigos que perguntarem sobre produtos\n\n"
             "*💰 VENDAS (comprovante Pix)*\n"
-            "• Quando um cliente manda print de comprovante Pix, o bot detecta sozinho, confirma o "
-            "pedido pra ele na hora e registra a venda como pendente de revisão sua\n"
+            "• Quando um cliente manda print de comprovante Pix, o bot acusa o recebimento sem "
+            "confirmar pagamento/pedido e registra a venda como pendente de revisão sua\n"
             "• Ver: `listar vendas` / `vendas pendentes`\n"
             "• Revisar: `confirmar venda v1` ou `rejeitar venda v1`\n"
             "• Endereço: captura da legenda do print, de mensagens recentes do cliente (antes do "
@@ -6780,6 +8080,10 @@ def pre_gateway_dispatch(*args, **kwargs):
 
     # Se for mensagem manual enviada pelo dono no WhatsApp para outro contato, pulamos a resposta do LLM
     if is_owner and not is_self_chat:
+        try:
+            _followup_cancel(str(event.source.chat_id) if event.source.chat_id else "")
+        except Exception:
+            pass
         return {"action": "skip", "reason": "owner-manual-message"}
 
     # Ignorar mensagens de status do bot (stop_bot/start_bot responses)
@@ -6793,13 +8097,30 @@ def pre_gateway_dispatch(*args, **kwargs):
 
     is_personal_chat = (clean_chat == clean_owner)
 
-    # Se não for o dono, verificar status de pausa e injetar histórico da conversa
+    # Se não for o dono, cancelar jobs antes de qualquer skip de pausa/silêncio.
     if not is_owner:
+        chat_id = str(event.source.chat_id) if event.source.chat_id else ""
+        inbound_mid = getattr(event, "message_id", None)
+        if not isinstance(inbound_mid, (str, int)):
+            inbound_mid = None
+        historical_attr = getattr(event, "is_historical", False)
+        historical = bool(historical_attr) if isinstance(historical_attr, (bool, int)) else False
+        historical = historical or bool(
+            isinstance(_raw_dedup, dict) and (
+                _raw_dedup.get("is_historical") or _raw_dedup.get("isHistorical")
+            )
+        )
+        if chat_id and not historical:
+            _followup_note_activity(
+                chat_id,
+                inbound=True,
+                message_id=str(inbound_mid) if inbound_mid is not None else None,
+                text=msg_text,
+            )
+
         # Verificar se o bot está pausado via stop_bot
         if _check_bot_paused():
             return {"action": "skip", "reason": "bot-pausado"}
-
-        chat_id = str(event.source.chat_id) if event.source.chat_id else ""
 
         # Verificar se a conversa específica está silenciada temporariamente
         if chat_id and _check_chat_silenced(chat_id):
@@ -6855,6 +8176,18 @@ def pre_gateway_dispatch(*args, **kwargs):
             _sender_to_chat[sender_id] = chat_id
         if sender_id and msg_text:
             _last_owner_text[sender_id] = msg_text
+
+    if not is_owner:
+        buf_chat = str(getattr(event.source, "chat_id", "") or sender_id or "")
+        live_text = (getattr(event, "text", None) or msg_text or "").strip()
+        merged = _coalesce_contact_inbound(buf_chat, live_text)
+        if merged is None:
+            return {"action": "skip", "reason": "inbound-coalesce"}
+        if merged and merged != live_text:
+            event.text = merged
+            if hasattr(event, "body"):
+                event.body = merged
+            logger.info(f"[inbound-buf] juntou {buf_chat!r}: {merged[:120]!r}")
 
     # Roteamento Dinâmico de Modelos (Dono vs Clientes)
     try:
@@ -7030,6 +8363,23 @@ def pre_llm_call(*args, **kwargs):
 
     # Buscar info de contato no JSON
     contact_info = personal_contacts.get(clean_jid) or personal_contacts.get(phone_number)
+    if contact_info is None:
+        contact_info = {}
+
+    user_msg_now = kwargs.get("user_message") or (context or {}).get("user_message") or ""
+    introduced = _extract_self_introduced_name(str(user_msg_now))
+    persist_key = clean_jid if clean_jid in personal_contacts or phone_number not in personal_contacts else phone_number
+    if introduced:
+        contact_info["spoken_name"] = introduced
+        _persist_spoken_name(persist_key, introduced, personal_contacts)
+        logger.info(f"[spoken-name] capturado {introduced!r} de {persist_key}")
+    elif not _resolve_lead_spoken_name(contact_info):
+        try:
+            bridge_name = _resolve_contact_name_from_bridge(sender_id or clean_jid)
+        except Exception:
+            bridge_name = None
+        if _is_usable_person_name(bridge_name):
+            contact_info["name"] = bridge_name.strip()
 
     # Verificar se precisa de classificação em tempo real
     needs_live_classify = False
@@ -7094,8 +8444,11 @@ def _run_sync_in_background(force: bool, chat_id: str | None = None) -> None:
         logger.info("[sync-bg] Sync já em andamento, ignorando nova solicitação.")
         return
 
+    # Claim antes de iniciar a thread. Se o Event fosse marcado dentro do worker,
+    # duas chamadas simultâneas poderiam observar False e criar dois syncs.
+    _sync_running.set()
+
     def _worker():
-        _sync_running.set()
         try:
             result = _sync_contacts_from_db_internal(force=force)
             logger.info(f"[sync-bg] Concluído: {result}")
@@ -7111,7 +8464,11 @@ def _run_sync_in_background(force: bool, chat_id: str | None = None) -> None:
         finally:
             _sync_running.clear()
 
-    threading.Thread(target=_worker, daemon=True).start()
+    try:
+        threading.Thread(target=_worker, daemon=True).start()
+    except Exception:
+        _sync_running.clear()
+        raise
 
 
 def _run_periodic_sync():
@@ -7182,29 +8539,71 @@ def _run_periodic_sync():
         time.sleep(60)
 
 
+_CONTACT_BLOCKED_TOOLS = frozenset({
+    "clarify",
+    "clarifying_questions",
+})
+_CONTACT_ALLOWED_TOOLS = frozenset({
+    "delegate_task",
+})
+_CONTACT_BLOCK_MESSAGE = (
+    "Não use a ferramenta clarify. Se faltar um dado, pergunte no chat "
+    "em uma frase curta. Para PDF ou proposta, use subagentes em paralelo "
+    "com o que já sabe — sem narrar iteração, working ou interrupt."
+)
+
+
+def _pre_tool_block(message: str) -> dict:
+    """Hermes só honra dict {action: block}. String solta é ignorada."""
+    return {"action": "block", "message": message}
+
+
 def pre_tool_call(*args, **kwargs):
-    """Bloqueia execução de tools para sessões de contato (não-owner).
+    """Bloqueia clarify e tools de sistema em sessões de contato.
 
-    Contatos só recebem respostas de status — não precisam de tools.
-    Bloquear aqui evita o segundo ciclo pre_llm_call → post_llm_call
-    que causava respostas duplicadas.
+    O Hermes chama este hook com tool_name/session_id — sem platform.
+    Session do gateway vem como hash (20260818_...) ou
+    agent:main:whatsapp:dm:NUMERO; o mapa _sender_to_chat resolve o JID.
+    Retorno tem de ser dict action=block, senão o core ignora.
     """
-    platform = kwargs.get("platform", "")
-    session_id = kwargs.get("session_id", "")
-    if platform != "whatsapp" or not session_id:
+    tool_name = str(kwargs.get("tool_name") or "").strip().lower()
+    session_id = kwargs.get("session_id") or ""
+    platform = kwargs.get("platform") or ""
+
+    if platform and platform != "whatsapp":
+        return None
+    if not session_id and not platform:
         return None
 
-    owner_number = config.whatsapp_owner_number
-    if not owner_number:
+    chat_id = _sender_to_chat.get(session_id) or session_id
+    digits = _whatsapp_digits_from_session(str(chat_id)) or _whatsapp_digits_from_session(session_id)
+    looks_whatsapp = (
+        platform == "whatsapp"
+        or "whatsapp" in str(session_id).lower()
+        or "whatsapp" in str(chat_id).lower()
+        or "@s.whatsapp.net" in str(chat_id)
+        or "@lid" in str(chat_id)
+        or session_id in _sender_to_chat
+        or bool(digits)
+    )
+    if not looks_whatsapp:
         return None
 
-    clean_session = "".join(c for c in session_id.split("@")[0].split(":")[0] if c.isdigit())
-    clean_owner = "".join(c for c in owner_number.split("@")[0].split(":")[0] if c.isdigit())
-    if _normalize_brazilian_phone(clean_session) == _normalize_brazilian_phone(clean_owner):
-        return None  # owner pode usar tools normalmente
+    if _session_is_owner(session_id) or _session_is_owner(str(chat_id)):
+        return None
 
-    logger.info(f"[pre_tool_call] Bloqueando tool para contato session={session_id!r}")
-    return "Ferramentas não disponíveis para sessões de contato."
+    if tool_name in _CONTACT_BLOCKED_TOOLS:
+        logger.info(
+            f"[pre_tool_call] bloqueando {tool_name} "
+            f"session={session_id!r} chat={chat_id!r}"
+        )
+        return _pre_tool_block(_CONTACT_BLOCK_MESSAGE)
+
+    if tool_name in _CONTACT_ALLOWED_TOOLS:
+        return None
+
+    logger.info(f"[pre_tool_call] Bloqueando tool para contato session={session_id!r} tool={tool_name!r}")
+    return _pre_tool_block("Ferramentas não disponíveis para sessões de contato.")
 
 
 _EXEC_PATTERN = re.compile(
@@ -7227,7 +8626,10 @@ _ACTION_CLAIM_PATTERNS = [
 ]
 # Prompt Mestre §17 — vazamento técnico/interno (filtro por linha).
 _INTERNAL_LEAK_PATTERNS = [
-    r"self[- ]?improvement\s+review",
+    r"self[- \u2010-\u2015]?improvement",
+    r"user\s+profile\s+updated",
+    r"profile\s+updated",
+    r"^💾",
     r"a\s+sess[aã]o\s+foi\s+restaurada",
     r"session\s+restored",
     r"context\s+updated",
@@ -7239,7 +8641,72 @@ _INTERNAL_LEAK_PATTERNS = [
     r"◆\s*Model\s*:",
     r"\bHermes\s+(Agent|v?\d|status|log|platform|session)\b",
     r"\bCodex\b",
+    r"interrupting current task",
+    r"i['’]?ll respond to your message shortly",
+    r"queued for the next turn",
+    r"steered into current run",
+    r"redirected current run",
+    r"subagent working",
+    r"still working",
+    r"waiting for (?:provider|model) response",
+    r"iteration budget",
+    r"⏳\s*working",
+    r"working\s+[—–-]\s*\d+\s*min",
+    r"iteration\s+\d+\s*/\s*\d+",
+    r"auto-compaction",
+    r"autoraise",
+    r"caps context",
+    r"hermes config set",
+    r"codex_gpt55",
+    r"gateway restarted during delivery",
+    r"recovered reply",
+    r"may be a duplicate",
+    r"/sethome",
+    r"no home channel is set",
+    r"home channel is where hermes",
+    r"type /sethome",
 ]
+_SYSTEM_STATUS_RE = re.compile(
+    r"self[- \u2010-\u2015]?improvement|"
+    r"user\s+profile\s+updated|"
+    r"memory\s+updated|"
+    r"memory\s+update|"
+    r"profile\s+updated|"
+    r"context\s+updated|"
+    r"session\s+restored",
+    re.I,
+)
+_HERMES_STATUS_RE = re.compile(
+    r"interrupting current task|"
+    r"i['’]?ll respond to your message shortly|"
+    r"i will respond to your message shortly|"
+    r"queued for the next turn|"
+    r"steered into current run|"
+    r"redirected current run|"
+    r"subagent working|"
+    r"still working|"
+    r"waiting for (?:provider|model) response|"
+    r"iteration budget|"
+    r"budget exhausted|"
+    r"asking model to|"
+    r"⏳\s*working|"
+    r"working\s+[—–-]\s*\d+\s*min|"
+    r"iteration\s+\d+\s*/\s*\d+|"
+    r"auto-compaction|"
+    r"autoraise|"
+    r"caps context|"
+    r"hermes config set|"
+    r"codex_gpt55|"
+    r"gateway restarted during delivery|"
+    r"recovered reply|"
+    r"may be a duplicate|"
+    r"compaction was raised|"
+    r"/sethome|"
+    r"no home channel is set|"
+    r"home channel is where hermes|"
+    r"type /sethome",
+    re.I,
+)
 _CNPJ_PATTERN = re.compile(r"\b\d{2}\.?\d{3}\.?\d{3}/\d{4}-?\d{2}\b")
 _PHONE_CANDIDATE_RE = re.compile(r"\(?\+?[\d][\d\s\-\.\(\)]{6,18}[\d]")
 
@@ -7332,53 +8799,118 @@ def _prepare_contact_reply(response_text: str) -> str:
     return _redact_third_party_phones(clean_text).strip()
 
 
+_DELIVERY_JID_RE = re.compile(r"^\d{8,20}@(s\.whatsapp\.net|lid)$")
+
+
+class DeliveryBlocked(RuntimeError):
+    """Gate recusou envio automático antes de chegar ao WhatsApp."""
+
+
+def _canonical_delivery_jid(raw: str) -> str:
+    value = (raw or "").strip()
+    if not value:
+        return ""
+    if "@" not in value:
+        return ""
+    local, domain = value.split("@", 1)
+    local = local.split(":", 1)[0]
+    digits = "".join(c for c in local if c.isdigit())
+    if domain not in {"s.whatsapp.net", "lid"} or not (8 <= len(digits) <= 20):
+        return ""
+    candidate = f"{digits}@{domain}"
+    resolved = _resolve_phone_from_jid(candidate)
+    if resolved and "@" in resolved:
+        rlocal, rdomain = resolved.split("@", 1)
+        rdigits = "".join(c for c in rlocal.split(":", 1)[0] if c.isdigit())
+        if rdomain in {"s.whatsapp.net", "lid"} and 8 <= len(rdigits) <= 20:
+            candidate = f"{rdigits}@{rdomain}"
+    return candidate if _DELIVERY_JID_RE.fullmatch(candidate) else ""
+
+
 def _resolve_mapped_chat_id(session_id: str) -> str:
-    """Resolve session_id Hermes → JID do chat, com fallback no mapa invertido."""
+    """Resolve somente bindings exatos; sessão ambígua não vira destinatário."""
+    sid = str(session_id or "").strip()
+    if not sid:
+        return ""
+    session_clean = sid
+    if "@" in sid:
+        local, domain = sid.split("@", 1)
+        session_clean = f"{local.split(':', 1)[0]}@{domain}"
+
+    mapped = _sender_to_chat.get(sid) or _sender_to_chat.get(session_clean)
+    dm = _WA_DM_SESSION_RE.search(sid)
+    candidate = mapped or (f"{dm.group(1)}@s.whatsapp.net" if dm else session_clean)
+    target = _canonical_delivery_jid(str(candidate))
+    if not target:
+        return ""
+
+    # Sessões que já carregam um telefone não podem ser redirecionadas por mapa
+    # para outro contato. LIDs são comparados somente depois de resolução real.
+    session_digits = _whatsapp_digits_from_session(sid)
+    target_digits = _whatsapp_digits_from_session(target)
+    sid_is_lid = session_clean.endswith("@lid")
+    if session_digits and target_digits and not sid_is_lid:
+        if _normalize_brazilian_phone(session_digits) != _normalize_brazilian_phone(target_digits):
+            logger.error(
+                "[delivery-gate] binding divergente session=%r target=%r",
+                sid,
+                target,
+            )
+            return ""
+    return target
+
+
+def _assert_delivery_allowed(chat_id: str) -> None:
+    """Revalida destinatário, pausa e takeover imediatamente antes do envio."""
+    if not _canonical_delivery_jid(chat_id) or _canonical_delivery_jid(chat_id) != chat_id:
+        raise DeliveryBlocked("destinatário ausente, ambíguo ou não canônico")
+    if _check_bot_paused(force=True):
+        raise DeliveryBlocked("bot pausado ou estado global indisponível")
+    if _check_chat_silenced(chat_id, force=True):
+        raise DeliveryBlocked("takeover ativo ou estado do chat indisponível")
+
+
+def _reserve_contact_send(session_id: str, chat_id: str, preview: str) -> tuple[bool, str]:
+    """Reserva um turno sem marcá-lo como entregue antes do `messageId`."""
     session_clean = session_id
     if session_id and "@" in session_id:
         local, domain = session_id.split("@", 1)
-        session_clean = f"{local.split(':')[0]}@{domain}"
-    chat_id = (
-        _sender_to_chat.get(session_id)
-        or _sender_to_chat.get(session_clean)
-        or session_id
-    )
-    if chat_id == session_id and "@" not in str(chat_id or ""):
-        for sid, cid in list(_sender_to_chat.items()):
-            if sid == session_id or session_id in str(sid):
-                return cid
-    return chat_id
-
-
-def _claim_contact_send(session_id: str, chat_id: str, preview: str) -> bool:
-    """Marca o turno como enviado. False = já respondido, não enviar de novo."""
-    session_clean = session_id
-    if session_id and "@" in session_id:
-        local, domain = session_id.split("@", 1)
-        session_clean = f"{local.split(':')[0]}@{domain}"
-
-    if session_id:
-        with _responded_sessions_lock:
-            if session_id in _responded_sessions:
-                logger.warning(f"[contact-send] Sessão já respondida — suprimindo (session={session_id!r})")
-                _log_suppressed("SESSION_DEDUP", session_id, chat_id, preview)
-                return False
-            _responded_sessions.add(session_id)
-            if len(_responded_sessions) > 2000:
-                _responded_sessions.clear()
-                _responded_sessions.add(session_id)
+        session_clean = f"{local.split(':', 1)[0]}@{domain}"
 
     with _turn_lock:
-        tk = _turn_key.get(chat_id, "") or _turn_key.get(session_clean, "")
-        logger.info(f"[contact-send] dedup: session={session_id!r} chat_id={chat_id!r} tk={tk!r} sent={tk in _turn_sent}")
-        if tk and tk in _turn_sent:
-            logger.warning(f"[contact-send] Turno já respondido — suprimindo (chat={chat_id})")
+        tk = _turn_key.get(chat_id, "") or _turn_key.get(session_clean, "") or _turn_key.get(session_id, "")
+        logger.info(
+            "[contact-send] reserve session=%r chat=%r tk=%r sent=%s inflight=%s",
+            session_id,
+            chat_id,
+            tk,
+            tk in _turn_sent,
+            tk in _turn_inflight,
+        )
+        if not tk:
+            _log_suppressed("TURN_BINDING_MISSING", session_id, chat_id, preview)
+            return False, ""
+        if tk in _turn_sent or tk in _turn_inflight:
             _log_suppressed("TURN_DEDUP", session_id, chat_id, preview)
-            return False
-        if tk:
-            _turn_sent.add(tk)
-            _persist_turn_sent_to_disk(tk)
-    return True
+            return False, tk
+        _turn_inflight.add(tk)
+        return True, tk
+
+
+def _complete_contact_send(turn_key: str, *, delivered: bool, uncertain: bool) -> None:
+    """Fecha reserva; confirmação ou incerteza tornam o turno terminal sem retry."""
+    if not turn_key:
+        return
+    persist = False
+    with _turn_lock:
+        _turn_inflight.discard(turn_key)
+        if delivered or uncertain:
+            _turn_sent.add(turn_key)
+            persist = True
+    if persist:
+        _persist_turn_sent_to_disk(turn_key)
+    if uncertain:
+        logger.warning("[contact-send] turno terminal incerto, sem retry automático: %s", turn_key)
 
 
 def transform_llm_output(*args, **kwargs):
@@ -7401,15 +8933,24 @@ def transform_llm_output(*args, **kwargs):
         return "\n"
 
     chat_id = _resolve_mapped_chat_id(session_id)
-    if not _claim_contact_send(session_id, chat_id, clean_text):
+    if not chat_id:
+        logger.error("[delivery-gate] sessão sem destinatário canônico: %r", session_id)
+        _log_suppressed("RECIPIENT_UNRESOLVED", session_id, "", clean_text)
+        return "\n"
+    reserved, turn_key = _reserve_contact_send(session_id, chat_id, clean_text)
+    if not reserved:
         return "\n"
 
     try:
-        _human_send(str(chat_id), clean_text)
+        scheduled = _schedule_contact_reply(str(chat_id), clean_text, turn_key)
     except Exception as err:
-        logger.warning(f"[transform_llm_output] envio falhou, Hermes manda o bloco filtrado: {err}")
-        return clean_text
-    logger.info("[transform_llm_output] bolhas enviadas; suprimindo envio do Hermes")
+        _complete_contact_send(turn_key, delivered=False, uncertain=False)
+        logger.warning(f"[transform_llm_output] não foi possível agendar: {err}")
+        return "\n"
+    logger.info(
+        "[transform_llm_output] entrega %s; suprimindo envio do Hermes",
+        "agendada" if scheduled else "bloqueada/incerta",
+    )
     return "\n"
 
 
@@ -7487,7 +9028,104 @@ def post_llm_call(*args, **kwargs):
 # Helpers extraídos acima são testáveis diretamente sem instanciar register().
 # ────────────────────────────────────────────────────────────────────────────
 
+_CORE_BRIDGE_STATUS_FN = r'''
+function isHermesStatusLeak(message) {
+  if (!message || typeof message !== "string") return false;
+  const m = message.trim().toLowerCase();
+  return (
+    m.includes("interrupting current task") ||
+    m.includes("i'll respond to your message shortly") ||
+    m.includes("i will respond to your message shortly") ||
+    m.includes("queued for the next turn") ||
+    m.includes("steered into current run") ||
+    m.includes("redirected current run") ||
+    m.includes("subagent working") ||
+    m.includes("gateway restarted during delivery") ||
+    m.includes("recovered reply") ||
+    m.includes("may be a duplicate") ||
+    m.includes("still working") ||
+    m.includes("waiting for provider response") ||
+    m.includes("iteration budget") ||
+    m.includes("auto-compaction") ||
+    m.includes("autoraise") ||
+    m.includes("caps context") ||
+    m.includes("hermes config set") ||
+    m.includes("codex_gpt55") ||
+    m.includes("/sethome") ||
+    m.includes("no home channel is set") ||
+    m.includes("home channel is where hermes") ||
+    /⏳\s*working/.test(m) ||
+    /working\s+[—–-]\s*\d+\s*min/.test(m) ||
+    /iteration\s+\d+\s*\/\s*\d+/.test(m)
+  );
+}
+'''
+
+
+def _patch_core_bridge_status_filter() -> None:
+    """O gateway usa scripts/whatsapp-bridge/bridge.js, não a cópia do plugin."""
+    path = Path("/opt/data/.hermes/scripts/whatsapp-bridge/bridge.js")
+    if not path.is_file():
+        return
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return
+    if "function isHermesStatusLeak(message)" in text:
+        return
+    needle = "// Send a message\napp.post('/send'"
+    if needle not in text:
+        return
+    updated = text.replace(needle, _CORE_BRIDGE_STATUS_FN + "\n" + needle, 1)
+    old = "  try {\n    const chunks = splitLongMessage(formatOutgoingMessage(message));"
+    new = (
+        "  try {\n"
+        "    if (isHermesStatusLeak(message)) {\n"
+        '      console.log("[bridge] hermes status blocked for", chatId, String(message).slice(0, 120));\n'
+        "      return res.json({ success: true, info: \"system status blocked\" });\n"
+        "    }\n"
+        "    const chunks = splitLongMessage(formatOutgoingMessage(message));"
+    )
+    if old in updated:
+        updated = updated.replace(old, new, 1)
+    if updated != text:
+        path.write_text(updated, encoding="utf-8")
+        logger.info(f"filtro de status injetado em {path}")
+
+
+_GATEWAY_SAFETY_CONFIG = (
+    ("gateway.delivery_ledger", "false"),
+    ("compression.codex_gpt55_autoraise_notice", "false"),
+)
+
+
+def _enforce_gateway_safety_config() -> None:
+    """Reaplica os bloqueios após o bootstrap reescrever o perfil whatsapp."""
+    hermes_bin = Path("/opt/hermes/.venv/bin/hermes")
+    if not hermes_bin.is_file():
+        logger.warning("Hermes CLI ausente; configuração anti-vazamento não reaplicada")
+        return
+    for profile in ("default", "whatsapp"):
+        for key, value in _GATEWAY_SAFETY_CONFIG:
+            result = subprocess.run(
+                [str(hermes_bin), "-p", profile, "config", "set", key, value],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+            if result.returncode != 0:
+                detail = (result.stderr or result.stdout or "erro desconhecido").strip()
+                raise RuntimeError(f"falha ao fixar {profile}:{key}: {detail}")
+    logger.info("configuração anti-vazamento fixada nos perfis default e whatsapp")
+
+
 def register(ctx):
+
+    try:
+        _enforce_gateway_safety_config()
+    except Exception as safety_err:
+        logger.error(f"Falha ao fixar configuração anti-vazamento: {safety_err}")
 
     # Auto-inicialização e cópia dos arquivos da ponte
     try:
@@ -7529,6 +9167,60 @@ def register(ctx):
             if not target_bridge.exists() or source_bridge.read_bytes() != target_bridge.read_bytes():
                 shutil.copy2(source_bridge, target_bridge)
                 logger.info(f"bridge.js atualizado em {target_bridge}")
+            # Hermes 0.20 starts the core copy under scripts/whatsapp-bridge,
+            # not platforms/whatsapp/bridge. Keep both identical so the
+            # dashboard and the plugin share one paired session.
+            source_allow = plugin_dir / "allowlist.js"
+            if not source_allow.exists():
+                source_allow = plugin_dir / "whatsapp-manager" / "allowlist.js"
+            for core_bridge_dir in (
+                Path("/opt/data/.hermes/scripts/whatsapp-bridge"),
+                Path("/opt/data/.hermes/profiles/whatsapp/scripts/whatsapp-bridge"),
+            ):
+                if not core_bridge_dir.is_dir():
+                    continue
+                core_bridge = core_bridge_dir / "bridge.js"
+                if not core_bridge.exists() or source_bridge.read_bytes() != core_bridge.read_bytes():
+                    shutil.copy2(source_bridge, core_bridge)
+                    logger.info(f"bridge.js atualizado em {core_bridge}")
+                if source_allow.exists():
+                    dest_allow = core_bridge_dir / "allowlist.js"
+                    if not dest_allow.exists() or source_allow.read_bytes() != dest_allow.read_bytes():
+                        shutil.copy2(source_allow, dest_allow)
+            # Hermes writes bridge.log next to the profile session symlink.
+            for log_dir in (
+                Path("/opt/data/.hermes/platforms/whatsapp"),
+                Path("/opt/data/.hermes/profiles/whatsapp/platforms/whatsapp"),
+            ):
+                try:
+                    log_dir.mkdir(parents=True, exist_ok=True)
+                    (log_dir / "bridge.log").touch(exist_ok=True)
+                except OSError:
+                    pass
+        _patch_core_bridge_status_filter()
+
+        # 1b. Sidecar do fullsync: o bridge.js ativo importa history_bridge.js
+        #     e chama history_store.py. Sem esses arquivos ao lado da cópia
+        #     que o Hermes executa, o lote histórico não grava no SQLite.
+        for sidecar_name in ("history_bridge.js", "history_store.py"):
+            source_sidecar = plugin_dir / sidecar_name
+            if not source_sidecar.exists():
+                source_sidecar = plugin_dir / "whatsapp-manager" / sidecar_name
+            if not source_sidecar.exists():
+                continue
+            dest_dirs = [target_bridge_dir]
+            dest_dirs.extend(
+                path for path in (
+                    Path("/opt/data/.hermes/scripts/whatsapp-bridge"),
+                    Path("/opt/data/.hermes/profiles/whatsapp/scripts/whatsapp-bridge"),
+                )
+                if path.is_dir()
+            )
+            for dest_dir in dest_dirs:
+                dest = dest_dir / sidecar_name
+                if not dest.exists() or source_sidecar.read_bytes() != dest.read_bytes():
+                    shutil.copy2(source_sidecar, dest)
+                    logger.info(f"{sidecar_name} atualizado em {dest}")
 
         # 2. Copiar package.json do plugin para o volume
         source_pkg = plugin_dir / "package.json"
@@ -7792,3 +9484,12 @@ def register(ctx):
         logger.info("✅ Agendador periódico (24h) de sincronização iniciado com sucesso.")
     except Exception as thread_err:
         logger.warning(f"Não foi possível iniciar o agendador periódico: {thread_err}")
+
+    try:
+        _followup_engine()
+        logger.info(
+            "✅ Motor transacional de follow-up pronto (global_enabled=%s; ticker=cron único)",
+            _followup_enabled(),
+        )
+    except Exception as follow_err:
+        logger.warning(f"Não foi possível inicializar o follow-up: {follow_err}")

@@ -3,6 +3,7 @@
 import os
 import json
 import sqlite3
+import tempfile
 import urllib.error
 import unittest
 import sys
@@ -40,6 +41,13 @@ class BaseWhatsAppManagerTest(unittest.IsolatedAsyncioTestCase):
             "WHATSAPP_CLIENT_MODEL": "gemini-3.5-flash-client"
         })
         self.env_patcher.start()
+        # A política por contato é testada em casos dedicados. Os demais testes
+        # de roteamento assumem um contato explicitamente habilitado.
+        self.ai_access_patcher = patch(
+            "whatsapp_manager._ensure_contact_ai_access",
+            return_value=(True, "test-explicit-flow"),
+        )
+        self.ai_access_patcher.start()
         
         # Avoid running bootstrap/shutil operations during register
         with patch("pathlib.Path.mkdir"), \
@@ -50,10 +58,12 @@ class BaseWhatsAppManagerTest(unittest.IsolatedAsyncioTestCase):
              patch("urllib.request.urlopen"), \
              patch("whatsapp_manager._ensure_google_libs"), \
              patch("whatsapp_manager._pull_and_merge_configurations"), \
+             patch("whatsapp_manager._enforce_gateway_safety_config"), \
              patch("whatsapp_manager._self_update_plugin_code", return_value=False):
             register(self.ctx)
 
     def tearDown(self):
+        self.ai_access_patcher.stop()
         self.env_patcher.stop()
 
 
@@ -104,6 +114,31 @@ class TestMessageRoutingAndDispatch(BaseWhatsAppManagerTest):
         with patch("whatsapp_manager._check_bot_paused", return_value=True):
             res = pre_dispatch("pre_gateway_dispatch", context)
             self.assertEqual(res, {"action": "skip", "reason": "bot-pausado"})
+
+    def test_legacy_contact_disabled_is_skipped_before_llm(self):
+        pre_dispatch = self.ctx.hooks.get("pre_gateway_dispatch")
+        self.assertIsNotNone(pre_dispatch)
+        event = MagicMock()
+        event.source.platform = "whatsapp"
+        event.source.user_id = "5511888888888@s.whatsapp.net"
+        event.source.chat_id = "5511888888888@s.whatsapp.net"
+        event.text = "Oi"
+        event.raw = {}
+        event.raw_message = {}
+        event.is_historical = False
+
+        gateway = MagicMock()
+        gateway._session_key_for_source.return_value = "session_legacy"
+        gateway._session_model_overrides = {}
+
+        with patch(
+            "whatsapp_manager._ensure_contact_ai_access",
+            return_value=(False, "legacy-contact-disabled"),
+        ), patch("whatsapp_manager._followup_cancel") as cancel:
+            res = pre_dispatch("pre_gateway_dispatch", {"event": event, "gateway": gateway})
+
+        self.assertEqual(res, {"action": "skip", "reason": "legacy-contact-disabled"})
+        cancel.assert_called_once_with("5511888888888@s.whatsapp.net")
 
     def test_pre_gateway_dispatch_does_not_rewrite_or_fetch(self):
         pre_dispatch = self.ctx.hooks.get("pre_gateway_dispatch")
@@ -1191,12 +1226,13 @@ class TestExternalServicesAndUpdates(BaseWhatsAppManagerTest):
         self.assertEqual(res["tone"], "polido e profissional")
         self.assertIsNone(res["nickname"])
 
-    @patch("whatsapp_manager.Path.exists")
+    @patch.dict(os.environ, {"KEEP_LOCAL_PLUGIN": ""})
+    @patch("whatsapp_manager.Path.exists", autospec=True)
     @patch("subprocess.run")
     @patch("urllib.request.urlopen")
     def test_self_update_plugin_code_git(self, mock_urlopen, mock_subrun, mock_exists):
         """Verifica que o auto-updater do plugin usa git fetch/reset quando .git existe."""
-        mock_exists.return_value = True
+        mock_exists.side_effect = lambda path: str(path) != "/opt/data/.hermes/keep-local-plugin"
         
         # Caso 1: hashes diferentes (deve atualizar)
         mock_result_local = MagicMock()
@@ -1285,6 +1321,72 @@ class TestUtilityFunctionsAndLogs(BaseWhatsAppManagerTest):
         self.assertEqual(whatsapp_manager._lid_to_phone.get("111111111111111"), "5511222222222")
         self.assertEqual(whatsapp_manager._lid_to_phone.get("333333333333333"), "5511444444444")
         whatsapp_manager._lid_to_phone.clear()
+
+    @patch("urllib.request.urlopen", side_effect=OSError("bridge offline"))
+    def test_check_bot_paused_is_fail_closed_when_bridge_offline(self, mock_urlopen):
+        whatsapp_manager._bot_status_cache = {"paused": False, "ts": 0}
+        self.assertTrue(whatsapp_manager._check_bot_paused(force=True))
+
+    @patch("urllib.request.urlopen")
+    def test_check_bot_paused_rejects_invalid_payload(self, mock_urlopen):
+        response = MagicMock()
+        response.read.return_value = json.dumps({"status": "unknown"}).encode()
+        mock_urlopen.return_value.__enter__.return_value = response
+        whatsapp_manager._bot_status_cache = {"paused": False, "ts": 0}
+        self.assertTrue(whatsapp_manager._check_bot_paused(force=True))
+
+    @patch("urllib.request.urlopen")
+    def test_free_bot_state_is_not_cached(self, mock_urlopen):
+        response = MagicMock()
+        response.read.return_value = json.dumps({"botPaused": False}).encode()
+        mock_urlopen.return_value.__enter__.return_value = response
+        whatsapp_manager._bot_status_cache = {"paused": False, "ts": 0}
+        self.assertFalse(whatsapp_manager._check_bot_paused())
+        self.assertFalse(whatsapp_manager._check_bot_paused())
+        self.assertEqual(mock_urlopen.call_count, 2)
+
+    @patch("whatsapp_manager._check_chat_silenced", return_value=False)
+    @patch("whatsapp_manager._check_bot_paused", return_value=False)
+    def test_delivery_gate_forces_fresh_pause_and_takeover_checks(self, mock_bot, mock_chat):
+        whatsapp_manager._assert_delivery_allowed("5511888888888@s.whatsapp.net")
+        mock_bot.assert_called_once_with(force=True)
+        mock_chat.assert_called_once_with("5511888888888@s.whatsapp.net", force=True)
+
+    @patch("whatsapp_manager._check_bot_paused")
+    def test_delivery_gate_rejects_noncanonical_recipient_before_status_lookup(self, mock_bot):
+        with self.assertRaises(whatsapp_manager.DeliveryBlocked):
+            whatsapp_manager._assert_delivery_allowed("sessao-ambigua")
+        mock_bot.assert_not_called()
+
+    @patch("whatsapp_manager._assert_delivery_allowed")
+    @patch("urllib.request.urlopen")
+    def test_send_bridge_media_requires_real_message_id(self, mock_urlopen, mock_gate):
+        response = MagicMock()
+        response.read.return_value = json.dumps({"success": True, "messageId": "ptt-123"}).encode()
+        mock_urlopen.return_value.__enter__.return_value = response
+
+        message_id = whatsapp_manager._send_bridge_media(
+            "5511888888888@s.whatsapp.net",
+            "/tmp/voice.ogg",
+        )
+
+        self.assertEqual(message_id, "ptt-123")
+        mock_gate.assert_called_once_with("5511888888888@s.whatsapp.net")
+        request = mock_urlopen.call_args.args[0]
+        payload = json.loads(request.data.decode())
+        self.assertIs(payload["automation"], True)
+
+    @patch("whatsapp_manager._assert_delivery_allowed")
+    @patch("urllib.request.urlopen")
+    def test_send_bridge_media_rejects_success_without_message_id(self, mock_urlopen, mock_gate):
+        response = MagicMock()
+        response.read.return_value = json.dumps({"success": True}).encode()
+        mock_urlopen.return_value.__enter__.return_value = response
+        with self.assertRaisesRegex(RuntimeError, "messageId do PTT"):
+            whatsapp_manager._send_bridge_media(
+                "5511888888888@s.whatsapp.net",
+                "/tmp/voice.ogg",
+            )
 
     def test_custom_print_redirection(self):
         """Verifica que WARNING+/ERROR vão para stderr e INFO vai para stdout via _WMLogHandler."""
@@ -1425,7 +1527,7 @@ class TestUtilityFunctionsAndLogs(BaseWhatsAppManagerTest):
                 time.sleep(0.01)
                 
             self.assertEqual(mock_update.call_count, 2)
-            mock_sleep.assert_called_with(1)
+            mock_sleep.assert_any_call(1)
 
 
 class TestUpdateContactFields(BaseWhatsAppManagerTest):
@@ -1765,8 +1867,12 @@ class TestSalesDetection(BaseWhatsAppManagerTest):
         self.assertEqual(saved_sale["status"], "pending_review")
         self.assertEqual(saved_sale["amount"], "R$ 15,00")
         self.assertEqual(saved_sale["contact_key"], self.CLIENT_ID)
-        # Confirma pro cliente + avisa o dono = 2 mensagens
+        # Confirma apenas o recebimento pro cliente + avisa o dono = 2 mensagens
         self.assertEqual(mock_send.call_count, 2)
+        client_message = mock_send.call_args_list[0].args[1].lower()
+        self.assertIn("recebemos seu comprovante", client_message)
+        self.assertIn("confirmação da equipe", client_message)
+        self.assertNotIn("pedido confirmado", client_message)
 
     @patch("whatsapp_manager._save_sales")
     @patch("whatsapp_manager._process_media_message", return_value="uma selfie")
@@ -3047,6 +3153,92 @@ class TestCallLlmApi(BaseWhatsAppManagerTest):
         self.assertIsNone(result)
 
 
+class TestContactAiAccess(unittest.TestCase):
+    """Legados/importados ficam off; somente contato novo realtime entra no fluxo."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmp.name) / "personal_contacts.json"
+        self.path_patcher = patch.object(whatsapp_manager, "_PERSONAL_CONTACTS_PATH", self.path)
+        self.path_patcher.start()
+
+    def tearDown(self):
+        self.path_patcher.stop()
+        self.tmp.cleanup()
+
+    def _write(self, data):
+        self.path.write_text(json.dumps(data), encoding="utf-8")
+
+    def _read(self):
+        return json.loads(self.path.read_text(encoding="utf-8"))
+
+    def test_existing_legacy_without_flag_is_migrated_disabled(self):
+        jid = "5511888888888@s.whatsapp.net"
+        self._write({jid: {"name": "Contato legado", "relationship": "Cliente"}})
+
+        allowed, reason = whatsapp_manager._ensure_contact_ai_access(jid, jid)
+
+        self.assertFalse(allowed)
+        self.assertEqual(reason, "legacy-contact-disabled")
+        row = self._read()[jid]
+        self.assertIs(row["ai_enabled"], False)
+        self.assertIs(row["in_flow"], False)
+        self.assertEqual(row["flow_origin"], "legacy_sync")
+
+    def test_explicit_flow_contact_is_allowed(self):
+        jid = "5511777777777@s.whatsapp.net"
+        self._write({jid: {"ai_enabled": True, "in_flow": True, "flow_origin": "crm"}})
+
+        allowed, reason = whatsapp_manager._ensure_contact_ai_access(jid, jid)
+
+        self.assertTrue(allowed)
+        self.assertEqual(reason, "explicit-flow")
+
+    def test_unknown_realtime_contact_enters_flow_enabled(self):
+        jid = "5511666666666@s.whatsapp.net"
+        self._write({})
+
+        allowed, reason = whatsapp_manager._ensure_contact_ai_access(jid, jid)
+
+        self.assertTrue(allowed)
+        self.assertEqual(reason, "new-live-inbound")
+        row = self._read()[jid]
+        self.assertIs(row["ai_enabled"], True)
+        self.assertIs(row["in_flow"], True)
+        self.assertEqual(row["flow_origin"], "new_live_inbound")
+
+    def test_historical_unknown_contact_never_enters_flow(self):
+        jid = "5511555555555@s.whatsapp.net"
+        self._write({})
+
+        allowed, reason = whatsapp_manager._ensure_contact_ai_access(jid, jid, is_historical=True)
+
+        self.assertFalse(allowed)
+        self.assertEqual(reason, "historical-import")
+        self.assertEqual(self._read(), {})
+
+    def test_corrupted_policy_is_fail_closed(self):
+        self.path.write_text("{invalid", encoding="utf-8")
+
+        allowed, reason = whatsapp_manager._ensure_contact_ai_access(
+            "5511444444444@s.whatsapp.net",
+            "5511444444444@s.whatsapp.net",
+        )
+
+        self.assertFalse(allowed)
+        self.assertEqual(reason, "contact-policy-unavailable")
+
+    def test_sync_merge_cannot_reenable_local_disabled_contact(self):
+        key = "5511333333333@s.whatsapp.net"
+        remote = {key: {"name": "Legado", "ai_enabled": True, "in_flow": True}}
+        local = {key: {"name": "Legado", "ai_enabled": False, "in_flow": False}}
+
+        merged = whatsapp_manager._merge_records_field_level(remote, local)
+
+        self.assertIs(merged[key]["ai_enabled"], False)
+        self.assertIs(merged[key]["in_flow"], False)
+
+
 class TestCheckChatSilenced(BaseWhatsAppManagerTest):
     """Testes para _check_chat_silenced."""
 
@@ -3076,10 +3268,33 @@ class TestCheckChatSilenced(BaseWhatsAppManagerTest):
         self.assertFalse(result)
 
     @patch("urllib.request.urlopen", side_effect=OSError("bridge offline"))
-    def test_returns_false_when_bridge_offline(self, mock_urlopen):
+    def test_returns_true_when_bridge_offline_fail_closed(self, mock_urlopen):
         from whatsapp_manager import _check_chat_silenced
         result = _check_chat_silenced("5511888888888@s.whatsapp.net")
-        self.assertFalse(result)
+        self.assertTrue(result)
+
+    @patch("urllib.request.urlopen")
+    def test_invalid_payload_is_fail_closed(self, mock_urlopen):
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps({"status": "unknown"}).encode()
+        mock_urlopen.return_value.__enter__.return_value = mock_resp
+
+        from whatsapp_manager import _check_chat_silenced
+        result = _check_chat_silenced("5511888888888@s.whatsapp.net")
+        self.assertTrue(result)
+
+    @patch("urllib.request.urlopen")
+    def test_false_status_is_not_cached(self, mock_urlopen):
+        """Estado livre deve ser reconsultado para takeover manual ter efeito imediato."""
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps({"isSilenced": False}).encode()
+        mock_urlopen.return_value.__enter__.return_value = mock_resp
+
+        from whatsapp_manager import _check_chat_silenced
+        _check_chat_silenced("5512222@s.whatsapp.net")
+        _check_chat_silenced("5512222@s.whatsapp.net")
+
+        self.assertEqual(mock_urlopen.call_count, 2)
 
     @patch("urllib.request.urlopen")
     def test_uses_cache_on_second_call(self, mock_urlopen):
@@ -3341,9 +3556,9 @@ class TestRunSyncInBackground(BaseWhatsAppManagerTest):
 
         _run_sync_in_background(force=True, chat_id=None)
 
-        # Aguardar thread completar (máx 2s)
+        # Aguardar o worker concluir e liberar o claim (máx 2s).
         for _ in range(20):
-            if mock_sync.called:
+            if mock_sync.called and not whatsapp_manager._sync_running.is_set():
                 break
             time.sleep(0.1)
 
@@ -5277,16 +5492,35 @@ class TestTransformLlmOutput(BaseWhatsAppManagerTest):
         super().setUp()
         whatsapp_manager._turn_key.clear()
         whatsapp_manager._turn_sent.clear()
+        whatsapp_manager._turn_inflight.clear()
         whatsapp_manager._sender_to_chat.clear()
         whatsapp_manager._responded_sessions.clear()
+        whatsapp_manager._HUMAN_DELIVER_SYNC = True
+        self.delivery_gate_patcher = patch("whatsapp_manager._assert_delivery_allowed")
+        self.delivery_gate_patcher.start()
+        self.voice_patcher = patch("whatsapp_manager._maybe_send_voice", return_value=None)
+        self.voice_patcher.start()
+        self.turn_persist_patcher = patch("whatsapp_manager._persist_turn_sent_to_disk")
+        self.turn_persist_patcher.start()
 
     def tearDown(self):
+        self.turn_persist_patcher.stop()
+        self.voice_patcher.stop()
+        self.delivery_gate_patcher.stop()
         whatsapp_manager._turn_key.clear()
         whatsapp_manager._turn_sent.clear()
+        whatsapp_manager._turn_inflight.clear()
+        whatsapp_manager._sender_to_chat.clear()
         whatsapp_manager._responded_sessions.clear()
+        whatsapp_manager._HUMAN_DELIVER_SYNC = False
         super().tearDown()
 
     def _call(self, session_id, response_text, platform="whatsapp"):
+        if platform == "whatsapp" and session_id and not whatsapp_manager._session_is_owner(session_id):
+            chat_id = whatsapp_manager._sender_to_chat.get(session_id) or session_id
+            test_turn = f"test-turn:{session_id}"
+            whatsapp_manager._turn_key.setdefault(chat_id, test_turn)
+            whatsapp_manager._turn_key.setdefault(session_id, test_turn)
         hook = self.ctx.hooks.get("transform_llm_output")
         self.assertIsNotNone(hook)
         return hook(
@@ -5300,14 +5534,22 @@ class TestTransformLlmOutput(BaseWhatsAppManagerTest):
     def test_contact_sends_bubbles_and_returns_whitespace(self, mock_send):
         result = self._call("5511888888888@s.whatsapp.net", "oi, tudo bem!")
         self.assertEqual(result, "\n")
-        mock_send.assert_called_once_with("5511888888888@s.whatsapp.net", "oi, tudo bem!")
+        mock_send.assert_called_once_with(
+            "5511888888888@s.whatsapp.net",
+            "oi, tudo bem!",
+            automation=True,
+        )
 
     @patch("whatsapp_manager._human_send")
     def test_blank_line_is_kept_for_the_splitter(self, mock_send):
         text = "eita\n\nele capotou aqui, só umas 11h"
         result = self._call("5511888888888@s.whatsapp.net", text)
         self.assertEqual(result, "\n")
-        mock_send.assert_called_once_with("5511888888888@s.whatsapp.net", text)
+        mock_send.assert_called_once_with(
+            "5511888888888@s.whatsapp.net",
+            text,
+            automation=True,
+        )
 
     @patch("whatsapp_manager._human_send")
     def test_owner_session_returns_none(self, mock_send):
@@ -5358,6 +5600,47 @@ class TestTransformLlmOutput(BaseWhatsAppManagerTest):
         self.assertEqual(r2, "\n")
         mock_send.assert_called_once()
 
+    def test_reservation_does_not_mark_sent_before_confirmation(self):
+        session = "5511888888888@s.whatsapp.net"
+        whatsapp_manager._turn_key[session] = "turn-pending"
+        reserved, turn_key = whatsapp_manager._reserve_contact_send(session, session, "resposta")
+        self.assertTrue(reserved)
+        self.assertEqual(turn_key, "turn-pending")
+        self.assertIn(turn_key, whatsapp_manager._turn_inflight)
+        self.assertNotIn(turn_key, whatsapp_manager._turn_sent)
+
+        whatsapp_manager._complete_contact_send(turn_key, delivered=True, uncertain=False)
+        self.assertNotIn(turn_key, whatsapp_manager._turn_inflight)
+        self.assertIn(turn_key, whatsapp_manager._turn_sent)
+
+    @patch("whatsapp_manager._human_send")
+    def test_gate_block_releases_reservation_without_marking_sent(self, mock_send):
+        session = "5511888888888@s.whatsapp.net"
+        with patch(
+            "whatsapp_manager._assert_delivery_allowed",
+            side_effect=whatsapp_manager.DeliveryBlocked("takeover ativo"),
+        ):
+            result = self._call(session, "vou responder")
+        self.assertEqual(result, "\n")
+        turn_key = whatsapp_manager._turn_key[session]
+        self.assertNotIn(turn_key, whatsapp_manager._turn_inflight)
+        self.assertNotIn(turn_key, whatsapp_manager._turn_sent)
+        mock_send.assert_not_called()
+
+    @patch("whatsapp_manager._human_send")
+    def test_opaque_session_without_exact_mapping_is_suppressed(self, mock_send):
+        result = self._call("sessao-sem-binding", "não pode sair")
+        self.assertEqual(result, "\n")
+        mock_send.assert_not_called()
+
+    @patch("whatsapp_manager._human_send")
+    def test_encoded_phone_cannot_be_redirected_to_another_contact(self, mock_send):
+        session = "agent:main:whatsapp:dm:5511888888888"
+        whatsapp_manager._sender_to_chat[session] = "5511777777777@s.whatsapp.net"
+        result = self._call(session, "não pode cruzar")
+        self.assertEqual(result, "\n")
+        mock_send.assert_not_called()
+
     @patch("whatsapp_manager._persist_turn_sent_to_disk")
     @patch("whatsapp_manager._human_send")
     def test_turn_dedup_survives_restart(self, mock_send, mock_persist):
@@ -5381,16 +5664,27 @@ class TestTransformLlmOutput(BaseWhatsAppManagerTest):
         mock_send.assert_not_called()
 
     @patch("whatsapp_manager._human_send", side_effect=RuntimeError("bridge offline"))
-    def test_send_failure_returns_filtered_text(self, mock_send):
-        result = self._call("5511888888888@s.whatsapp.net", "tudo certo!")
-        self.assertEqual(result, "tudo certo!")
+    def test_send_failure_is_terminal_uncertain_without_default_retry(self, mock_send):
+        session = "5511888888888@s.whatsapp.net"
+        result = self._call(session, "tudo certo!")
+        self.assertEqual(result, "\n")
+        turn_key = whatsapp_manager._turn_key[session]
+        self.assertIn(turn_key, whatsapp_manager._turn_sent)
+        self.assertNotIn(turn_key, whatsapp_manager._turn_inflight)
+        second = self._call(session, "tudo certo de novo!")
+        self.assertEqual(second, "\n")
+        mock_send.assert_called_once()
 
     @patch("whatsapp_manager._human_send")
     def test_mapped_session_resolves_chat_id(self, mock_send):
         whatsapp_manager._sender_to_chat["sessao-uuid"] = "5511888888888@s.whatsapp.net"
         result = self._call("sessao-uuid", "opa")
         self.assertEqual(result, "\n")
-        mock_send.assert_called_once_with("5511888888888@s.whatsapp.net", "opa")
+        mock_send.assert_called_once_with(
+            "5511888888888@s.whatsapp.net",
+            "opa",
+            automation=True,
+        )
 
 
 class TestWhatsAppAdapterWhitespace(unittest.TestCase):
@@ -5422,7 +5716,8 @@ class TestPreToolCall(BaseWhatsAppManagerTest):
         """Contato não pode usar tools."""
         result = self._call("5511888888888@s.whatsapp.net")
         self.assertIsNotNone(result)
-        self.assertIn("Ferramentas não disponíveis", result)
+        self.assertEqual(result.get("action"), "block")
+        self.assertIn("Ferramentas não disponíveis", result.get("message", ""))
 
     def test_owner_session_allowed(self):
         """Owner pode usar tools (retorna None = permitir)."""
@@ -5439,10 +5734,11 @@ class TestPreToolCall(BaseWhatsAppManagerTest):
         result = self._call("qualquer@s.whatsapp.net", platform="telegram")
         self.assertIsNone(result)
 
-    def test_empty_session_allowed(self):
-        """Session vazia passa (não há como identificar)."""
+    def test_empty_session_blocked_fail_closed(self):
+        """Session vazia no WhatsApp bloqueia: não há identidade segura para liberar."""
         result = self._call("")
-        self.assertIsNone(result)
+        self.assertIsNotNone(result)
+        self.assertEqual(result.get("action"), "block")
 
     def test_contact_with_device_suffix_blocked(self):
         """Contato com device suffix é bloqueado corretamente."""

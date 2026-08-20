@@ -68,18 +68,34 @@ class WhatsAppPlatformAdapter(BasePlatformAdapter):
         """Send a text message via whatsapp-bridge, passing through security firewall."""
         try:
             from whatsapp_manager import isSystemError
-            if isSystemError(content):
-                logger.warning(f"[whatsapp-adapter] Error firewall blocked message to {chat_id}")
-                return False
-        except ImportError:
-            pass
+            blocked = isSystemError(content)
+        except Exception:
+            low = (content or "").lower()
+            blocked = "self-improvement" in low or "user profile updated" in low or "💾" in (content or "")
+        if blocked:
+            logger.warning(f"[whatsapp-adapter] Error firewall blocked message to {chat_id}")
+            return True
+
+        try:
+            from whatsapp_manager import _strip_fish_cues
+            content = _strip_fish_cues(content)
+        except Exception:
+            import re
+            content = re.sub(
+                r"\[\s*(?!(?:n[uú]mero omitido)\])(?:very |slightly |extremely |a bit |um pouco )?[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ0-9 ,\-]{0,48}\s*\]",
+                "",
+                content or "",
+                flags=re.I,
+            )
+            content = re.sub(r"[ \t]{2,}", " ", content)
+            content = re.sub(r" *\n *", "\n", content).strip()
 
         if not (content or "").strip():
             logger.info(f"[whatsapp-adapter] skipping whitespace-only send to {chat_id}")
             return True
 
         try:
-            payload = json.dumps({"chatId": chat_id, "text": content}).encode("utf-8")
+            payload = json.dumps({"chatId": chat_id, "message": content, "text": content}).encode("utf-8")
             req = urllib.request.Request(
                 f"{self.bridge_url}/send",
                 data=payload,

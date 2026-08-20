@@ -25,6 +25,7 @@ Os quatro testes da seção 7 do runbook passam. Sem isso o cliente não está n
 5. **Personas** — copie/preencha os templates em `/opt/data`. `grep '{{'` tem que voltar vazio.
 6. **QR** — seção 6. Um bridge só no número. Status `connected`.
 7. **Fumaça** — seção 7. Se o cliente vê Hermes default (`/sethome`), o plugin não está enabled: vá para `whatsaya-diagnose`.
+8. **Fullsync/triagem** — depois de `connected`, use a skill `whatsapp-client-triage`. Rode o script de snapshot, classifique todos os `chat_id`, gere `whatsapp_triagem_revisao_cliente_YYYY-MM-DD.md`, verifique o conteúdo e só então envie ao self-chat do dono. Não aplique flags nem envie respostas históricas automaticamente.
 
 ## Fora desta skill
 

@@ -140,3 +140,31 @@ Sessão de teste suja o histórico. Apague a sessão Hermes daquele JID se for r
 - Mudar só persona/catálogo: edite `/opt/data/SOUL_WHATSAPP.md` e `support_rules.md` (ou o `CONFIG_REPO`) e reinicie.
 - `stop_bot` / `start_bot` só valem no self-chat do dono.
 - Cliente seguinte: volte ao passo 1. Código igual; mudam env + templates.
+
+---
+
+## 9. Fullsync e triagem inicial do cliente
+
+Depois do primeiro pareamento e de o status ficar `connected`, execute o pipeline descrito em [`WHATSAPP_HISTORY_TRIAGE.md`](WHATSAPP_HISTORY_TRIAGE.md):
+
+```bash
+python3 deploy/scripts/whatsapp_history_triage.py \
+  --config deploy/scripts/whatsapp_history_triage.yaml run
+```
+
+O pipeline aguarda o lote histórico, cria snapshot/CSV e deixa o prompt para a skill `whatsapp-client-triage`. Depois da classificação, ele gera:
+
+```text
+/opt/data/.hermes/workspace/whatsapp_triagem_revisao_cliente_YYYY-MM-DD.md
+```
+
+O Markdown deve ser revisado pelo dono antes de qualquer flag ser aplicada. Envio ao self-chat é explícito:
+
+```bash
+python3 deploy/scripts/whatsapp_history_triage.py \
+  --config deploy/scripts/whatsapp_history_triage.yaml send \
+  --report /opt/data/.hermes/workspace/whatsapp_triagem_revisao_cliente_YYYY-MM-DD.md \
+  --chat-id <JID_DO_DONO>
+```
+
+Não envie snapshot bruto ao cliente. Não deixe mensagens históricas acionarem o LLM.
