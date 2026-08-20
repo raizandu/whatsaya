@@ -29,6 +29,7 @@ Não copie CNPJ, preço ou nome de outro cliente para o código. Cliente novo = 
 
 - Ubuntu 24, Docker Engine + plugin Compose v2.
 - SSH por chave. Pasta típica: `/opt/whatsaya`.
+- O compose usa bind mount (`/opt/whatsaya/data:/opt/data`), não volume Docker nomeado. **Nunca troque pra volume nomeado num host que já tem dados** — `docker compose up -d` cria um volume vazio em vez de montar os dados existentes, e o container sobe "limpo" (sessão do WhatsApp, contatos, vendas — tudo sumindo da vista do container, embora continue intacto em `/opt/whatsaya/data` no disco).
 - IP basta. Domínio é opcional.
 - Portas no host: `9119` (dashboard + `/whatsapp/qr`) e, se for usar a API, `8642`.
 

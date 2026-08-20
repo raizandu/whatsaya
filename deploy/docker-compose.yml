@@ -173,6 +173,7 @@
 
 services:
   hermes:
+    container_name: hermes
     #image: nousresearch/hermes-agent:v2026.5.16
     image: nousresearch/hermes-agent:v2026.7.20
     restart: unless-stopped
@@ -456,15 +457,13 @@ services:
         exec hermes gateway run
 
     volumes:
-      # Volume principal: persiste /opt/data (workspace, plugins, sessão WhatsApp, banco SQLite)
-      - hermes_data:/opt/data
-      # Alternativa bind mount (dados independentes do serviço):
-      # - /srv/hermes/data:/opt/data
-
-      # Volume secundário: persiste /root/.hermes (config.yaml e .env criados pelo setup.sh)
-      - hermes_root:/root/.hermes
-      # Alternativa bind mount:
-      # - /srv/hermes/root-hermes:/root/.hermes
+      # Bind mount — dados vivem em /opt/whatsaya/data e /opt/whatsaya/root-hermes no host,
+      # fora do ciclo de vida do container. Ajuste o caminho se sua pasta de trabalho não for
+      # /opt/whatsaya. NÃO troque para volume Docker nomeado (hermes_data:/opt/data) num host
+      # que já tem dados em bind mount — `docker compose up -d` cria um volume novo e VAZIO
+      # em vez de montar os dados existentes, e o container sobe "limpo" silenciosamente.
+      - /opt/whatsaya/data:/opt/data
+      - /opt/whatsaya/root-hermes:/root/.hermes
 
     environment:
       # Caminhos internos — não alterar
@@ -574,12 +573,3 @@ services:
     ports:
       - "8642"   # API REST
       - "9119"   # Dashboard + WebSocket (/api/ws, /api/events, /api/pty)
-
-volumes:
-  hermes_data:
-    # /opt/data — workspace, plugins, sessão WhatsApp, banco SQLite, SOUL.md, support_rules.md
-    # Volume Docker nomeado; inspecione com `docker volume inspect` pra achar o path no host
-
-  hermes_root:
-    # /root/.hermes — config.yaml e .env criados pelo setup.sh
-    # Volume Docker nomeado; inspecione com `docker volume inspect` pra achar o path no host
