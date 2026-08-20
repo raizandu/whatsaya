@@ -230,6 +230,18 @@ services:
         wa_mode = os.environ.get('WHATSAPP_MODE') or 'bot'
         wa_allowed = os.environ.get('WHATSAPP_ALLOWED_USERS') or '*'
 
+        # Fallback quando o provider principal (openai-codex, plano ChatGPT Plus com
+        # teto fixo diario) estoura a cota: sem isso o Hermes esgota as 3 retries e
+        # devolve um aviso de erro em vez de responder o cliente. So entra na config
+        # se a chave existir, pra nao escrever um fallback quebrado por engano.
+        fallback_model = os.environ.get('WHATSAPP_FALLBACK_MODEL') or 'deepseek/deepseek-v4-flash'
+        fallback_provider = os.environ.get('WHATSAPP_FALLBACK_PROVIDER') or 'openrouter'
+        fallback_key_env = os.environ.get('WHATSAPP_FALLBACK_KEY_ENV') or 'OPENROUTER_API_KEY'
+        fallback_chain = (
+            [{'provider': fallback_provider, 'model': fallback_model, 'key_env': fallback_key_env}]
+            if os.environ.get(fallback_key_env) else []
+        )
+
         for path in ['/opt/data/.hermes/config.yaml',
                      os.path.expanduser('~/.hermes/config.yaml')]:
             os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -289,6 +301,7 @@ services:
             })
             cfg['display'] = disp
             cfg['model'] = {'default': owner_model, 'provider': owner_provider}
+            cfg['fallback_providers'] = fallback_chain
             sk = cfg.get('skills') if isinstance(cfg.get('skills'), dict) else {}
             off = ['architecture-diagram', 'ascii-art', 'ascii-video', 'baoyu-infographic', 'claude-design', 'comfyui', 'design-md', 'excalidraw', 'humanizer', 'manim-video', 'p5js', 'popular-web-designs', 'pretext', 'sketch', 'songwriting-and-ai-music', 'touchdesigner-mcp', 'gif-search', 'heartmula', 'songsee', 'youtube-content', 'claude-code', 'codex', 'computer-use', 'merge-reconciler', 'opencode', 'yuanbao', 'hermes-desktop-plugins', 'audiocraft-audio-generation', 'evaluating-llms-harness', 'huggingface-hub', 'llama-cpp', 'segment-anything-model', 'serving-llms-vllm', 'weights-and-biases', 'jupyter-live-kernel', 'openhue', 'xurl', 'obsidian', 'polymarket', 'petdex', 'airtable', 'box', 'teams-meeting-pipeline', 'product-price-monitor', 'powerpoint', 'xlsx', 'arxiv', 'llm-wiki', 'research-paper-writing', 'blocked-page-recovery', 'blogwatcher', 'competitor-news-monitor', 'codebase-inspection', 'github-auth', 'github-code-review', 'github-issue-to-pr', 'github-issues', 'github-pr-workflow', 'github-repo-management', 'dogfood', 'hermes-agent-skill-authoring', 'inspecting-hermes-desktop-dom', 'node-inspect-debugger', 'python-debugpy', 'requesting-code-review', 'simplify-code', 'spike', 'systematic-debugging', 'test-driven-development']
             sk['disabled'] = sorted(set(sk.get('disabled') or []) | set(off))
@@ -404,6 +417,7 @@ services:
         with open(wa_path, 'w') as f:
             yaml.dump({
                 'model': {'default': client_model, 'provider': client_provider},
+                'fallback_providers': fallback_chain,
                 'agent': {'tool_use_enforcement': 'disabled'},
                 'gateway': {'delivery_ledger': False},
                 'compression': {'codex_gpt55_autoraise_notice': False},

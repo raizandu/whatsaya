@@ -1764,6 +1764,19 @@ messagingRouter.post('/send', async (req, res) => {
           apiName = 'Google Gemini';
         }
         console.error(`[bridge] ⚠️ ERROR DETECTED ON ${apiName.toUpperCase()} API FOR CLIENT ${chatId}:\n[CONTENT]: ${message}`);
+        // Esse bloqueio acontece num caminho do core do Hermes que nunca passa pelos
+        // hooks do plugin Python (por isso _notify_owner_gateway_error não pega esse
+        // caso) — sem isso o dono não teria como saber que um cliente ficou sem resposta.
+        const ownerJid = WHATSAPP_OWNER_NUMBER ? `${WHATSAPP_OWNER_NUMBER}@s.whatsapp.net` : '';
+        if (ownerJid && chatId !== ownerJid) {
+          try {
+            await sendWithTimeout(ownerJid, {
+              text: `⚠️ O provider do modelo falhou respondendo ${chatId} e a mensagem de erro foi bloqueada — o cliente não recebeu nada.\nMotivo: ${trimmedMessage}`,
+            });
+          } catch (notifyErr) {
+            console.error(`[bridge] Falha ao notificar dono sobre erro de provider: ${notifyErr?.message || notifyErr}`);
+          }
+        }
       }
       return res.json({ success: true, info: 'System status/error message blocked and logged' });
     }
