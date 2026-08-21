@@ -41,6 +41,8 @@ Scripts de diagnóstico ficam em `deploy/scripts/` (`diagnose_bridge_dedup.py`, 
 
 Desde o Hermes Agent v0.19 ("Quicksilver"), o **core** (`hermes_plugins.whatsapp_platform`) é dono do ciclo de vida do processo Node: spawn, pidfile com detecção de PID reciclado, restart em crash, e parsing das mensagens recebidas. Este plugin **não spawna mais o `bridge.js`** — `register()` apenas copia o arquivo para `/opt/data/.hermes/platforms/whatsapp/bridge/` para o core encontrar. Isso eliminou o container duplicado e o erro de desconexão `440 conflict / replaced`. Toda a regra de negócio fica nos hooks Python.
 
+**Um único gateway consome o WhatsApp — o do perfil fica off.** O s6 do container sobe um gateway por perfil (`hermes -p whatsapp gateway run`), e cada um lê só o `.env` do próprio perfil. Por isso o compose grava `WHATSAPP_ENABLED=false` em `profiles/whatsapp/.env` (e `true` só no `.env` principal): com `true` nos dois, o gateway do perfil subia como segundo consumidor do mesmo bridge **sem o plugin carregado** — respondia contato bloqueado/silenciado por fora de todas as regras, e a duplicata só não aparecia porque o dedup do bridge engolia. O perfil `whatsapp` existe apenas como perfil de isolamento das conversas de cliente dentro do gateway principal. Como o `command:` do compose reescreve esses `.env` a cada boot do container, o estado se autocorrige em restart/recreate/reboot.
+
 ### Os hooks (`whatsapp_manager.py`, ~7.200 linhas)
 
 | Hook | Linha | Responsabilidade |
