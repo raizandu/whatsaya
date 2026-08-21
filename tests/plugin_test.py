@@ -48,7 +48,10 @@ class BaseWhatsAppManagerTest(unittest.IsolatedAsyncioTestCase):
             return_value=(True, "test-explicit-flow"),
         )
         self.ai_access_patcher.start()
-        
+        # Dedup de mensagens recebidas vive num set de módulo: sem limpar aqui, o id de
+        # um teste vaza pro seguinte e o dispatch devolve "duplicate-message-id".
+        whatsapp_manager._seen_message_ids.clear()
+
         # Avoid running bootstrap/shutil operations during register
         with patch("pathlib.Path.mkdir"), \
              patch("pathlib.Path.symlink_to"), \
@@ -1814,23 +1817,29 @@ class TestSalesDetection(BaseWhatsAppManagerTest):
 
     CLIENT_ID = "5511888877777@s.whatsapp.net"
 
-    def _make_image_event(self, sender_id, chat_id, caption=""):
+    def _make_event(self, sender_id, chat_id, text):
+        """Evento base do dispatch. `raw` e `message_id` precisam ser tipos reais:
+        num MagicMock cru o id vira mock e chega assim no sqlite (`Error binding
+        parameter`), mascarando o caminho de dedup e de persistência."""
+        self._msg_seq = getattr(self, "_msg_seq", 0) + 1
         event = MagicMock()
+        event.raw = {}
+        event.message_id = f"msg_sale_{self._msg_seq}"
         event.source.platform = "whatsapp"
         event.source.user_id = sender_id
         event.source.chat_id = chat_id
-        event.text = caption
+        event.text = text
+        return event
+
+    def _make_image_event(self, sender_id, chat_id, caption=""):
+        event = self._make_event(sender_id, chat_id, caption)
         event.has_media = True
         event.media_type = "image"
         event.media_urls = ["/path/to/receipt.jpg"]
         return event
 
     def _make_text_event(self, sender_id, chat_id, text):
-        event = MagicMock()
-        event.source.platform = "whatsapp"
-        event.source.user_id = sender_id
-        event.source.chat_id = chat_id
-        event.text = text
+        event = self._make_event(sender_id, chat_id, text)
         event.has_media = False
         return event
 
