@@ -71,12 +71,12 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     for name, definition in REQUIRED_COLUMNS.items():
         if name not in columns:
             conn.execute(f"ALTER TABLE messages ADD COLUMN {name} {definition}")
-    # Índices não dependem de uma constraint UNIQUE preexistente. A deduplicação
-    # abaixo usa SELECT antes do INSERT para funcionar também com bases antigas.
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_whatsapp_messages_chat_ts "
         "ON messages(chat_id, timestamp)"
     )
+    # Índice por message_id sozinho continua servindo o UPDATE da transcrição,
+    # que procura só pelo id (_update_db_message em whatsapp_manager.py).
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_whatsapp_messages_message_id "
         "ON messages(message_id)"
@@ -85,7 +85,63 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_whatsapp_messages_from_me "
         "ON messages(from_me, timestamp)"
     )
+    ensure_unique_message_index(conn)
     conn.commit()
+
+
+def dedupe_messages(conn: sqlite3.Connection) -> int:
+    """Colapsa (chat_id, message_id) repetidos numa linha só. Devolve quantas removeu.
+
+    Duas origens de repetição, ambas verificadas em produção:
+
+    - Writers concorrentes gravando a mesma mensagem. Os três usam
+      `INSERT OR IGNORE`, que sem constraint UNIQUE não tem contra o que conflitar
+      e insere de novo — a intenção de dedup estava escrita, o schema anulava.
+    - O agregado do debounce regravado sob o id do primeiro fragmento. Produz uma
+      mensagem que nunca existiu no WhatsApp ("Vdd\\nE la é bom" quando o dono
+      mandou "Vdd" e depois "E la é bom"), com as partes já gravadas uma a uma.
+
+    Mantém o menor rowid com corpo não vazio. O critério de corpo vem antes do
+    rowid porque o histórico importado pode chegar sem texto e ser preenchido
+    depois: ordenar só por rowid manteria o placeholder e jogaria fora a
+    transcrição.
+    """
+    cur = conn.execute(
+        """
+        DELETE FROM messages WHERE id NOT IN (
+            SELECT id FROM (
+                SELECT id, ROW_NUMBER() OVER (
+                    PARTITION BY chat_id, message_id
+                    ORDER BY CASE WHEN body IS NULL OR TRIM(body) = '' THEN 1 ELSE 0 END, id
+                ) AS rn
+                FROM messages
+            ) WHERE rn = 1
+        )
+        """
+    )
+    return cur.rowcount or 0
+
+
+def ensure_unique_message_index(conn: sqlite3.Connection) -> int:
+    """Garante UNIQUE(chat_id, message_id); deduplica antes se a base já tiver repetição.
+
+    É o que faz o `INSERT OR IGNORE` dos outros writers finalmente deduplicar de
+    verdade. Sem isso a mesma mensagem entra várias vezes e o histórico injetado
+    no contexto do LLM (pre_llm_call) chega com falas repetidas.
+
+    Devolve quantas linhas foram removidas na migração (0 numa base já limpa).
+    """
+    sql = (
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_whatsapp_messages_unique "
+        "ON messages(chat_id, message_id)"
+    )
+    try:
+        conn.execute(sql)
+        return 0
+    except sqlite3.IntegrityError:
+        removed = dedupe_messages(conn)
+        conn.execute(sql)
+        return removed
 
 
 def set_meta(conn: sqlite3.Connection, key: str, value: Any) -> None:

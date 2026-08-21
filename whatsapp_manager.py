@@ -1138,6 +1138,29 @@ def _update_db_message(db_path: str, msg_id: str, new_body: str) -> int:
         return -2
 
 
+def _run_history_schema_migration(store_path: Path) -> None:
+    """Aplica o schema do histórico via `history_store.py init` (subprocesso, best-effort).
+
+    Subprocesso em vez de import porque o history_store vive ao lado do bridge no
+    volume, não no path do plugin. Nunca levanta: falhar aqui só significa que a
+    migração espera a próxima operação de histórico, não que o boot deva quebrar.
+    """
+    db_path = Path("/opt/data/.hermes/whatsapp_messages.db")
+    if not store_path.exists() or not db_path.exists():
+        return
+    try:
+        result = subprocess.run(
+            [sys.executable, str(store_path), "init", str(db_path)],
+            capture_output=True, text=True, timeout=120,
+        )
+        if result.returncode == 0:
+            logger.info("[history-schema] schema do whatsapp_messages.db conferido")
+        else:
+            logger.warning(f"[history-schema] init retornou {result.returncode}: {result.stderr.strip()[:200]}")
+    except Exception as err:
+        logger.warning(f"[history-schema] não foi possível conferir o schema: {err}")
+
+
 def _persist_owner_message_to_db(chat_id: str, message_id: str, body: str, timestamp: int, sender_name: str = "") -> None:
     """Insere mensagem manual do dono no whatsapp_messages.db (Hermes não grava from_me=1)."""
     if not body:
@@ -9366,6 +9389,15 @@ def register(ctx):
                 if not dest.exists() or source_sidecar.read_bytes() != dest.read_bytes():
                     shutil.copy2(source_sidecar, dest)
                     logger.info(f"{sidecar_name} atualizado em {dest}")
+
+        # 1c. Migração de schema do histórico no boot.
+        #     ensure_schema() só roda quando o bridge dispara uma operação de
+        #     histórico, o que pode demorar dias numa instalação em regime. Sem isso a
+        #     base fica sem UNIQUE(chat_id, message_id) e os `INSERT OR IGNORE` dos
+        #     writers continuam inserindo repetido — o histórico injetado em
+        #     pre_llm_call chega com falas duplicadas. Rodar o próprio history_store
+        #     mantém uma fonte de verdade só para o schema.
+        _run_history_schema_migration(target_bridge_dir / "history_store.py")
 
         # 2. Copiar package.json do plugin para o volume
         source_pkg = plugin_dir / "package.json"
