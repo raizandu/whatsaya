@@ -11,6 +11,9 @@ Cobre:
     3. Números internacionais: +27 e +594 não vazam pela normalização brasileira
     4. Tool result filter: "Nothing to save." e similares são suprimidos
     5. Status notification skip: _human_send + skip garantem que LLM não roda junto
+
+Desde o Quicksilver, a entrega para contatos sai por transform_llm_output; este
+script valida o dedup nesse caminho (reserva de turno + _schedule_contact_reply).
 """
 
 import sys
@@ -36,105 +39,112 @@ import whatsapp_manager as wm
 logging.disable(logging.NOTSET)
 
 
-def _make_post_llm_kwargs(session_id, response_text, platform="whatsapp"):
-    return dict(
-        platform=platform,
-        session_id=session_id,
-        assistant_response=response_text,
-        user_message="mensagem de teste",
-    )
+def _deliver(session_id, response_text, platform="whatsapp"):
+    """Chama transform_llm_output (caminho atual de entrega para contatos).
 
+    Desde que o envio em bolhas migrou de post_llm_call para transform_llm_output,
+    o dedup decide se _schedule_contact_reply é chamado. Retorna True se uma
+    entrega foi agendada para este turno; False se foi suprimida/deduplicada.
+    """
+    scheduled = []
 
-def _call_post(session_id, response_text, platform="whatsapp"):
-    """Chama post_llm_call diretamente e retorna o resultado."""
-    # Desabilitar typing indicator (sem bridge real)
-    original_urlopen = None
-    try:
-        import urllib.request
-        original_urlopen = urllib.request.urlopen
-        urllib.request.urlopen = lambda *a, **kw: (_ for _ in ()).throw(Exception("mock"))
-    except Exception:
-        pass
+    def fake_schedule(chat_id, clean_text, turn_key):
+        scheduled.append((chat_id, clean_text))
+        return True
+
+    original_schedule = wm._schedule_contact_reply
+    wm._schedule_contact_reply = fake_schedule
 
     import time as _time
     original_sleep = _time.sleep
     _time.sleep = lambda *a, **kw: None
 
     try:
-        result = wm.post_llm_call(**_make_post_llm_kwargs(session_id, response_text, platform))
+        ret = wm.transform_llm_output(
+            platform=platform,
+            session_id=session_id,
+            response_text=response_text,
+        )
     finally:
-        if original_urlopen:
-            urllib.request.urlopen = original_urlopen
+        wm._schedule_contact_reply = original_schedule
         _time.sleep = original_sleep
 
-    return result
+    if ret is not None and ret != "\n":
+        raise AssertionError(f"transform_llm_output devia suprimir o reenvio do Hermes, retornou {ret!r}")
+    return bool(scheduled)
+
+
+def _arm_turn(chat_id, user_message):
+    """Registra o turno atual do chat, como o pre_gateway_dispatch faria."""
+    import hashlib
+    tk = chat_id + ":" + hashlib.md5(user_message.encode()).hexdigest()
+    wm._turn_key[chat_id] = tk
+    return tk
 
 
 def _clear_state():
     wm._turn_key.clear()
     wm._turn_sent.clear()
+    wm._turn_inflight.clear()
     wm._sender_to_chat.clear()
     wm._responded_sessions.clear()
 
 
 class TestSessionDedup(unittest.TestCase):
-    """Camada 1: session_id não pode enviar duas vezes."""
+    """Camada 1: o mesmo turno de um chat não agenda duas entregas."""
 
     def setUp(self):
         _clear_state()
 
     def test_primeira_chamada_passa(self):
-        r = _call_post("272335554773018@s.whatsapp.net", "olá")
-        self.assertIsNotNone(r)
-        resp = (r or {}).get("assistant_response", "olá")
-        self.assertNotEqual(resp, "")
+        _arm_turn("272335554773018@s.whatsapp.net", "olá?")
+        self.assertTrue(_deliver("272335554773018@s.whatsapp.net", "olá"))
         print("  [OK] primeira chamada passa")
 
     def test_segunda_chamada_mesma_session_suprimida(self):
-        _call_post("272335554773018@s.whatsapp.net", "primeira resposta")
-        r2 = _call_post("272335554773018@s.whatsapp.net", "segunda resposta (deve ser suprimida)")
-        resp = (r2 or {}).get("assistant_response", "X")
-        self.assertEqual(resp, "")
+        _arm_turn("272335554773018@s.whatsapp.net", "oi, tudo bem?")
+        self.assertTrue(_deliver("272335554773018@s.whatsapp.net", "primeira resposta"))
+        self.assertFalse(_deliver("272335554773018@s.whatsapp.net", "segunda resposta (deve ser suprimida)"))
         print("  [OK] segunda chamada mesma session suprimida")
 
     def test_sessions_diferentes_passam(self):
-        r1 = _call_post("session-A", "resposta A")
-        r2 = _call_post("session-B", "resposta B")
-        resp1 = (r1 or {}).get("assistant_response", "X")
-        resp2 = (r2 or {}).get("assistant_response", "X")
-        self.assertNotEqual(resp1, "")
-        self.assertNotEqual(resp2, "")
+        chat_a = "272335554773018@s.whatsapp.net"
+        chat_b = "5940090822813@s.whatsapp.net"
+        wm._sender_to_chat["session-A"] = chat_a
+        wm._sender_to_chat["session-B"] = chat_b
+        _arm_turn(chat_a, "pergunta A")
+        _arm_turn(chat_b, "pergunta B")
+        self.assertTrue(_deliver("session-A", "resposta A"))
+        self.assertTrue(_deliver("session-B", "resposta B"))
         print("  [OK] sessions diferentes passam independentemente")
 
     def test_numero_internacional_27(self):
         """Número sul-africano +27 não vaza pela normalização brasileira."""
         _clear_state()
-        r1 = _call_post("272335554773018@s.whatsapp.net", "oi")
-        r2 = _call_post("272335554773018@s.whatsapp.net", "oi de novo")
-        self.assertNotEqual((r1 or {}).get("assistant_response", "X"), "")
-        self.assertEqual((r2 or {}).get("assistant_response", "X"), "")
+        _arm_turn("272335554773018@s.whatsapp.net", "oi")
+        self.assertTrue(_deliver("272335554773018@s.whatsapp.net", "oi"))
+        self.assertFalse(_deliver("272335554773018@s.whatsapp.net", "oi de novo"))
         print("  [OK] número +27 dedup correto")
 
     def test_numero_internacional_594(self):
         """Número da Guiana Francesa +594 não vaza."""
         _clear_state()
-        r1 = _call_post("5940090822813@s.whatsapp.net", "oi")
-        r2 = _call_post("5940090822813@s.whatsapp.net", "oi de novo")
-        self.assertNotEqual((r1 or {}).get("assistant_response", "X"), "")
-        self.assertEqual((r2 or {}).get("assistant_response", "X"), "")
+        _arm_turn("5940090822813@s.whatsapp.net", "oi")
+        self.assertTrue(_deliver("5940090822813@s.whatsapp.net", "oi"))
+        self.assertFalse(_deliver("5940090822813@s.whatsapp.net", "oi de novo"))
         print("  [OK] número +594 dedup correto")
 
     def test_thread_race_condition(self):
-        """Concorrência: somente uma thread envia, outras são suprimidas."""
+        """Concorrência: somente uma thread agenda, outras são suprimidas."""
         _clear_state()
+        _arm_turn("272335554773018@s.whatsapp.net", "corrida")
         results = []
         lock = threading.Lock()
 
         def call():
-            r = _call_post("272335554773018@s.whatsapp.net", "resposta concorrente")
-            resp = (r or {}).get("assistant_response", "X")
+            sent = _deliver("272335554773018@s.whatsapp.net", "resposta concorrente")
             with lock:
-                results.append(resp)
+                results.append(sent)
 
         threads = [threading.Thread(target=call) for _ in range(5)]
         for t in threads:
@@ -142,40 +152,28 @@ class TestSessionDedup(unittest.TestCase):
         for t in threads:
             t.join()
 
-        enviados = [r for r in results if r != ""]
-        suprimidos = [r for r in results if r == ""]
+        enviados = [r for r in results if r]
+        suprimidos = [r for r in results if not r]
         self.assertEqual(len(enviados), 1, f"Esperado 1 envio, got {len(enviados)}: {results}")
         self.assertEqual(len(suprimidos), 4)
         print(f"  [OK] race condition: 1 enviado, 4 suprimidos")
 
 
 class TestTurnDedup(unittest.TestCase):
-    """Camada 2: turn-based dedup via _turn_key + _turn_sent."""
+    """Camada 2: turn-based dedup via _turn_key + _turn_sent/_turn_inflight."""
 
     def setUp(self):
         _clear_state()
 
-    def _set_turn(self, chat_id, user_message):
-        import hashlib
-        tk = chat_id + ":" + hashlib.md5(user_message.encode()).hexdigest()
-        wm._turn_key[chat_id] = tk
-        wm._turn_sent.discard(tk)
-
     def test_turn_dedup_sessions_diferentes_mesmo_turno(self):
         """Duas sessions diferentes, mesmo turno — só uma passa."""
-        chat_id = "5511999999999@s.whatsapp.net"
-        user_msg = "qual o preço do curso?"
-        self._set_turn(chat_id, user_msg)
+        chat_id = "272111222333444@s.whatsapp.net"
+        _arm_turn(chat_id, "qual o preço do curso?")
         wm._sender_to_chat["session-X"] = chat_id
         wm._sender_to_chat["session-Y"] = chat_id
 
-        r1 = _call_post("session-X", "O curso custa R$ 399")
-        r2 = _call_post("session-Y", "O curso custa R$ 399")
-
-        resp1 = (r1 or {}).get("assistant_response", "X")
-        resp2 = (r2 or {}).get("assistant_response", "X")
-        self.assertNotEqual(resp1, "")
-        self.assertEqual(resp2, "")
+        self.assertTrue(_deliver("session-X", "O curso custa R$ 399"))
+        self.assertFalse(_deliver("session-Y", "O curso custa R$ 399"))
         print("  [OK] turn dedup: sessions diferentes mesmo turno — só uma passa")
 
 
@@ -187,12 +185,13 @@ class TestToolResultFilter(unittest.TestCase):
 
     def _test_filter(self, text, should_suppress=True):
         _clear_state()
-        r = _call_post("5511999999999@s.whatsapp.net", text)
-        resp = (r or {}).get("assistant_response", "X")
+        chat_id = "272111222333444@s.whatsapp.net"
+        _arm_turn(chat_id, "mensagem de teste")
+        sent = _deliver(chat_id, text)
         if should_suppress:
-            self.assertEqual(resp, "", f"Esperado suprimir {text!r}, got {resp!r}")
+            self.assertFalse(sent, f"Esperado suprimir {text!r}, mas foi agendado")
         else:
-            self.assertNotEqual(resp, "", f"Esperado passar {text!r}, mas foi suprimido")
+            self.assertTrue(sent, f"Esperado passar {text!r}, mas foi suprimido")
 
     def test_nothing_to_save(self):
         self._test_filter("Nothing to save.")

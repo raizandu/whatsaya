@@ -415,9 +415,12 @@ class TestLLMContextAndPrompting(BaseWhatsAppManagerTest):
             "sender_id": "5511888888888@s.whatsapp.net" # Client
         }
 
-        # Mock reading of files
+        # Mock reading of files. Sem contato conhecido e sem classificação ao vivo,
+        # o roteamento cai no prompt de suporte — a classificação real via LLM não
+        # pode rodar aqui (chamaria a rede e herdaria histórico do ambiente).
         with patch("os.path.exists", return_value=True), \
-             patch("builtins.open", unittest.mock.mock_open(read_data="Soul client rules")):
+             patch("builtins.open", unittest.mock.mock_open(read_data="Soul client rules")), \
+             patch("whatsapp_manager._live_classify_contact", return_value=None):
             res = pre_llm("pre_llm_call", context)
             self.assertIsNotNone(res)
             self.assertIn("SUPORTE WHATSAPP", res["context"])
@@ -1760,7 +1763,7 @@ class TestPendingContactUpdate(BaseWhatsAppManagerTest):
         gateway._session_model_overrides = {}
 
         mock_resp = MagicMock()
-        mock_resp.read.return_value = b""
+        mock_resp.read.return_value = b'{"success": true, "messageId": "test-mid"}'
         mock_urlopen.return_value.__enter__.return_value = mock_resp
 
         pre_dispatch("pre_gateway_dispatch", {"event": event, "gateway": gateway})
@@ -1784,7 +1787,7 @@ class TestPendingContactUpdate(BaseWhatsAppManagerTest):
         mock_update.return_value = "✅ Contato Maria atualizado."
 
         mock_resp = MagicMock()
-        mock_resp.read.return_value = b""
+        mock_resp.read.return_value = b'{"success": true, "messageId": "test-mid"}'
         mock_urlopen.return_value.__enter__.return_value = mock_resp
 
         pre_dispatch = self.ctx.hooks.get("pre_gateway_dispatch")
@@ -1853,7 +1856,7 @@ class TestSalesDetection(BaseWhatsAppManagerTest):
         """Comprovante de cliente: grava a venda como pending_review e avisa cliente + dono."""
         import whatsapp_manager
         mock_resp = MagicMock()
-        mock_resp.read.return_value = b""
+        mock_resp.read.return_value = b'{"success": true, "messageId": "test-mid"}'
         mock_urlopen.return_value.__enter__.return_value = mock_resp
 
         with patch("whatsapp_manager._human_send") as mock_send:
@@ -1884,7 +1887,7 @@ class TestSalesDetection(BaseWhatsAppManagerTest):
         """Mesmo que a detecção retorne positivo, imagem do PRÓPRIO dono nunca vira venda."""
         import whatsapp_manager
         mock_resp = MagicMock()
-        mock_resp.read.return_value = b""
+        mock_resp.read.return_value = b'{"success": true, "messageId": "test-mid"}'
         mock_urlopen.return_value.__enter__.return_value = mock_resp
 
         owner_id = "5511999999999@s.whatsapp.net"
@@ -1902,7 +1905,7 @@ class TestSalesDetection(BaseWhatsAppManagerTest):
         """Imagem comum (não comprovante) não vira venda nem interrompe o fluxo normal."""
         import whatsapp_manager
         mock_resp = MagicMock()
-        mock_resp.read.return_value = b""
+        mock_resp.read.return_value = b'{"success": true, "messageId": "test-mid"}'
         mock_urlopen.return_value.__enter__.return_value = mock_resp
 
         event = self._make_image_event(self.CLIENT_ID, self.CLIENT_ID, caption="olha meu gato")
@@ -1916,7 +1919,7 @@ class TestSalesDetection(BaseWhatsAppManagerTest):
         """'listar vendas' responde direto do arquivo, sem passar por _classify_owner_intent."""
         import whatsapp_manager
         mock_resp = MagicMock()
-        mock_resp.read.return_value = b""
+        mock_resp.read.return_value = b'{"success": true, "messageId": "test-mid"}'
         mock_urlopen.return_value.__enter__.return_value = mock_resp
 
         owner_id = "5511999999999@s.whatsapp.net"
@@ -1937,7 +1940,7 @@ class TestSalesDetection(BaseWhatsAppManagerTest):
     def test_confirm_sale_command_updates_status(self, mock_urlopen, mock_load, mock_save):
         import whatsapp_manager
         mock_resp = MagicMock()
-        mock_resp.read.return_value = b""
+        mock_resp.read.return_value = b'{"success": true, "messageId": "test-mid"}'
         mock_urlopen.return_value.__enter__.return_value = mock_resp
 
         owner_id = "5511999999999@s.whatsapp.net"
@@ -1955,7 +1958,7 @@ class TestSalesDetection(BaseWhatsAppManagerTest):
     def test_confirm_unknown_sale_id_does_not_crash(self, mock_urlopen, mock_load, mock_save):
         import whatsapp_manager
         mock_resp = MagicMock()
-        mock_resp.read.return_value = b""
+        mock_resp.read.return_value = b'{"success": true, "messageId": "test-mid"}'
         mock_urlopen.return_value.__enter__.return_value = mock_resp
 
         owner_id = "5511999999999@s.whatsapp.net"
@@ -1976,7 +1979,7 @@ class TestSalesDetection(BaseWhatsAppManagerTest):
         venda pra IDs no formato novo (001-DDMMYYYY-HHMM) — só "vN" passava despercebido."""
         import whatsapp_manager
         mock_resp = MagicMock()
-        mock_resp.read.return_value = b""
+        mock_resp.read.return_value = b'{"success": true, "messageId": "test-mid"}'
         mock_urlopen.return_value.__enter__.return_value = mock_resp
 
         owner_id = "5511999999999@s.whatsapp.net"
@@ -2004,7 +2007,7 @@ class TestSalesDetection(BaseWhatsAppManagerTest):
         """Ao confirmar, o CLIENTE (não só o dono) recebe o link do produto digital confirmado."""
         import whatsapp_manager
         mock_resp = MagicMock()
-        mock_resp.read.return_value = b""
+        mock_resp.read.return_value = b'{"success": true, "messageId": "test-mid"}'
         mock_urlopen.return_value.__enter__.return_value = mock_resp
 
         owner_id = "5511999999999@s.whatsapp.net"
@@ -2027,7 +2030,7 @@ class TestSalesDetection(BaseWhatsAppManagerTest):
         """'ver <id>' (sem a palavra 'pedido') também deve disparar o comando determinístico."""
         import whatsapp_manager
         mock_resp = MagicMock()
-        mock_resp.read.return_value = b""
+        mock_resp.read.return_value = b'{"success": true, "messageId": "test-mid"}'
         mock_urlopen.return_value.__enter__.return_value = mock_resp
 
         owner_id = "5511999999999@s.whatsapp.net"
@@ -2047,7 +2050,7 @@ class TestSalesDetection(BaseWhatsAppManagerTest):
         quando o que vem depois do 'ver' parece mesmo um ID de venda."""
         import whatsapp_manager
         mock_resp = MagicMock()
-        mock_resp.read.return_value = b""
+        mock_resp.read.return_value = b'{"success": true, "messageId": "test-mid"}'
         mock_urlopen.return_value.__enter__.return_value = mock_resp
 
         owner_id = "5511999999999@s.whatsapp.net"
@@ -2111,7 +2114,7 @@ class TestSalesDetection(BaseWhatsAppManagerTest):
         import whatsapp_manager
         whatsapp_manager._pending_sale_address.clear()
         mock_resp = MagicMock()
-        mock_resp.read.return_value = b""
+        mock_resp.read.return_value = b'{"success": true, "messageId": "test-mid"}'
         mock_urlopen.return_value.__enter__.return_value = mock_resp
 
         with patch("whatsapp_manager._human_send"):
@@ -2139,7 +2142,7 @@ class TestSalesDetection(BaseWhatsAppManagerTest):
         import whatsapp_manager
         whatsapp_manager._pending_sale_address.clear()
         mock_resp = MagicMock()
-        mock_resp.read.return_value = b""
+        mock_resp.read.return_value = b'{"success": true, "messageId": "test-mid"}'
         mock_urlopen.return_value.__enter__.return_value = mock_resp
 
         with patch("whatsapp_manager._human_send"):
@@ -2164,7 +2167,7 @@ class TestSalesDetection(BaseWhatsAppManagerTest):
         whatsapp_manager._pending_sale_address.clear()
         whatsapp_manager._pending_sale_address[self.CLIENT_ID] = {"sale_id": "v1", "created_at": whatsapp_manager.time.time()}
         mock_resp = MagicMock()
-        mock_resp.read.return_value = b""
+        mock_resp.read.return_value = b'{"success": true, "messageId": "test-mid"}'
         mock_urlopen.return_value.__enter__.return_value = mock_resp
 
         event = self._make_text_event(self.CLIENT_ID, self.CLIENT_ID, "Av. Brasil, 500, apto 4")
@@ -2189,7 +2192,7 @@ class TestSalesDetection(BaseWhatsAppManagerTest):
             "sale_id": "v1", "created_at": whatsapp_manager.time.time() - whatsapp_manager._PENDING_SALE_ADDRESS_TTL_S - 1,
         }
         mock_resp = MagicMock()
-        mock_resp.read.return_value = b""
+        mock_resp.read.return_value = b'{"success": true, "messageId": "test-mid"}'
         mock_urlopen.return_value.__enter__.return_value = mock_resp
 
         event = self._make_text_event(self.CLIENT_ID, self.CLIENT_ID, "oi, tudo bem?")
@@ -2227,7 +2230,7 @@ class TestSalesDetection(BaseWhatsAppManagerTest):
         import whatsapp_manager
         whatsapp_manager._pending_sale_address.clear()
         mock_resp = MagicMock()
-        mock_resp.read.return_value = b""
+        mock_resp.read.return_value = b'{"success": true, "messageId": "test-mid"}'
         mock_urlopen.return_value.__enter__.return_value = mock_resp
 
         with patch("whatsapp_manager._human_send"):
@@ -2250,7 +2253,7 @@ class TestSalesDetection(BaseWhatsAppManagerTest):
         whatsapp_manager._pending_sale_address.clear()
         whatsapp_manager._pending_sale_address[self.CLIENT_ID] = {"sale_id": "v1", "created_at": whatsapp_manager.time.time()}
         mock_resp = MagicMock()
-        mock_resp.read.return_value = b""
+        mock_resp.read.return_value = b'{"success": true, "messageId": "test-mid"}'
         mock_urlopen.return_value.__enter__.return_value = mock_resp
 
         event = self._make_text_event(self.CLIENT_ID, self.CLIENT_ID, "Av. Brasil, 500, apto 4")
@@ -2305,7 +2308,7 @@ class TestProductCatalog(BaseWhatsAppManagerTest):
         """Pedido de cadastro guarda o rascunho como pendência e pede confirmação — não salva ainda."""
         import whatsapp_manager
         mock_resp = MagicMock()
-        mock_resp.read.return_value = b""
+        mock_resp.read.return_value = b'{"success": true, "messageId": "test-mid"}'
         mock_urlopen.return_value.__enter__.return_value = mock_resp
 
         with patch("whatsapp_manager._save_product_catalog") as mock_save:
@@ -2325,7 +2328,7 @@ class TestProductCatalog(BaseWhatsAppManagerTest):
         """Sem nome extraível, guarda pendência 'awaiting_details' em vez de só avisar e desistir."""
         import whatsapp_manager
         mock_resp = MagicMock()
-        mock_resp.read.return_value = b""
+        mock_resp.read.return_value = b'{"success": true, "messageId": "test-mid"}'
         mock_urlopen.return_value.__enter__.return_value = mock_resp
 
         with patch("whatsapp_manager._extract_catalog_item_via_llm", return_value={}):
@@ -2356,7 +2359,7 @@ class TestProductCatalog(BaseWhatsAppManagerTest):
             "created_at": whatsapp_manager.time.time(),
         }
         mock_resp = MagicMock()
-        mock_resp.read.return_value = b""
+        mock_resp.read.return_value = b'{"success": true, "messageId": "test-mid"}'
         mock_urlopen.return_value.__enter__.return_value = mock_resp
 
         res = self._dispatch("sim")
@@ -2380,7 +2383,7 @@ class TestProductCatalog(BaseWhatsAppManagerTest):
             "created_at": whatsapp_manager.time.time(),
         }
         mock_resp = MagicMock()
-        mock_resp.read.return_value = b""
+        mock_resp.read.return_value = b'{"success": true, "messageId": "test-mid"}'
         mock_urlopen.return_value.__enter__.return_value = mock_resp
 
         res = self._dispatch("não")
@@ -2401,7 +2404,7 @@ class TestProductCatalog(BaseWhatsAppManagerTest):
         """Match único vai direto para confirmação, sem desambiguação."""
         import whatsapp_manager
         mock_resp = MagicMock()
-        mock_resp.read.return_value = b""
+        mock_resp.read.return_value = b'{"success": true, "messageId": "test-mid"}'
         mock_urlopen.return_value.__enter__.return_value = mock_resp
 
         res = self._dispatch("muda o preço da mentoria pra 550")
@@ -2424,7 +2427,7 @@ class TestProductCatalog(BaseWhatsAppManagerTest):
         """Múltiplos produtos batendo com o nome pedem desambiguação antes de confirmar."""
         import whatsapp_manager
         mock_resp = MagicMock()
-        mock_resp.read.return_value = b""
+        mock_resp.read.return_value = b'{"success": true, "messageId": "test-mid"}'
         mock_urlopen.return_value.__enter__.return_value = mock_resp
 
         res = self._dispatch("remove o produto consultoria")
@@ -2447,7 +2450,7 @@ class TestProductCatalog(BaseWhatsAppManagerTest):
             "created_at": whatsapp_manager.time.time(),
         }
         mock_resp = MagicMock()
-        mock_resp.read.return_value = b""
+        mock_resp.read.return_value = b'{"success": true, "messageId": "test-mid"}'
         mock_urlopen.return_value.__enter__.return_value = mock_resp
 
         res = self._dispatch("sim")
@@ -2468,7 +2471,7 @@ class TestProductCatalog(BaseWhatsAppManagerTest):
             "created_at": whatsapp_manager.time.time() - whatsapp_manager._PENDING_CATALOG_TTL_S - 1,
         }
         mock_resp = MagicMock()
-        mock_resp.read.return_value = b""
+        mock_resp.read.return_value = b'{"success": true, "messageId": "test-mid"}'
         mock_urlopen.return_value.__enter__.return_value = mock_resp
 
         self._dispatch("sim")
@@ -2510,7 +2513,7 @@ class TestProductCatalog(BaseWhatsAppManagerTest):
             "created_at": whatsapp_manager.time.time(),
         }
         mock_resp = MagicMock()
-        mock_resp.read.return_value = b""
+        mock_resp.read.return_value = b'{"success": true, "messageId": "test-mid"}'
         mock_urlopen.return_value.__enter__.return_value = mock_resp
 
         res = self._dispatch("inclua o link do produto https://chatkanban.cloud/")
@@ -2538,7 +2541,7 @@ class TestProductCatalog(BaseWhatsAppManagerTest):
             "created_at": whatsapp_manager.time.time(),
         }
         mock_resp = MagicMock()
-        mock_resp.read.return_value = b""
+        mock_resp.read.return_value = b'{"success": true, "messageId": "test-mid"}'
         mock_urlopen.return_value.__enter__.return_value = mock_resp
 
         res = self._dispatch("beleza")
@@ -2551,7 +2554,7 @@ class TestProductCatalog(BaseWhatsAppManagerTest):
         """'listar catálogo' responde direto do arquivo, sem passar por _classify_owner_intent."""
         import whatsapp_manager
         mock_resp = MagicMock()
-        mock_resp.read.return_value = b""
+        mock_resp.read.return_value = b'{"success": true, "messageId": "test-mid"}'
         mock_urlopen.return_value.__enter__.return_value = mock_resp
 
         with patch("whatsapp_manager._load_product_catalog", return_value={
@@ -2567,7 +2570,7 @@ class TestProductCatalog(BaseWhatsAppManagerTest):
     def test_list_catalog_empty_message(self, mock_urlopen):
         import whatsapp_manager
         mock_resp = MagicMock()
-        mock_resp.read.return_value = b""
+        mock_resp.read.return_value = b'{"success": true, "messageId": "test-mid"}'
         mock_urlopen.return_value.__enter__.return_value = mock_resp
 
         with patch("whatsapp_manager._load_product_catalog", return_value={}):
@@ -2586,7 +2589,7 @@ class TestProductCatalog(BaseWhatsAppManagerTest):
         """Não deixa apagar definitivamente um produto que ainda está ativo — pede pra desativar primeiro."""
         import whatsapp_manager
         mock_resp = MagicMock()
-        mock_resp.read.return_value = b""
+        mock_resp.read.return_value = b'{"success": true, "messageId": "test-mid"}'
         mock_urlopen.return_value.__enter__.return_value = mock_resp
 
         res = self._dispatch("apaga definitivamente o produto mentoria")
@@ -2605,7 +2608,7 @@ class TestProductCatalog(BaseWhatsAppManagerTest):
         """Produto já inativo: cria pendência de apagar definitivamente e pede confirmação."""
         import whatsapp_manager
         mock_resp = MagicMock()
-        mock_resp.read.return_value = b""
+        mock_resp.read.return_value = b'{"success": true, "messageId": "test-mid"}'
         mock_urlopen.return_value.__enter__.return_value = mock_resp
 
         res = self._dispatch("apaga definitivamente o produto mentoria")
@@ -2628,7 +2631,7 @@ class TestProductCatalog(BaseWhatsAppManagerTest):
             "created_at": whatsapp_manager.time.time(),
         }
         mock_resp = MagicMock()
-        mock_resp.read.return_value = b""
+        mock_resp.read.return_value = b'{"success": true, "messageId": "test-mid"}'
         mock_urlopen.return_value.__enter__.return_value = mock_resp
 
         res = self._dispatch("sim")
@@ -3336,7 +3339,7 @@ class TestNLUpdateOwnerFieldsRestriction(BaseWhatsAppManagerTest):
         self, mock_urlopen, mock_classify, mock_extract, mock_update
     ):
         mock_resp = MagicMock()
-        mock_resp.read.return_value = b""
+        mock_resp.read.return_value = b'{"success": true, "messageId": "test-mid"}'
         mock_urlopen.return_value.__enter__.return_value = mock_resp
 
         pre_dispatch = self.ctx.hooks.get("pre_gateway_dispatch")
@@ -3585,7 +3588,7 @@ class TestRunSyncInBackground(BaseWhatsAppManagerTest):
         import time
 
         mock_resp = MagicMock()
-        mock_resp.read.return_value = b""
+        mock_resp.read.return_value = b'{"success": true, "messageId": "test-mid"}'
         mock_urlopen.return_value.__enter__.return_value = mock_resp
 
         from whatsapp_manager import _run_sync_in_background
@@ -5197,7 +5200,7 @@ class TestOwnerCommands(BaseWhatsAppManagerTest):
         gateway._session_key_for_source.return_value = "sess_owner"
         gateway._session_model_overrides = {}
         mock_resp = MagicMock()
-        mock_resp.read.return_value = b""
+        mock_resp.read.return_value = b'{"success": true, "messageId": "test-mid"}'
         mock_urlopen.return_value.__enter__.return_value = mock_resp
         return pre_dispatch("pre_gateway_dispatch", {"event": event, "gateway": gateway})
 
@@ -5303,7 +5306,7 @@ class TestOwnerCommands(BaseWhatsAppManagerTest):
             "fields": {"relationship": "Amigo", "manual_relationship": "Amigo"},
         }
         mock_resp = MagicMock()
-        mock_resp.read.return_value = b""
+        mock_resp.read.return_value = b'{"success": true, "messageId": "test-mid"}'
         mock_urlopen.return_value.__enter__.return_value = mock_resp
 
         result = self._dispatch("5511888777666", mock_urlopen)
@@ -5327,7 +5330,7 @@ class TestOwnerCommands(BaseWhatsAppManagerTest):
             "fields": {"relationship": "Cliente"},
         }
         mock_resp = MagicMock()
-        mock_resp.read.return_value = b""
+        mock_resp.read.return_value = b'{"success": true, "messageId": "test-mid"}'
         mock_urlopen.return_value.__enter__.return_value = mock_resp
 
         result = self._dispatch("5511111111111", mock_urlopen)
@@ -5714,17 +5717,30 @@ class TestTransformLlmOutput(BaseWhatsAppManagerTest):
 class TestWhatsAppAdapterWhitespace(unittest.TestCase):
     """Adapter não reenvia o whitespace que transform_llm_output devolve ao Hermes."""
 
+    @staticmethod
+    def _make_adapter():
+        # No container o BasePlatformAdapter do core exige (config, platform) e é
+        # abstrato — aqui só o send() importa, então o objeto é montado sem __init__.
+        from adapter import WhatsAppPlatformAdapter
+
+        class _TestableAdapter(WhatsAppPlatformAdapter):
+            def get_chat_info(self, *args, **kwargs):
+                return None
+
+        adapter = object.__new__(_TestableAdapter)
+        adapter.bridge_url = "http://127.0.0.1:3000"
+        adapter._connected = False
+        return adapter
+
     @patch("urllib.request.urlopen")
     def test_whitespace_send_is_skipped(self, mock_urlopen):
-        from adapter import WhatsAppPlatformAdapter
-        adapter = WhatsAppPlatformAdapter()
+        adapter = self._make_adapter()
         self.assertTrue(adapter.send("5511888888888@s.whatsapp.net", "\n"))
         mock_urlopen.assert_not_called()
 
     @patch("urllib.request.urlopen")
     def test_empty_send_is_skipped(self, mock_urlopen):
-        from adapter import WhatsAppPlatformAdapter
-        adapter = WhatsAppPlatformAdapter()
+        adapter = self._make_adapter()
         self.assertTrue(adapter.send("5511888888888@s.whatsapp.net", "   "))
         mock_urlopen.assert_not_called()
 
