@@ -114,6 +114,7 @@ Tudo o que muda por cliente é **variável de ambiente** + os templates em `depl
 | `HERMES_SETUP_GITHUB_USER` / `HERMES_SETUP_GITHUB_REPO` | De onde o plugin se clona e se atualiza. Padrão: `raizandu` / `whatsaya` |
 | `KEEP_LOCAL_PLUGIN` | `true` — o boot e o `_self_update_plugin_code` não fazem fetch/reset no volume |
 | `WHATSAPP_GROUPS_ENABLED` | Padrão desligado. Mensagem de `@g.us` e `@broadcast` é descartada no ponto de entrada do `bridge.js` — não baixa mídia, não enfileira pro agente, não grava no histórico. Ligar é ato deliberado |
+| `FISH_API_KEY` (+ `FISH_REFERENCE_ID`, `FISH_TTS_MODEL`, `FISH_TTS_VOLUME`) | Voz das respostas (nota de voz via Fish Audio). **Vazia = áudio desligado, tudo vai em texto** — o encanamento (`tts.provider=fishaudio` → `deploy/scripts/fish_tts.py`) é auto-instalado pelo compose no boot; só falta a chave. `FISH_REFERENCE_ID` escolhe a voz; modelo default `s2.1-pro-free` (campanha grátis até 31/08/2026 — `fish_model_campaign_notice.sh` avisa o dono de trocar). Pix, endereço, link, e-mail e afins nunca vão em áudio (regra `written_only` no `fish_tts.py`). Detalhes: `deploy/ONBOARDING.md` |
 
 Fora as envs, só os arquivos de conteúdo: `deploy/SOUL.md`, `SOUL_WHATSAPP.md`, `SOUL_EMAIL.md` e `support_rules.md` são **templates com placeholders `{{...}}`**. Preencha antes de subir — placeholder não substituído vai literal para o cliente, e um `support_rules.md` com produto errado faz o bot inventar oferta que não existe.
 
