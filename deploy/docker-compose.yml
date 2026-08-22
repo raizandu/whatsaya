@@ -91,9 +91,13 @@
 #   WHATSAPP_CLIENT_PROVIDER          Provider de clientes         (padrão openai-codex)
 #   WHATSAPP_CLIENT_REASONING_EFFORT  Esforço de raciocínio do cliente (padrão medium —
 #                                     mais barato que max; suba se as respostas ficarem rasas)
-#   WHATSAPP_CLIENT_MEDIA_MODEL   Transcrição de áudio e leitura de imagem
-#                                 (padrão google/gemini-3.1-flash-lite — precisa ser
-#                                  multimodal; DeepSeek aceita só texto e falharia)
+#   WHATSAPP_CLIENT_MEDIA_MODEL   Leitura de IMAGEM (descrição e comprovante de venda).
+#                                 Precisa aceitar imagem; DeepSeek é só texto e falharia.
+#                                 Áudio NÃO passa por aqui: transcrição é do Fish ASR,
+#                                 com FISH_API_KEY. Nenhum slug de texto/visão do
+#                                 OpenRouter aceita entrada de áudio — apontar áudio
+#                                 para cá devolve 404 e a mensagem chega ao agente como
+#                                 "[audio received]" cru.
 #   WHATSAPP_CONTACT_CLASSIFIER_MODEL  Classificar novos contatos
 #
 # 💳 VENDA DIRETA
@@ -451,6 +455,19 @@ services:
                 'fallback_providers': fallback_chain,
                 'agent': {'tool_use_enforcement': 'disabled', 'reasoning_effort': client_reasoning_effort},
                 'gateway': {'delivery_ledger': False},
+                # tools/toolsets vazios não escondem as meta-ferramentas de descoberta
+                # (tool_search, tool_describe, tool_call). O pre_tool_call do plugin nega
+                # cada uma, e sem hard stop o modelo reinsiste: uma conversa de cliente do
+                # QA queimou 20 chamadas de API para devolver 1 caractere. O guardrail
+                # corta o loop no cliente sem tirar ferramenta nenhuma do dono.
+                'tool_loop_guardrails': {
+                    'hard_stop_enabled': True,
+                    'hard_stop_after': {
+                        'same_tool_failure': 2,
+                        'exact_failure': 2,
+                        'idempotent_no_progress': 2,
+                    },
+                },
                 'compression': {'codex_gpt55_autoraise_notice': False},
                 'toolsets': [], 'disabled_toolsets': disabled, 'tools': [],
                 'skills': {'enabled': False},
@@ -570,6 +587,15 @@ services:
       - FISH_REFERENCE_ID=${FISH_REFERENCE_ID:-}
       - FISH_TTS_MODEL=${FISH_TTS_MODEL:-s2.1-pro-free}
       - FISH_TTS_VOLUME=${FISH_TTS_VOLUME:-4}
+      # Resposta em nota de voz. O plugin lê essa env em _voice_reply_enabled(); sem o
+      # passthrough aqui ela nunca chegava ao processo e o default "true" mandava toda
+      # resposta em áudio, inclusive para lead que escreveu em texto. Com o gate de
+      # modalidade, "true" significa: áudio só para quem mandou áudio.
+      - WHATSAPP_AUTO_TTS=${WHATSAPP_AUTO_TTS:-true}
+      # Idioma da transcrição no Fish ASR (cai em HERMES_LOCAL_STT_LANGUAGE e depois "pt").
+      - WHATSAPP_STT_LANGUAGE=${WHATSAPP_STT_LANGUAGE:-}
+      # Segundos que uma mensagem pode ficar sem resposta antes de o watchdog avisar o dono.
+      - WHATSAPP_UNANSWERED_ALERT_S=${WHATSAPP_UNANSWERED_ALERT_S:-180}
       - WHATSAPP_INBOUND_BUFFER_S=${WHATSAPP_INBOUND_BUFFER_S:-0}
       - WHATSAPP_FOLLOWUP_ENABLED=${WHATSAPP_FOLLOWUP_ENABLED:-true}
       - WHATSAPP_FOLLOWUP_SILENCE_MIN=${WHATSAPP_FOLLOWUP_SILENCE_MIN:-30}
@@ -590,4 +616,4 @@ services:
     # Portas expostas — coloque um proxy reverso na frente se for usar domínio
     ports:
       - "8642"   # API REST
-      - "9119"   # Dashboard + WebSocket (/api/ws, /api/events, /api/pty)
+      - "9119:9119"   # Dashboard + WebSocket (/api/ws, /api/events, /api/pty)

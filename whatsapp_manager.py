@@ -18,6 +18,7 @@ import urllib.request
 import urllib.error
 import urllib.parse
 import unicodedata
+import uuid
 import fcntl
 import socket
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -951,35 +952,159 @@ def _get_mime_type(file_path: str) -> str:
     return mime_map.get(ext, "application/octet-stream")
 
 
+FISH_ASR_URL = "https://api.fish.audio/v1/asr"
+
+
+def _fish_asr_language() -> str:
+    return (
+        os.getenv("WHATSAPP_STT_LANGUAGE", "").strip()
+        or os.getenv("HERMES_LOCAL_STT_LANGUAGE", "").strip()
+        or "pt"
+    )
+
+
+def _build_multipart(fields: dict, file_field: str, filename: str, payload: bytes) -> tuple[bytes, str]:
+    """Monta um corpo multipart/form-data sem depender de requests."""
+    boundary = f"----whatsaya{uuid.uuid4().hex}"
+    sep = f"--{boundary}".encode()
+    chunks = []
+    for name, value in fields.items():
+        chunks += [
+            sep,
+            f'Content-Disposition: form-data; name="{name}"'.encode(),
+            b"",
+            str(value).encode("utf-8"),
+        ]
+    chunks += [
+        sep,
+        f'Content-Disposition: form-data; name="{file_field}"; filename="{filename}"'.encode(),
+        b"Content-Type: application/octet-stream",
+        b"",
+        payload,
+        f"--{boundary}--".encode(),
+        b"",
+    ]
+    return b"\r\n".join(chunks), f"multipart/form-data; boundary={boundary}"
+
+
+def _transcribe_via_fish(file_path: str, *, attempts: int = 2) -> str | None:
+    """Transcreve áudio pela API própria do Fish Audio.
+
+    Áudio não passa pelos modelos do OpenRouter: os slugs de texto/visão em uso não têm
+    endpoint de entrada de áudio (`404 No endpoints found that support input audio`), e foi
+    exatamente isso que fez o agente receber `[audio received]` cru no QA de 21/08. O Fish
+    já é o provedor de voz do projeto e tem ASR próprio — a mesma FISH_API_KEY atende os
+    dois lados. O OpenRouter fica só como motor de texto.
+
+    Retorna a transcrição, ou None se a chave faltar ou a API falhar em todas as tentativas.
+    """
+    api_key = os.getenv("FISH_API_KEY", "").strip()
+    if not api_key:
+        logger.info("[asr] FISH_API_KEY ausente — sem transcrição de áudio")
+        return None
+    try:
+        payload = Path(file_path).read_bytes()
+    except OSError as err:
+        logger.error(f"[asr] não consegui ler o áudio {file_path}: {err}")
+        return None
+    if not payload:
+        logger.warning(f"[asr] áudio vazio: {file_path}")
+        return None
+
+    body, content_type = _build_multipart(
+        {"language": _fish_asr_language(), "ignore_timestamps": "true"},
+        "audio",
+        Path(file_path).name or "audio.ogg",
+        payload,
+    )
+    # A doc do endpoint aceita multipart/form-data ou msgpack; JSON com base64 não é
+    # suportado. Multipart é o que dá para montar com urllib, sem dependência nova.
+    last_err = None
+    for attempt in range(1, attempts + 1):
+        req = urllib.request.Request(
+            FISH_ASR_URL,
+            data=body,
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": content_type},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                result = json.loads(resp.read().decode("utf-8"))
+            text = (result.get("text") or "").strip()
+            if text:
+                logger.info(
+                    f"[asr] fish ok tentativa={attempt} dur={result.get('duration')}s "
+                    f"lang={result.get('language_code')!r} chars={len(text)}"
+                )
+                return text
+            logger.warning(f"[asr] fish devolveu transcrição vazia (tentativa {attempt}/{attempts})")
+            last_err = "transcrição vazia"
+        except urllib.error.HTTPError as err:
+            detail = ""
+            try:
+                detail = err.read().decode("utf-8")[:300]
+            except Exception:
+                pass
+            last_err = f"HTTP {err.code} {detail}"
+            logger.warning(f"[asr] fish falhou (tentativa {attempt}/{attempts}): {last_err}")
+            # 401/402 não melhoram com retry: chave inválida ou crédito de API esgotado.
+            if err.code in (401, 402, 403):
+                break
+        except Exception as err:
+            last_err = str(err)
+            logger.warning(f"[asr] fish falhou (tentativa {attempt}/{attempts}): {err}")
+
+    logger.error(f"[asr] transcrição não obtida para {Path(file_path).name}: {last_err}")
+    return None
+
+
 def _process_media_message(event) -> str | None:
-    """Processa mensagem de mídia (áudio ou imagem) usando Gemini, OpenAI ou OpenRouter.
+    """Processa mensagem de mídia: áudio pelo Fish ASR, imagem por Gemini/OpenAI/OpenRouter.
 
     Retorna a transcrição ou descrição, ou None se falhar/não for mídia.
     """
+    media_info = _get_media_info(event)
+    if not media_info["has_media"] or not media_info["media_urls"]:
+        return None
+
+    media_type = media_info["media_type"]
+
+    # Áudio é do Fish, e só dele. Os modelos do OpenRouter atendem o motor de texto e a
+    # leitura de imagem; nenhum deles aceita entrada de áudio nos slugs em uso.
+    if media_type in ["ptt", "audio"]:
+        audio_path = media_info["media_urls"][0]
+        try:
+            if not os.path.exists(audio_path):
+                logger.info(f"Arquivo de mídia não encontrado: {audio_path}")
+                return None
+            return _transcribe_via_fish(audio_path)
+        finally:
+            # Privacidade: o áudio some do disco tendo transcrito ou não. Some inteiro —
+            # se o bridge mandou mais de um arquivo, nenhum fica para trás.
+            for path in media_info["media_urls"]:
+                try:
+                    os.remove(path)
+                    logger.info(f"Arquivo temporário de mídia removido para economizar espaço: {path}")
+                except FileNotFoundError:
+                    pass
+                except OSError as delete_err:
+                    logger.warning(f"Erro ao deletar arquivo de mídia temporário: {delete_err}")
+
+    if media_type != "image":
+        # Outros tipos de mídia não são suportados para transcrição/descrição direta
+        return None
+
     google_key = config.google_api_key
     openai_key = config.openai_api_key
     openrouter_key = config.openrouter_api_key
     media_model = config.whatsapp_client_media_model
     if not google_key and not openai_key and not openrouter_key:
-        logger.info("Nenhuma API Key configurada para processamento de mídia.")
+        logger.info("Nenhuma API Key configurada para leitura de imagem.")
         return None
-        
-    media_info = _get_media_info(event)
-    if not media_info["has_media"] or not media_info["media_urls"]:
-        return None
-        
-    media_type = media_info["media_type"]
-    
-    # Limita a no máximo 5 imagens por mensagem, ou 1 áudio
-    if media_type == "image":
-        urls_to_process = media_info["media_urls"][:5]
-        prompt = "Descreva as imagens fornecidas detalhadamente em português (identifique textos, objetos e o contexto geral). Retorne APENAS a descrição direta de todas elas de forma unificada, sem nenhuma introdução, explicações adicionais ou metalinguagem."
-    elif media_type in ["ptt", "audio"]:
-        urls_to_process = media_info["media_urls"][:1]
-        prompt = "Transcreva o áudio de forma literal e precisa, em português. Retorne APENAS o texto da transcrição, sem nenhuma introdução, explicação, aspas ou comentários."
-    else:
-        # Outros tipos de mídia não são suportados para transcrição/descrição direta
-        return None
+
+    # Limita a no máximo 5 imagens por mensagem
+    urls_to_process = media_info["media_urls"][:5]
+    prompt = "Descreva as imagens fornecidas detalhadamente em português (identifique textos, objetos e o contexto geral). Retorne APENAS a descrição direta de todas elas de forma unificada, sem nenhuma introdução, explicações adicionais ou metalinguagem."
 
     parts = []
     for file_path in urls_to_process:
@@ -1000,17 +1125,10 @@ def _process_media_message(event) -> str | None:
                 })
         except OSError as read_err:
             logger.error(f"Erro ao ler arquivo de mídia para envio: {read_err}")
-        finally:
-            # Imagens: NÃO apagar aqui. O Hermes 0.19+ também lê esse mesmo arquivo cacheado
-            # nativamente (attachment/vision_analyze) pra montar a mensagem multimodal — apagar
-            # antes disso causa "source is not a recognized image" no lado do Hermes. O cache
-            # de imagens (/opt/data/.hermes/image_cache/) é gerenciado pelo próprio Hermes.
-            if media_type != "image":
-                try:
-                    os.remove(file_path)
-                    logger.info(f"Arquivo temporário de mídia removido para economizar espaço: {file_path}")
-                except OSError as delete_err:
-                    logger.warning(f"Erro ao deletar arquivo de mídia temporário: {delete_err}")
+        # Imagem NÃO é apagada aqui. O Hermes 0.19+ lê esse mesmo arquivo cacheado
+        # nativamente (attachment/vision_analyze) pra montar a mensagem multimodal — apagar
+        # antes disso causa "source is not a recognized image" no lado do Hermes. O cache
+        # de imagens (/opt/data/.hermes/image_cache/) é gerenciado pelo próprio Hermes.
 
     if not parts:
         return None
@@ -1027,27 +1145,14 @@ def _process_media_message(event) -> str | None:
         except Exception as e:
             logger.warning(f"[media] Gemini falhou: {e}")
 
-    # --- OpenAI (áudio via gpt-4o-audio-preview, imagem via gpt-4o-mini) ---
+    # --- OpenAI (visão via gpt-4o-mini) ---
     if openai_key and parts:
         try:
-            if media_type in ["ptt", "audio"]:
-                audio_part = parts[0]
-                b64 = audio_part["inlineData"]["data"]
-                mime = audio_part["inlineData"]["mimeType"]
-                payload = {
-                    "model": "gpt-4o-audio-preview",
-                    "modalities": ["text"],
-                    "messages": [{"role": "user", "content": [
-                        {"type": "input_audio", "input_audio": {"data": b64, "format": "wav" if "wav" in mime else "mp3" if "mp3" in mime else "mp4" if "mp4" in mime else "wav"}},
-                        {"type": "text", "text": prompt},
-                    ]}],
-                }
-            else:
-                content = [
-                    {"type": "image_url", "image_url": {"url": f"data:{p['inlineData']['mimeType']};base64,{p['inlineData']['data']}"}}
-                    for p in parts
-                ] + [{"type": "text", "text": prompt}]
-                payload = {"model": "gpt-4o-mini", "messages": [{"role": "user", "content": content}]}
+            content = [
+                {"type": "image_url", "image_url": {"url": f"data:{p['inlineData']['mimeType']};base64,{p['inlineData']['data']}"}}
+                for p in parts
+            ] + [{"type": "text", "text": prompt}]
+            payload = {"model": "gpt-4o-mini", "messages": [{"role": "user", "content": content}]}
             req = urllib.request.Request("https://api.openai.com/v1/chat/completions", data=json.dumps(payload).encode(), headers={"Content-Type": "application/json", "Authorization": f"Bearer {openai_key}"}, method="POST")
             with urllib.request.urlopen(req, timeout=45) as resp:
                 result = json.loads(resp.read().decode())
@@ -1055,13 +1160,7 @@ def _process_media_message(event) -> str | None:
         except Exception as e:
             logger.warning(f"[media] OpenAI falhou: {e}")
 
-    # --- OpenRouter ---
-    # Imagem usa `image_url` com data URI. Áudio usa `input_audio`, o formato
-    # OpenAI-compatível que o OpenRouter documenta — antes o áudio ia dentro de
-    # `image_url`, o que só funcionaria se o roteador aceitasse data URI de qualquer
-    # tipo no campo de imagem. Como o PTT do WhatsApp é OGG/Opus e a documentação cita
-    # wav/mp3, a tentativa antiga fica como fallback em vez de sumir: se o modelo aceitar
-    # OGG por data URI, ainda transcreve.
+    # --- OpenRouter (imagem por data URI) ---
     if openrouter_key and parts:
         or_model = media_model or "google/gemini-flash-1.5-8b"
         or_url = "https://openrouter.ai/api/v1/chat/completions"
@@ -1082,27 +1181,12 @@ def _process_media_message(event) -> str | None:
                 for p in items
             ] + [{"type": "text", "text": prompt}]
 
-        if media_type in ["ptt", "audio"]:
-            audio_part = parts[0]
-            mime = audio_part["inlineData"]["mimeType"]
-            fmt = "wav" if "wav" in mime else "mp3" if "mp3" in mime else "ogg" if "ogg" in mime else "mp4" if "mp4" in mime else "wav"
-            attempts = [
-                [
-                    {"type": "input_audio", "input_audio": {"data": audio_part["inlineData"]["data"], "format": fmt}},
-                    {"type": "text", "text": prompt},
-                ],
-                _data_uri_content([audio_part]),
-            ]
-        else:
-            attempts = [_data_uri_content(parts)]
+        try:
+            return _or_send(_data_uri_content(parts))
+        except Exception as e:
+            logger.warning(f"[media] OpenRouter falhou: {e}")
 
-        for idx, content in enumerate(attempts):
-            try:
-                return _or_send(content)
-            except Exception as e:
-                logger.warning(f"[media] OpenRouter falhou (tentativa {idx + 1}/{len(attempts)}): {e}")
-
-    logger.error("[media] Todos os provedores falharam para transcrição de mídia.")
+    logger.error("[media] Todos os provedores falharam para leitura de imagem.")
     return None
 
 
@@ -1474,6 +1558,215 @@ def _voice_reply_enabled() -> bool:
     return flag not in {"0", "false", "no", "off"}
 
 
+# Handoff para o humano. A IA marca a resposta com [[HANDOFF: motivo]]; o marcador sai do
+# texto que vai ao lead e vira uma mensagem real no self-chat do dono. Antes disso a IA
+# dizia "já avisei o Gustavo" sem que nada acontecesse — bloqueador do QA de 21/08.
+_HANDOFF_PATTERN = re.compile(r"\[\[\s*HANDOFF\s*:?\s*(?P<motivo>[^\]]{0,200})\]\]", re.IGNORECASE)
+_handoff_sent_at: dict[str, float] = {}
+_handoff_lock = threading.Lock()
+HANDOFF_COOLDOWN_S = 900
+
+
+def _recent_chat_lines(chat_id: str, limit: int = 8) -> list[str]:
+    """Últimas trocas do chat, para o dono não receber o handoff sem contexto."""
+    if not _MSG_DB_PATH.exists():
+        return []
+    try:
+        conn = sqlite3.connect(f"file:{_MSG_DB_PATH}?mode=ro", uri=True, timeout=5)
+    except sqlite3.Error as err:
+        logger.warning(f"[handoff] histórico indisponível: {err}")
+        return []
+    try:
+        rows = conn.execute(
+            """
+            SELECT from_me, sender_name, body FROM messages
+            WHERE chat_id = ? AND body IS NOT NULL AND body != ''
+            ORDER BY timestamp DESC LIMIT ?
+            """,
+            (chat_id, limit),
+        ).fetchall()
+    except sqlite3.Error as err:
+        logger.warning(f"[handoff] leitura do histórico falhou: {err}")
+        return []
+    finally:
+        conn.close()
+
+    lines = []
+    for from_me, sender_name, body in reversed(rows):
+        who = "AYA" if from_me else (sender_name or "Lead")
+        text = " ".join(str(body).split())
+        lines.append(f"{who}: {text[:180]}")
+    return lines
+
+
+def _notify_owner_handoff(chat_id: str, reason: str) -> bool:
+    """Manda o card de handoff para o dono. Retorna True se a mensagem saiu de verdade."""
+    owner_number = config.whatsapp_owner_number
+    if not owner_number:
+        logger.warning("[handoff] WHATSAPP_OWNER_NUMBER vazio — sem para quem avisar")
+        return False
+
+    now = time.time()
+    with _handoff_lock:
+        last = _handoff_sent_at.get(chat_id, 0)
+        if now - last < HANDOFF_COOLDOWN_S:
+            logger.info(f"[handoff] chat={chat_id!r} já avisado há {int(now - last)}s — sem repetir")
+            return True
+        _handoff_sent_at[chat_id] = now
+
+    contact = (_load_personal_contacts() or {}).get(chat_id) or {}
+    name = contact.get("name") or "sem nome"
+    phone = "".join(c for c in str(chat_id).split("@")[0].split(":")[0] if c.isdigit())
+    lines = _recent_chat_lines(chat_id)
+
+    card = [
+        "🤝 *Handoff — lead precisa de você*",
+        f"*Contato:* {name}",
+        f"*Número:* +{phone}" if phone else f"*Chat:* {chat_id}",
+        f"*Motivo:* {(reason or 'não informado').strip()}",
+    ]
+    if lines:
+        card += ["", "*Últimas mensagens:*", *lines]
+
+    owner_jid = f"{''.join(c for c in owner_number if c.isdigit())}@s.whatsapp.net"
+    try:
+        message_id = _human_send(owner_jid, "\n".join(card))
+    except Exception as err:
+        with _handoff_lock:
+            _handoff_sent_at.pop(chat_id, None)
+        logger.error(f"[handoff] falha ao avisar o dono sobre {chat_id!r}: {err}")
+        return False
+    if not message_id:
+        with _handoff_lock:
+            _handoff_sent_at.pop(chat_id, None)
+        logger.error(f"[handoff] bridge não confirmou o aviso sobre {chat_id!r}")
+        return False
+    logger.info(f"[handoff] dono avisado sobre {chat_id!r} motivo={reason!r} message_id={message_id!r}")
+    return True
+
+
+# Recepção sem resposta. No QA uma mensagem apareceu no WhatsApp Web e morreu sem retorno
+# — o provider tinha estourado a cota e ninguém ficou sabendo. Toda mensagem despachada
+# para o agente entra aqui e só sai quando a entrega confirma; o que passar do prazo vira
+# log de erro e aviso ao dono.
+_pending_inbound: dict[str, dict] = {}
+_pending_inbound_lock = threading.Lock()
+_watchdog_started = False
+
+
+def _unanswered_alert_seconds() -> int:
+    try:
+        return max(30, int(os.getenv("WHATSAPP_UNANSWERED_ALERT_S", "180")))
+    except ValueError:
+        return 180
+
+
+def _track_inbound(chat_id: str, message_id: str, preview: str) -> None:
+    if not chat_id:
+        return
+    with _pending_inbound_lock:
+        _pending_inbound[chat_id] = {
+            "message_id": message_id or "",
+            "at": time.time(),
+            "preview": " ".join((preview or "").split())[:120],
+        }
+
+
+def _clear_inbound(chat_id: str) -> None:
+    if not chat_id:
+        return
+    with _pending_inbound_lock:
+        _pending_inbound.pop(chat_id, None)
+
+
+def _sweep_unanswered(now: float | None = None) -> list[tuple[str, dict]]:
+    """Devolve e remove os inbounds que passaram do prazo sem resposta."""
+    now = time.time() if now is None else now
+    limit = _unanswered_alert_seconds()
+    with _pending_inbound_lock:
+        stale = [(cid, data) for cid, data in _pending_inbound.items() if now - data["at"] >= limit]
+        for cid, _ in stale:
+            _pending_inbound.pop(cid, None)
+    return stale
+
+
+def _report_unanswered(stale: list[tuple[str, dict]]) -> None:
+    owner_number = config.whatsapp_owner_number
+    owner_jid = f"{''.join(c for c in owner_number if c.isdigit())}@s.whatsapp.net" if owner_number else ""
+    for chat_id, data in stale:
+        waited = int(time.time() - data["at"])
+        logger.error(
+            f"[inbound-watchdog] mensagem sem resposta chat={chat_id!r} "
+            f"message_id={data['message_id']!r} esperando={waited}s preview={data['preview']!r}"
+        )
+        if not owner_jid:
+            continue
+        phone = "".join(c for c in str(chat_id).split("@")[0].split(":")[0] if c.isdigit())
+        try:
+            _human_send(
+                owner_jid,
+                "⚠️ *Mensagem sem resposta*\n"
+                f"*Contato:* +{phone}\n"
+                f"*Esperando há:* {waited}s\n"
+                f"*Mensagem:* {data['preview'] or '(sem texto)'}\n"
+                "A IA recebeu mas não conseguiu responder. Vale olhar essa conversa.",
+            )
+        except Exception as err:
+            logger.error(f"[inbound-watchdog] não consegui avisar o dono sobre {chat_id!r}: {err}")
+
+
+def _start_inbound_watchdog() -> None:
+    global _watchdog_started
+    if _watchdog_started:
+        return
+    _watchdog_started = True
+
+    def _loop():
+        while True:
+            time.sleep(60)
+            try:
+                stale = _sweep_unanswered()
+                if stale:
+                    _report_unanswered(stale)
+            except Exception as err:
+                logger.error(f"[inbound-watchdog] varredura falhou: {err}")
+
+    threading.Thread(target=_loop, daemon=True, name="wa-inbound-watchdog").start()
+    logger.info(f"[inbound-watchdog] ativo (alerta em {_unanswered_alert_seconds()}s sem resposta)")
+
+
+def _extract_handoff(text: str) -> tuple[str, str | None]:
+    """Separa o marcador de handoff do texto que vai para o lead."""
+    match = _HANDOFF_PATTERN.search(text or "")
+    if not match:
+        return text, None
+    return _HANDOFF_PATTERN.sub("", text).strip(), (match.group("motivo") or "").strip()
+
+
+# Modalidade da última mensagem recebida por chat. Áudio responde áudio; texto responde
+# texto. Sem isso, toda resposta virava nota de voz — inclusive na abertura e para quem
+# tinha escrito, que foi uma das devolutivas do QA.
+_last_inbound_audio: dict[str, bool] = {}
+_last_inbound_audio_lock = threading.Lock()
+
+
+def _remember_inbound_modality(chat_id: str, was_audio: bool) -> None:
+    if not chat_id:
+        return
+    with _last_inbound_audio_lock:
+        if len(_last_inbound_audio) > 500:
+            _last_inbound_audio.clear()
+        _last_inbound_audio[chat_id] = bool(was_audio)
+
+
+def _voice_reply_allowed_for(chat_id: str) -> bool:
+    """Só responde em nota de voz quando a última mensagem daquele chat foi áudio."""
+    if not _voice_reply_enabled():
+        return False
+    with _last_inbound_audio_lock:
+        return bool(_last_inbound_audio.get(chat_id))
+
+
 def _send_bridge_media(chat_id: str, file_path: str, media_type: str = "audio") -> str:
     _assert_delivery_allowed(chat_id)
     payload = json.dumps({
@@ -1543,7 +1836,7 @@ def _prepare_spoken_for_tts(spoken: str) -> str:
 
 def _maybe_send_voice(chat_id: str, text: str) -> str | None:
     """Gera PTT e retorna o `messageId` confirmado; `None` aciona fallback em texto."""
-    if not _voice_reply_enabled():
+    if not _voice_reply_allowed_for(chat_id):
         return False
     blob = (text or "").strip()
     if not blob:
@@ -1622,6 +1915,7 @@ def _deliver_contact_reply(chat_id: str, clean_text: str) -> str:
         last_message_id = _human_send(chat_id, after, automation=True) or last_message_id
     if not last_message_id:
         raise RuntimeError("entrega sem messageId confirmado")
+    _clear_inbound(chat_id)
     try:
         _followup_register_outbound(chat_id, last_message_id)
     except Exception as err:
@@ -6984,10 +7278,11 @@ def pre_gateway_dispatch(*args, **kwargs):
             if len(_seen_message_ids) > 500:  # evitar crescimento ilimitado
                 _seen_message_ids.clear()
 
-    # Processamento de Mídia (Áudio e Imagem) via Gemini
+    # Processamento de mídia: áudio pelo Fish ASR, imagem pelos modelos de visão.
     media_info = _get_media_info(event)
     sale_detection = None
     image_analysis_attempted = False
+    audio_transcribed = False
     if media_info["has_media"] and media_info["media_urls"]:
         media_type = media_info["media_type"]
         logger.info(f"[sale-detect] mídia recebida: media_type={media_type!r} urls={media_info['media_urls']!r}")
@@ -7006,6 +7301,7 @@ def pre_gateway_dispatch(*args, **kwargs):
             result_text = _process_media_message(event)
             if result_text:
                 if media_type in ["ptt", "audio"]:
+                    audio_transcribed = True
                     display_text = f'[Áudio: "{result_text}"]'
                 else:
                     display_text = f'[Imagem: {result_text}]'
@@ -7058,6 +7354,13 @@ def pre_gateway_dispatch(*args, **kwargs):
     
     is_owner = (_normalize_brazilian_phone(clean_sender) == _normalize_brazilian_phone(clean_owner))
     is_self_chat = (clean_sender == clean_chat) and is_owner
+
+    # Modalidade da mensagem do lead decide a modalidade da resposta. Eco do próprio bot
+    # não conta — senão a primeira nota de voz enviada travaria o chat em áudio.
+    # Transcrição que falhou não autoriza responder em áudio: o QA pede fallback em texto,
+    # e responder por voz um áudio que a IA não entendeu é o pior dos dois mundos.
+    if not _is_from_me:
+        _remember_inbound_modality(chat_id, audio_transcribed)
 
     # Gate de atendimento por contato. Importação/sync nunca cria atendimento;
     # contatos legados existentes ficam desligados até habilitação explícita.
@@ -8320,6 +8623,11 @@ def pre_gateway_dispatch(*args, **kwargs):
     except Exception as e:
         logger.error(f"Erro ao aplicar override de modelo: {e}")
 
+    # Daqui a mensagem segue para o agente. A partir deste ponto ela é cobrada: se a
+    # entrega não confirmar dentro do prazo, o watchdog avisa o dono.
+    if not is_owner and not _is_from_me:
+        _track_inbound(chat_id, str(media_info.get("message_id") or ""), getattr(event, "text", "") or "")
+
     return None
 
 
@@ -9095,7 +9403,24 @@ def transform_llm_output(*args, **kwargs):
     if any(re.search(p, str(response_text), re.IGNORECASE) for p in _GATEWAY_PROVIDER_ERROR_PATTERNS):
         logger.warning(f"[transform_llm_output] erro de provider/gateway suprimido chat={chat_id!r}: {response_text!r}")
         _notify_owner_gateway_error(chat_id, str(response_text))
+        # O dono já foi avisado por este caminho; o watchdog não precisa avisar de novo.
+        _clear_inbound(str(chat_id))
         return "\n"
+
+    # O marcador de handoff nunca chega ao lead: sai do texto e vira aviso real ao dono.
+    # O aviso sai antes de qualquer decisão sobre a resposta — se a IA marcou handoff e não
+    # escreveu nada ao lead, o dono ainda assim precisa ser avisado.
+    response_text, handoff_reason = _extract_handoff(str(response_text))
+    if handoff_reason is not None and chat_id:
+        # Em thread: _human_send dorme entre bolhas, e o lead não pode esperar o card do
+        # dono sair para receber a própria resposta. Falha aqui só vira log.
+        def _notify_bg(cid=str(chat_id), reason=handoff_reason):
+            try:
+                _notify_owner_handoff(cid, reason)
+            except Exception as err:
+                logger.error(f"[handoff] erro inesperado ao avisar o dono: {err}")
+
+        threading.Thread(target=_notify_bg, daemon=True, name="wa-handoff-notify").start()
 
     clean_text = _prepare_contact_reply(str(response_text))
     if not clean_text:
@@ -9294,6 +9619,11 @@ def register(ctx):
         _enforce_gateway_safety_config()
     except Exception as safety_err:
         logger.error(f"Falha ao fixar configuração anti-vazamento: {safety_err}")
+
+    try:
+        _start_inbound_watchdog()
+    except Exception as watchdog_err:
+        logger.error(f"Falha ao subir o watchdog de recepção: {watchdog_err}")
 
     # Auto-inicialização e cópia dos arquivos da ponte
     try:

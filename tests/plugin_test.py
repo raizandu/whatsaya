@@ -4,6 +4,7 @@ import os
 import json
 import sqlite3
 import tempfile
+import time
 import urllib.error
 import unittest
 import sys
@@ -1028,61 +1029,60 @@ class TestMediaMessageProcessing(BaseWhatsAppManagerTest):
         self.assertEqual(whatsapp_manager._get_mime_type("file.unknown"), "application/octet-stream")
 
     @patch("os.path.exists", return_value=True)
-    @patch("builtins.open", new_callable=unittest.mock.mock_open, read_data=b"mock-audio-data")
     @patch("os.remove")
-    @patch("urllib.request.urlopen")
-    @patch.dict(os.environ, {"GOOGLE_API_KEY": "test-key"})
-    def test_process_media_message_audio(self, mock_urlopen, mock_remove, mock_open, mock_exists):
-        """Verifica processamento de áudio com chamada do Gemini mockada."""
+    @patch.dict(os.environ, {"GOOGLE_API_KEY": "test-key", "FISH_API_KEY": "fk-test"})
+    def test_process_media_message_audio(self, mock_remove, mock_exists):
+        """Áudio vai para o Fish ASR, não para o Gemini — e o arquivo é apagado depois."""
         event = MagicMock()
         event.has_media = True
         event.media_type = "ptt"
         event.media_urls = ["/path/to/voice.ogg"]
-        
-        mock_response = MagicMock()
-        mock_response.read.return_value = json.dumps({
-            "candidates": [{
-                "content": {
-                    "parts": [{
-                        "text": "bom dia, tudo bem?"
-                    }]
-                }
-            }]
-        }).encode("utf-8")
-        mock_urlopen.return_value.__enter__.return_value = mock_response
 
-        text = whatsapp_manager._process_media_message(event)
+        with patch.object(whatsapp_manager, "_transcribe_via_fish", return_value="bom dia, tudo bem?") as mock_fish, \
+             patch("urllib.request.urlopen") as mock_urlopen:
+            text = whatsapp_manager._process_media_message(event)
+
         self.assertEqual(text, "bom dia, tudo bem?")
+        mock_fish.assert_called_once_with("/path/to/voice.ogg")
+        # Nenhum provedor de LLM é chamado para áudio.
+        mock_urlopen.assert_not_called()
         mock_remove.assert_called_once_with("/path/to/voice.ogg")
 
     @patch("os.path.exists", return_value=True)
-    @patch("builtins.open", new_callable=unittest.mock.mock_open, read_data=b"mock-audio-data")
     @patch("os.remove")
-    @patch("urllib.request.urlopen")
-    @patch.dict(os.environ, {"GOOGLE_API_KEY": "test-key", "WHATSAPP_CLIENT_MEDIA_MODEL": "gemini-custom-media-model"})
-    def test_process_media_message_audio_custom_model(self, mock_urlopen, mock_remove, mock_open, mock_exists):
-        """Verifica processamento de áudio usando o modelo configurado em WHATSAPP_CLIENT_MEDIA_MODEL."""
+    @patch.dict(os.environ, {"GOOGLE_API_KEY": "test-key", "FISH_API_KEY": ""})
+    def test_process_media_message_audio_sem_fish(self, mock_remove, mock_exists):
+        """Sem chave do Fish não há transcrição — e o áudio some do disco do mesmo jeito."""
         event = MagicMock()
         event.has_media = True
         event.media_type = "ptt"
         event.media_urls = ["/path/to/voice.ogg"]
-        
+
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            self.assertIsNone(whatsapp_manager._process_media_message(event))
+            mock_urlopen.assert_not_called()
+        mock_remove.assert_called_once_with("/path/to/voice.ogg")
+
+    @patch("os.path.exists", return_value=True)
+    @patch("builtins.open", new_callable=unittest.mock.mock_open, read_data=b"mock-image-data")
+    @patch("urllib.request.urlopen")
+    @patch.dict(os.environ, {"GOOGLE_API_KEY": "test-key", "WHATSAPP_CLIENT_MEDIA_MODEL": "gemini-custom-media-model"})
+    def test_process_media_message_image_custom_model(self, mock_urlopen, mock_open, mock_exists):
+        """WHATSAPP_CLIENT_MEDIA_MODEL agora vale para imagem — áudio é do Fish."""
+        event = MagicMock()
+        event.has_media = True
+        event.media_type = "image"
+        event.media_urls = ["/path/to/foto.jpg"]
+
         mock_response = MagicMock()
         mock_response.read.return_value = json.dumps({
-            "candidates": [{
-                "content": {
-                    "parts": [{
-                        "text": "bom dia, tudo bem?"
-                    }]
-                }
-            }]
+            "candidates": [{"content": {"parts": [{"text": "um comprovante de pix"}]}}]
         }).encode("utf-8")
         mock_urlopen.return_value.__enter__.return_value = mock_response
 
         text = whatsapp_manager._process_media_message(event)
-        self.assertEqual(text, "bom dia, tudo bem?")
-        
-        # Verificar se a URL contém o modelo correto
+        self.assertEqual(text, "um comprovante de pix")
+
         args, kwargs = mock_urlopen.call_args
         request_obj = args[0]
         self.assertIn("gemini-custom-media-model", request_obj.full_url)
@@ -5070,13 +5070,19 @@ class TestProcessMediaMessage(BaseWhatsAppManagerTest):
         ]
 
     def test_no_api_key_returns_none(self):
-        """Sem API key: retorna None."""
+        """Sem nenhuma chave: retorna None e não chama ninguém."""
         import whatsapp_manager
         event = self._make_event("ptt", "/tmp/audio.ogg")
         patches = self._config_patch()
-        with patches[0], patches[1], patches[2], patches[3]:
+        # FISH_API_KEY explicitamente vazia: dentro do container a chave real está no env
+        # e o teste faria uma chamada de verdade ao Fish.
+        with patches[0], patches[1], patches[2], patches[3], \
+             patch.dict(os.environ, {"FISH_API_KEY": ""}, clear=False), \
+             patch("urllib.request.urlopen") as mock_urlopen, \
+             patch("os.remove"):
             result = whatsapp_manager._process_media_message(event)
         self.assertIsNone(result)
+        mock_urlopen.assert_not_called()
 
     def test_file_not_found_returns_none(self):
         """Arquivo de mídia inexistente: retorna None."""
@@ -5100,24 +5106,18 @@ class TestProcessMediaMessage(BaseWhatsAppManagerTest):
     @patch("urllib.request.urlopen")
     @patch("os.remove")
     @patch("os.path.exists", return_value=True)
-    @patch("builtins.open", new_callable=MagicMock)
-    def test_gemini_audio_transcription(self, mock_open, mock_exists, mock_remove, mock_urlopen):
-        """Gemini transcreve áudio com sucesso."""
+    def test_audio_vai_para_o_fish_e_nao_para_o_gemini(self, mock_exists, mock_remove, mock_urlopen):
+        """Mesmo com chave do Google preenchida, áudio é transcrito pelo Fish."""
         import whatsapp_manager
-        mock_open.return_value.__enter__ = lambda s: s
-        mock_open.return_value.__exit__ = MagicMock(return_value=False)
-        mock_open.return_value.read.return_value = b"fake audio data"
-
-        gemini_response = {"candidates": [{"content": {"parts": [{"text": "olá tudo bem"}]}}]}
-        mock_resp = MagicMock()
-        mock_resp.read.return_value = json.dumps(gemini_response).encode()
-        mock_urlopen.return_value.__enter__.return_value = mock_resp
 
         event = self._make_event("ptt", "/tmp/audio.ogg")
         patches = self._config_patch(google="fake-key")
-        with patches[0], patches[1], patches[2], patches[3]:
+        with patches[0], patches[1], patches[2], patches[3], \
+             patch.object(whatsapp_manager, "_transcribe_via_fish", return_value="olá tudo bem") as mock_fish:
             result = whatsapp_manager._process_media_message(event)
         self.assertEqual(result, "olá tudo bem")
+        mock_fish.assert_called_once_with("/tmp/audio.ogg")
+        mock_urlopen.assert_not_called()
 
     @patch("urllib.request.urlopen")
     @patch("os.remove")
@@ -5146,14 +5146,14 @@ class TestProcessMediaMessage(BaseWhatsAppManagerTest):
     @patch("os.path.exists", return_value=True)
     @patch("builtins.open", new_callable=MagicMock)
     def test_gemini_fails_returns_none(self, mock_open, mock_exists, mock_remove, mock_urlopen):
-        """Gemini falha e sem outros providers: retorna None."""
+        """Gemini falha na imagem e sem outros providers: retorna None."""
         import whatsapp_manager
         mock_open.return_value.__enter__ = lambda s: s
         mock_open.return_value.__exit__ = MagicMock(return_value=False)
-        mock_open.return_value.read.return_value = b"fake audio data"
+        mock_open.return_value.read.return_value = b"fake image data"
         mock_urlopen.side_effect = Exception("Gemini offline")
 
-        event = self._make_event("ptt", "/tmp/audio.ogg")
+        event = self._make_event("image", "/tmp/foto.jpg")
         patches = self._config_patch(google="fake-key")
         with patches[0], patches[1], patches[2], patches[3]:
             result = whatsapp_manager._process_media_message(event)
@@ -5803,6 +5803,202 @@ class TestPreToolCall(BaseWhatsAppManagerTest):
         # Pode ser None (reconhecido como owner) ou bloqueado dependendo da normalização
         # O importante é não lançar exceção
         self.assertIn(result, [None, "Ferramentas não disponíveis para sessões de contato."])
+
+
+class TestFishAsr(unittest.TestCase):
+    """Transcrição pela API do Fish — áudio não passa mais pelos modelos do OpenRouter."""
+
+    def test_multipart_carrega_campos_e_binario(self):
+        from whatsapp_manager import _build_multipart
+        body, content_type = _build_multipart(
+            {"language": "pt", "ignore_timestamps": "true"}, "audio", "aud.ogg", b"\x00\x01OGG"
+        )
+        self.assertTrue(content_type.startswith("multipart/form-data; boundary=----whatsaya"))
+        boundary = content_type.split("boundary=")[1].encode()
+        self.assertIn(b'name="language"', body)
+        self.assertIn(b"pt", body)
+        self.assertIn(b'name="audio"; filename="aud.ogg"', body)
+        self.assertIn(b"\x00\x01OGG", body)
+        self.assertTrue(body.endswith(b"--" + boundary + b"--\r\n"))
+
+    def test_sem_chave_nao_chama_api(self):
+        import whatsapp_manager
+        with patch.dict(os.environ, {"FISH_API_KEY": ""}, clear=False), \
+             patch("urllib.request.urlopen") as mock_open:
+            self.assertIsNone(whatsapp_manager._transcribe_via_fish("/tmp/qualquer.ogg"))
+            mock_open.assert_not_called()
+
+    def test_transcreve_e_devolve_texto(self):
+        import whatsapp_manager
+        resp = MagicMock()
+        resp.read.return_value = json.dumps(
+            {"text": " quanto custa a implementação? ", "duration": 4.2, "language_code": "pt"}
+        ).encode()
+        resp.__enter__ = lambda s: s
+        resp.__exit__ = lambda *a: None
+        with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
+            tmp.write(b"audio-bytes")
+            path = tmp.name
+        try:
+            with patch.dict(os.environ, {"FISH_API_KEY": "fk-test"}, clear=False), \
+                 patch("urllib.request.urlopen", return_value=resp):
+                self.assertEqual(
+                    whatsapp_manager._transcribe_via_fish(path),
+                    "quanto custa a implementação?",
+                )
+        finally:
+            os.unlink(path)
+
+    def test_402_nao_repete_tentativa(self):
+        import whatsapp_manager
+        erro = urllib.error.HTTPError("u", 402, "Payment Required", {}, None)
+        with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
+            tmp.write(b"audio-bytes")
+            path = tmp.name
+        try:
+            with patch.dict(os.environ, {"FISH_API_KEY": "fk-test"}, clear=False), \
+                 patch("urllib.request.urlopen", side_effect=erro) as mock_open:
+                self.assertIsNone(whatsapp_manager._transcribe_via_fish(path, attempts=3))
+                # crédito esgotado não melhora com insistência
+                self.assertEqual(mock_open.call_count, 1)
+        finally:
+            os.unlink(path)
+
+    def test_erro_transitorio_faz_retry(self):
+        import whatsapp_manager
+        resp = MagicMock()
+        resp.read.return_value = json.dumps({"text": "ok"}).encode()
+        resp.__enter__ = lambda s: s
+        resp.__exit__ = lambda *a: None
+        with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
+            tmp.write(b"audio-bytes")
+            path = tmp.name
+        try:
+            with patch.dict(os.environ, {"FISH_API_KEY": "fk-test"}, clear=False), \
+                 patch("urllib.request.urlopen", side_effect=[TimeoutError("lento"), resp]) as mock_open:
+                self.assertEqual(whatsapp_manager._transcribe_via_fish(path), "ok")
+                self.assertEqual(mock_open.call_count, 2)
+        finally:
+            os.unlink(path)
+
+
+class TestVoiceModalityGate(unittest.TestCase):
+    """Áudio responde áudio; texto responde texto."""
+
+    def setUp(self):
+        import whatsapp_manager
+        whatsapp_manager._last_inbound_audio.clear()
+
+    def test_texto_nao_libera_voz(self):
+        import whatsapp_manager
+        with patch.dict(os.environ, {"FISH_API_KEY": "fk", "WHATSAPP_AUTO_TTS": "true"}, clear=False):
+            whatsapp_manager._remember_inbound_modality("5562@s.whatsapp.net", False)
+            self.assertFalse(whatsapp_manager._voice_reply_allowed_for("5562@s.whatsapp.net"))
+
+    def test_audio_libera_voz(self):
+        import whatsapp_manager
+        with patch.dict(os.environ, {"FISH_API_KEY": "fk", "WHATSAPP_AUTO_TTS": "true"}, clear=False):
+            whatsapp_manager._remember_inbound_modality("5562@s.whatsapp.net", True)
+            self.assertTrue(whatsapp_manager._voice_reply_allowed_for("5562@s.whatsapp.net"))
+
+    def test_transcricao_falha_mantem_texto(self):
+        """Áudio que não foi transcrito não autoriza responder em áudio."""
+        import whatsapp_manager
+        with patch.dict(os.environ, {"FISH_API_KEY": "fk", "WHATSAPP_AUTO_TTS": "true"}, clear=False):
+            # o hook passa audio_transcribed=False quando o ASR não devolveu texto
+            whatsapp_manager._remember_inbound_modality("5562@s.whatsapp.net", False)
+            self.assertFalse(whatsapp_manager._voice_reply_allowed_for("5562@s.whatsapp.net"))
+
+    def test_chat_desconhecido_fica_em_texto(self):
+        import whatsapp_manager
+        with patch.dict(os.environ, {"FISH_API_KEY": "fk", "WHATSAPP_AUTO_TTS": "true"}, clear=False):
+            self.assertFalse(whatsapp_manager._voice_reply_allowed_for("nunca-visto@s.whatsapp.net"))
+
+    def test_auto_tts_off_vence_o_audio(self):
+        import whatsapp_manager
+        with patch.dict(os.environ, {"FISH_API_KEY": "fk", "WHATSAPP_AUTO_TTS": "false"}, clear=False):
+            whatsapp_manager._remember_inbound_modality("5562@s.whatsapp.net", True)
+            self.assertFalse(whatsapp_manager._voice_reply_allowed_for("5562@s.whatsapp.net"))
+
+
+class TestHandoffMarker(unittest.TestCase):
+    """O marcador vira aviso real e nunca chega ao lead."""
+
+    def test_extrai_motivo_e_limpa_texto(self):
+        from whatsapp_manager import _extract_handoff
+        texto, motivo = _extract_handoff(
+            "Vou pedir pro Gustavo te chamar.\n[[HANDOFF: cliente ativo pedindo suporte]]"
+        )
+        self.assertEqual(texto, "Vou pedir pro Gustavo te chamar.")
+        self.assertEqual(motivo, "cliente ativo pedindo suporte")
+
+    def test_sem_marcador_nao_dispara(self):
+        from whatsapp_manager import _extract_handoff
+        texto, motivo = _extract_handoff("Resposta comum, sem handoff.")
+        self.assertEqual(texto, "Resposta comum, sem handoff.")
+        self.assertIsNone(motivo)
+
+    def test_marcador_sem_motivo_ainda_dispara(self):
+        from whatsapp_manager import _extract_handoff
+        texto, motivo = _extract_handoff("[[HANDOFF]]")
+        self.assertEqual(texto, "")
+        self.assertEqual(motivo, "")
+
+    def test_cooldown_evita_avisar_duas_vezes(self):
+        import whatsapp_manager
+        whatsapp_manager._handoff_sent_at.clear()
+        with patch.object(whatsapp_manager, "_human_send", return_value="msg-1") as mock_send, \
+             patch.object(whatsapp_manager, "_load_personal_contacts", return_value={}), \
+             patch.object(whatsapp_manager, "_recent_chat_lines", return_value=["Lead: oi"]), \
+             patch.dict(os.environ, {"WHATSAPP_OWNER_NUMBER": "5562936180895"}, clear=False):
+            self.assertTrue(whatsapp_manager._notify_owner_handoff("5511@s.whatsapp.net", "quer humano"))
+            self.assertTrue(whatsapp_manager._notify_owner_handoff("5511@s.whatsapp.net", "quer humano"))
+            self.assertEqual(mock_send.call_count, 1)
+        card = mock_send.call_args[0][1]
+        self.assertIn("Handoff", card)
+        self.assertIn("quer humano", card)
+        self.assertIn("Lead: oi", card)
+
+    def test_falha_de_envio_libera_nova_tentativa(self):
+        import whatsapp_manager
+        whatsapp_manager._handoff_sent_at.clear()
+        with patch.object(whatsapp_manager, "_human_send", return_value=None), \
+             patch.object(whatsapp_manager, "_load_personal_contacts", return_value={}), \
+             patch.object(whatsapp_manager, "_recent_chat_lines", return_value=[]), \
+             patch.dict(os.environ, {"WHATSAPP_OWNER_NUMBER": "5562936180895"}, clear=False):
+            self.assertFalse(whatsapp_manager._notify_owner_handoff("5511@s.whatsapp.net", "x"))
+        self.assertNotIn("5511@s.whatsapp.net", whatsapp_manager._handoff_sent_at)
+
+
+class TestInboundWatchdog(unittest.TestCase):
+    """Mensagem despachada que não recebe resposta vira alerta."""
+
+    def setUp(self):
+        import whatsapp_manager
+        whatsapp_manager._pending_inbound.clear()
+
+    def test_entrega_confirmada_nao_alerta(self):
+        import whatsapp_manager
+        whatsapp_manager._track_inbound("5511@s.whatsapp.net", "msg-1", "quanto custa?")
+        whatsapp_manager._clear_inbound("5511@s.whatsapp.net")
+        self.assertEqual(whatsapp_manager._sweep_unanswered(now=time.time() + 9999), [])
+
+    def test_sem_resposta_no_prazo_vira_alerta(self):
+        import whatsapp_manager
+        with patch.dict(os.environ, {"WHATSAPP_UNANSWERED_ALERT_S": "180"}, clear=False):
+            whatsapp_manager._track_inbound("5511@s.whatsapp.net", "msg-1", "  quanto   custa? ")
+            self.assertEqual(whatsapp_manager._sweep_unanswered(), [])
+            stale = whatsapp_manager._sweep_unanswered(now=time.time() + 181)
+            self.assertEqual(len(stale), 1)
+            chat_id, data = stale[0]
+            self.assertEqual(chat_id, "5511@s.whatsapp.net")
+            self.assertEqual(data["preview"], "quanto custa?")
+
+    def test_alerta_sai_uma_vez_so(self):
+        import whatsapp_manager
+        whatsapp_manager._track_inbound("5511@s.whatsapp.net", "msg-1", "oi")
+        self.assertEqual(len(whatsapp_manager._sweep_unanswered(now=time.time() + 9999)), 1)
+        self.assertEqual(whatsapp_manager._sweep_unanswered(now=time.time() + 9999), [])
 
 
 if __name__ == "__main__":

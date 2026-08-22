@@ -47,11 +47,19 @@ Desde o Hermes Agent v0.19 ("Quicksilver"), o **core** (`hermes_plugins.whatsapp
 
 | Hook | Linha | Responsabilidade |
 |---|---|---|
-| `pre_gateway_dispatch` | ~5485 | O maior. Roteia dono × cliente, executa comandos de controle, update de contato em linguagem natural, catálogo de produtos e registro de vendas |
-| `pre_llm_call` | ~6730 | Detecta pergunta cross-session ("o que a Isabel falou sobre X?") e injeta histórico de `whatsapp_messages.db` + `state.db` no contexto |
-| `pre_tool_call` | ~7017 | Firewall: aborta qualquer chamada de ferramenta vinda do perfil `whatsapp` (clientes) |
-| `post_llm_call` | ~7048 | Suprime avisos do sistema (reset de 24h, metadados `◆ Model: ...`) |
-| `register` | ~7211 | Instala `bridge.js` no volume, migra a sessão Baileys do path antigo, inicializa SOULs e `personal_contacts.json` |
+| `pre_gateway_dispatch` | ~7233 | O maior. Roteia dono × cliente, executa comandos de controle, update de contato em linguagem natural, catálogo de produtos e registro de vendas |
+| `pre_llm_call` | ~8626 | Detecta pergunta cross-session ("o que a Isabel falou sobre X?") e injeta histórico de `whatsapp_messages.db` + `state.db` no contexto |
+| `pre_tool_call` | ~8957 | Firewall: aborta qualquer chamada de ferramenta vinda do perfil `whatsapp` (clientes) |
+| `transform_llm_output` | ~9378 | Único caminho de saída para cliente: extrai o marcador `[[HANDOFF: motivo]]`, dispara o aviso real ao dono e agenda a entrega em bolhas. Devolve `"\n"` para o Hermes não reenviar o bloco |
+| `post_llm_call` | ~9438 | Só sessão do dono: executa os `EXEC` de update de contato. Para cliente retorna `None` — o Hermes ignora o retorno deste hook no turno final |
+| `register` | ~9604 | Instala `bridge.js` no volume, migra a sessão Baileys do path antigo, inicializa SOULs e `personal_contacts.json`, e sobe o watchdog de recepção |
+
+### Handoff real e watchdog de recepção
+
+Duas coisas que a IA **não** consegue fazer por conta própria, e que o plugin resolve fora do prompt:
+
+- **Handoff.** A persona termina a resposta com `[[HANDOFF: motivo]]`. `transform_llm_output` tira o marcador antes de a mensagem sair, e `_notify_owner_handoff` manda para o self-chat do dono um card com nome, número, motivo e as últimas 8 mensagens. Há cooldown de 15 min por chat, e o cooldown é revertido se o envio falhar — melhor repetir o aviso do que engolir. Só depois de escrever o marcador a IA pode dizer que avisou; sem ele, "já encaminhei" é alucinação e o prompt proíbe.
+- **Watchdog de recepção.** Toda mensagem de lead que chega ao fim de `pre_gateway_dispatch` entra em `_pending_inbound`; a entrega confirmada em `_deliver_contact_reply` remove. O que passar de `WHATSAPP_UNANSWERED_ALERT_S` (padrão 180s) vira `logger.error` e aviso ao dono. Existe porque no QA de 21/08 uma mensagem morreu em silêncio: o Codex estourou a cota (`429`) e o fallback OpenRouter estava sem crédito.
 
 ### Dois perfis de isolamento
 
@@ -109,12 +117,12 @@ Tudo o que muda por cliente é **variável de ambiente** + os templates em `depl
 | `WHATSAPP_OWNER_NUMBER` | Número sem `+`. Também lido pelo `bridge.js` |
 | `WHATSAPP_PIX_KEY` | Chave Pix quando o item do catálogo não define a sua. **Sem default de propósito** — errar aqui manda o pagamento do cliente para a conta errada |
 | `OPENROUTER_API_KEY` | Provider padrão. Deixe `GOOGLE_API_KEY` e `OPENAI_API_KEY` **vazias**: a cadeia é Google → OpenAI → OpenRouter e para na primeira chave preenchida |
-| `WHATSAPP_*_MODEL` / `*_PROVIDER` | Slugs do OpenRouter (`vendor/modelo`). Texto usa `deepseek/deepseek-v4-flash`; mídia precisa de modelo multimodal (`google/gemini-3.1-flash-lite`) porque o DeepSeek aceita só texto |
+| `WHATSAPP_*_MODEL` / `*_PROVIDER` | Slugs do OpenRouter (`vendor/modelo`). Texto usa `deepseek/deepseek-v4-flash`; `WHATSAPP_CLIENT_MEDIA_MODEL` é **só imagem** e precisa aceitar imagem (o DeepSeek é só texto). **Áudio não é modelo de LLM**: transcrição é do Fish ASR (`FISH_API_KEY`). Nenhum slug de texto/visão do OpenRouter aceita entrada de áudio — apontar áudio para lá devolve `404 No endpoints found that support input audio` e a mensagem chega ao agente como `[audio received]` cru |
 | `CONFIG_REPO` + `CONFIG_GITHUB_TOKEN` | **Vazios por padrão.** Opt-in para versionar contatos e personas num repo privado. Preencher só um dos dois faz o dono receber "não consegui sincronizar" no WhatsApp a cada contato e venda — preencha os dois ou nenhum. Sem `user/repo`, o dono cai em `config.github_user` (`HERMES_SETUP_GITHUB_USER` → `DEV_GITHUB_USER` → `raizandu`). Para backup sem GitHub: `deploy/backup-whatsaya.sh` |
 | `HERMES_SETUP_GITHUB_USER` / `HERMES_SETUP_GITHUB_REPO` | De onde o plugin se clona e se atualiza. Padrão: `raizandu` / `whatsaya` |
 | `KEEP_LOCAL_PLUGIN` | `true` — o boot e o `_self_update_plugin_code` não fazem fetch/reset no volume |
 | `WHATSAPP_GROUPS_ENABLED` | Padrão desligado. Mensagem de `@g.us` e `@broadcast` é descartada no ponto de entrada do `bridge.js` — não baixa mídia, não enfileira pro agente, não grava no histórico. Ligar é ato deliberado |
-| `FISH_API_KEY` (+ `FISH_REFERENCE_ID`, `FISH_TTS_MODEL`, `FISH_TTS_VOLUME`) | Voz das respostas (nota de voz via Fish Audio). **Vazia = áudio desligado, tudo vai em texto** — o encanamento (`tts.provider=fishaudio` → `deploy/scripts/fish_tts.py`) é auto-instalado pelo compose no boot; só falta a chave. `FISH_REFERENCE_ID` escolhe a voz; modelo default `s2.1-pro-free` (campanha grátis até 31/08/2026 — `fish_model_campaign_notice.sh` avisa o dono de trocar). Pix, endereço, link, e-mail e afins nunca vão em áudio (regra `written_only` no `fish_tts.py`). Detalhes: `deploy/ONBOARDING.md` |
+| `FISH_API_KEY` (+ `FISH_REFERENCE_ID`, `FISH_TTS_MODEL`, `FISH_TTS_VOLUME`) | Voz das respostas **e transcrição dos áudios recebidos** (TTS `/v1/tts` + ASR `/v1/asr`, mesma chave). Atenção: a **API credit do Fish é uma carteira separada** da plataforma — o TTS pode seguir funcionando com o modelo grátis enquanto o ASR devolve `402 Insufficient API credit`. **Vazia = áudio desligado, tudo vai em texto** — o encanamento (`tts.provider=fishaudio` → `deploy/scripts/fish_tts.py`) é auto-instalado pelo compose no boot; só falta a chave. `FISH_REFERENCE_ID` escolhe a voz; modelo default `s2.1-pro-free` (campanha grátis até 31/08/2026 — `fish_model_campaign_notice.sh` avisa o dono de trocar). Pix, endereço, link, e-mail e afins nunca vão em áudio (regra `written_only` no `fish_tts.py`). Detalhes: `deploy/ONBOARDING.md` |
 
 Fora as envs, só os arquivos de conteúdo: `deploy/SOUL.md`, `SOUL_WHATSAPP.md`, `SOUL_EMAIL.md` e `support_rules.md` são **templates com placeholders `{{...}}`**. Preencha antes de subir — placeholder não substituído vai literal para o cliente, e um `support_rules.md` com produto errado faz o bot inventar oferta que não existe.
 
