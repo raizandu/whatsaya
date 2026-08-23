@@ -62,6 +62,20 @@ Mínimo para o bot responder:
 
 Backup nesse modo é local: instale `deploy/backup-whatsaya.sh` no cron (instruções no cabeçalho do próprio arquivo). Ele inclui a sessão do Baileys, então restaurar não obriga a reparear o número.
 
+### Campanhas CTWA e mercado do lead
+
+Use `WHATSAPP_LEAD_CAMPAIGN_METADATA_JSON` para associar o ID ou nome nativo de uma campanha Click-to-WhatsApp ao mercado comercial correto. As chaves são comparadas exatamente com `smbClientCampaignId`, `smbServerCampaignId` ou `utm.utmCampaign`, nessa ordem de prioridade; texto do anúncio, palavras do nome da campanha e idioma da primeira mensagem nunca são usados para adivinhar o mercado.
+
+Exemplo no `.env` para uma campanha dos EUA cujo atendimento começa em espanhol:
+
+```dotenv
+WHATSAPP_LEAD_CAMPAIGN_METADATA_JSON='{"120012345678900001":{"market_id":"US","language":"es","timezone":"America/New_York","origin":"meta_ads"}}'
+```
+
+Cada entrada aceita somente `market_id` (`BR` ou `US`), `language` (`pt`, `en` ou `es`), `timezone` e `origin` (strings de até 100 caracteres). O mercado governa moeda, oferta e pagamento; o idioma governa apenas a língua da conversa. Portanto, um lead da campanha dos EUA que escreve em espanhol continua no fluxo internacional em USD/Zelle. Campanhas desconhecidas não herdam metadados por semelhança de nome. Depois de alterar essa variável, rode `docker compose up -d` para recriar o container; `docker restart` não atualiza o ambiente.
+
+Quando o WhatsApp entrega dados nativos do anúncio, o bridge armazena no cadastro do contato somente `origin` e o identificador/nome exato de `campaign`, mesmo que essa campanha ainda não exista no mapa acima. Isso preserva a atribuição para análise, relatórios ou classificação posterior sem confiar em texto livre do anúncio. Uma campanha sem mapeamento não define mercado automaticamente; até existir uma origem confiável ou o lead informar onde a empresa opera, o fluxo deve perguntar o país.
+
 ---
 
 ## 4. Plugin no volume
@@ -98,7 +112,9 @@ sudo chown -R 10000:10000 /opt/data/.hermes/platforms/whatsapp/session
 
 ## 5. Personas no volume
 
-O compose só copia `SOUL*.md` e `support_rules.md` se **ainda não existirem** em `/opt/data`. Preencha os templates de `deploy/` **antes** do primeiro boot, ou edite os arquivos já copiados no volume.
+Esta composição usa `WHATSAPP_CONFIG_SUBDIR=instance` por padrão: no primeiro boot, `SOUL.md`, `SOUL_WHATSAPP.md` e `support_rules.md` vêm de `deploy/instance/`; arquivos não específicos, como `SOUL_EMAIL.md`, vêm de `deploy/`. Use `WHATSAPP_CONFIG_SUBDIR=generic` somente em instalações que devam partir dos templates genéricos.
+
+O compose só copia esses arquivos se **ainda não existirem** em `/opt/data`. Em uma instalação existente, atualizar o código não substitui a configuração comercial ativa: copie ou sincronize explicitamente os arquivos da instância. Confirme `WHATSAPP_CONFIG_SUBDIR=instance` no `.env` e rode `docker compose up -d`; um `docker restart` isolado não aplica essa variável nem ativa os gates específicos da AYA.
 
 ```bash
 grep -n '{{' /opt/data/SOUL.md /opt/data/SOUL_WHATSAPP.md /opt/data/SOUL_EMAIL.md /opt/data/support_rules.md
@@ -185,9 +201,9 @@ Para ver: `docker compose exec hermes hermes skills list`.
 
 WhatsApp não recebe status interno do gateway: o compose grava `display.busy_ack_enabled: false`, `busy_input_mode: queue` e desliga heartbeat/clarify. O cliente não deve ver `⚡ Interrupting`, `⏳ Working` nem `iteration N/60`. PDF/proposta sai com subagentes em paralelo, sem a ferramenta `clarify`.
 
-Áudio: o Hermes 0.20+ transcreve com Whisper local e, sem idioma, assume inglês. O compose grava `stt.language: pt` (e `HERMES_LOCAL_STT_LANGUAGE=pt`). Sem isso o PTT em português vira tradução zoada. `stt.echo_transcripts: false` — a transcrição fica só no contexto do agente; o cliente não vê a bolha `🎙️ "..."`.
+Áudio: o Hermes 0.20+ transcreve com Whisper local e, sem idioma, assume inglês. O compose grava `stt.language: pt` (e `HERMES_LOCAL_STT_LANGUAGE=pt`) para esse fallback local. O plugin da AYA usa Fish ASR e, por padrão, omite `language` para detectar português, inglês ou espanhol automaticamente; `WHATSAPP_STT_LANGUAGE=pt|en|es` força um idioma quando necessário. `stt.echo_transcripts: false` — a transcrição fica só no contexto do agente; o cliente não vê a bolha `🎙️ "..."`.
 
-Voz de resposta: Fish Audio, modelo `s2.1-pro-free` (campanha grátis até 31/08/2026; no dia 30 o cron avisa o dono para trocar para `s2.1-pro`). Gere a chave em https://fish.audio/app/api-keys/ e coloque `FISH_API_KEY` no `.env`. Opcional: `FISH_REFERENCE_ID`, `FISH_TTS_MODEL` e `FISH_TTS_VOLUME` (padrão `4`). Resposta falável vai em nota de voz **apenas quando o lead mandou áudio** (gate de modalidade: quem escreve recebe texto). `WHATSAPP_AUTO_TTS=false` desliga a voz de vez. PIX, endereço, link, e-mail, código e intro do tipo “vou te enviar um audio” ficam **texto**. Sem chave, o texto continua indo. Tags `[happy]` / `[confident]` / `[empathetic]` / `[warm and friendly]` são só para o Fish: o plugin corta no `_human_send` e o adapter corta no `send`, mesmo se o `fish_tts.py` não carregar. Se a tag aparecer no chat, o volume está com plugin velho. `[número omitido]` não é tag de voz e fica. Preço no áudio vai por extenso (`997 reais`). Duas mensagens seguidas esperam 2,5s e entram no mesmo lote (`WHATSAPP_DEBOUNCE_INITIAL_MS=2500`).
+Voz de resposta: Fish Audio, modelo `s2.1-pro-free` (campanha grátis até 31/08/2026; no dia 30 o cron avisa o dono para trocar para `s2.1-pro`). Gere a chave em https://fish.audio/app/api-keys/ e coloque `FISH_API_KEY` no `.env`. Opcional: `FISH_REFERENCE_ID`, `FISH_TTS_MODEL` e `FISH_TTS_VOLUME` (padrão `4`). Resposta falável vai em nota de voz **apenas quando o lead mandou áudio** (gate de modalidade: quem escreve recebe texto). `WHATSAPP_AUTO_TTS=false` desliga a voz de vez. Dados de pagamento, endereço, link, e-mail, código e intro do tipo “vou te enviar um audio” ficam **texto**. Sem chave, o texto continua indo. Tags `[happy]` / `[confident]` / `[empathetic]` / `[warm and friendly]` são só para o Fish: o plugin corta no `_human_send` e o adapter corta no `send`, mesmo se o `fish_tts.py` não carregar. Se a tag aparecer no chat, o volume está com plugin velho. `[número omitido]` não é tag de voz e fica. Preço no áudio vai por extenso na moeda do mercado. Duas mensagens seguidas esperam 2,5s e entram no mesmo lote (`WHATSAPP_DEBOUNCE_INITIAL_MS=2500`).
 
 ---
 

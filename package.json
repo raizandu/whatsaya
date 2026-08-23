@@ -1,7 +1,7 @@
 {
   "type": "module",
   "scripts": {
-    "test": "node --test tests/bridge.test.js && python3 -m unittest tests/plugin_test.py"
+    "test": "node --test --test-force-exit tests/bridge.test.js tests/bridge_campaign_metadata.test.js && python3 -m unittest tests/plugin_test.py tests/test_aya_market_rules.py"
   },
   "dependencies": {
     "@hapi/boom": "^10.0.1",

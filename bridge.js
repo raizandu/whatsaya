@@ -218,6 +218,9 @@ const WHATSAPP_OWNER_NUMBER = (process.env.WHATSAPP_OWNER_NUMBER || '').replace(
 // para o mesmo bridge servir qualquer cliente; 'dono' e o fallback quando nao definido.
 const WHATSAPP_OWNER_NAME = (process.env.WHATSAPP_OWNER_NAME || 'dono').trim();
 const WHATSAPP_CONNECTION_NAME = process.env.WHATSAPP_CONNECTION_NAME || 'Hermes Agent';
+const LEAD_CAMPAIGN_METADATA_MAP = parseLeadCampaignMetadataMap(
+  process.env.WHATSAPP_LEAD_CAMPAIGN_METADATA_JSON,
+);
 const WHATSAPP_SILENCE_DURATION_MIN = parseInt(process.env.WHATSAPP_SILENCE_DURATION_MIN || '10', 10);
 const SILENCE_DURATION_MS = WHATSAPP_SILENCE_DURATION_MIN * 60 * 1000;
 const silencedChats = {};
@@ -332,6 +335,128 @@ function getContextInfo(messageContent) {
     }
   }
   return {};
+}
+
+function cleanLeadMetadataScalar(value, maxLength = 200) {
+  if (!['string', 'number', 'boolean'].includes(typeof value)) return '';
+  return String(value)
+    .replace(/[\u0000-\u001F\u007F-\u009F\u200B-\u200F\u2060\uFEFF]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, maxLength);
+}
+
+function cleanCampaignLookupKey(value) {
+  if (!['string', 'number'].includes(typeof value)) return '';
+  const cleaned = String(value)
+    .replace(/[\u0000-\u001F\u007F-\u009F\u200B-\u200F\u2060\uFEFF]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return cleaned.length <= 200 ? cleaned : '';
+}
+
+function cleanCampaignMapString(value, maxLength) {
+  if (typeof value !== 'string') return '';
+  const cleaned = value
+    .replace(/[\u0000-\u001F\u007F-\u009F\u200B-\u200F\u2060\uFEFF]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return cleaned.length <= maxLength ? cleaned : '';
+}
+
+function cleanCampaignMapEntry(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const result = {};
+  const marketId = cleanLeadMetadataScalar(value.market_id || value.marketId, 10).toUpperCase();
+  if (marketId === 'BR' || marketId === 'US') result.market_id = marketId;
+  const language = cleanLeadMetadataScalar(value.language, 10)
+    .toLowerCase()
+    .replace('_', '-')
+    .split('-', 1)[0];
+  if (['pt', 'en', 'es'].includes(language)) result.language = language;
+  const timezone = cleanCampaignMapString(value.timezone, 100);
+  if (timezone) result.timezone = timezone;
+  const origin = cleanCampaignMapString(value.origin, 100);
+  if (origin) result.origin = origin;
+  return Object.keys(result).length ? result : undefined;
+}
+
+function parseLeadCampaignMetadataMap(rawValue) {
+  if (!rawValue) return Object.create(null);
+  try {
+    const parsed = typeof rawValue === 'string' ? JSON.parse(rawValue) : rawValue;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return Object.create(null);
+    }
+    const result = Object.create(null);
+    for (const [rawCampaignKey, rawMetadata] of Object.entries(parsed).slice(0, 500)) {
+      const campaignKey = cleanCampaignLookupKey(rawCampaignKey);
+      const metadata = cleanCampaignMapEntry(rawMetadata);
+      if (campaignKey && metadata) result[campaignKey] = metadata;
+    }
+    return result;
+  } catch {
+    console.warn('[bridge] WHATSAPP_LEAD_CAMPAIGN_METADATA_JSON inválido; mapa ignorado.');
+    return Object.create(null);
+  }
+}
+
+function extractLeadMetadata(contextInfo, campaignMetadataMap = LEAD_CAMPAIGN_METADATA_MAP) {
+  if (!contextInfo || typeof contextInfo !== 'object') return undefined;
+  const explicit = (
+    contextInfo.leadMetadata && typeof contextInfo.leadMetadata === 'object'
+      ? contextInfo.leadMetadata
+      : contextInfo.lead_metadata && typeof contextInfo.lead_metadata === 'object'
+        ? contextInfo.lead_metadata
+        : {}
+  );
+  const result = {};
+  for (const key of ['origin', 'campaign', 'timezone']) {
+    const value = cleanLeadMetadataScalar(explicit[key]);
+    if (value) result[key] = value;
+  }
+  const marketId = cleanLeadMetadataScalar(explicit.market_id || explicit.marketId, 10).toUpperCase();
+  if (marketId === 'BR' || marketId === 'US') result.market_id = marketId;
+  const language = cleanLeadMetadataScalar(explicit.language, 10)
+    .toLowerCase()
+    .replace('_', '-')
+    .split('-', 1)[0];
+  if (['pt', 'en', 'es'].includes(language)) result.language = language;
+
+  const utm = contextInfo.utm && typeof contextInfo.utm === 'object' ? contextInfo.utm : {};
+  const nativeCampaignKeys = Array.from(new Set([
+    contextInfo.smbClientCampaignId,
+    contextInfo.smbServerCampaignId,
+    utm.utmCampaign,
+  ].map(cleanCampaignLookupKey).filter(Boolean)));
+  if (!result.origin) {
+    result.origin = cleanLeadMetadataScalar(
+      utm.utmSource || contextInfo.conversionSource || contextInfo.entryPointConversionSource,
+      100,
+    );
+  }
+  if (!result.campaign) {
+    result.campaign = cleanLeadMetadataScalar(
+      utm.utmCampaign || contextInfo.smbClientCampaignId || contextInfo.smbServerCampaignId,
+    );
+  }
+
+  for (const campaignKey of nativeCampaignKeys) {
+    if (!Object.prototype.hasOwnProperty.call(campaignMetadataMap || {}, campaignKey)) continue;
+    const rawMappedMetadata = (
+      campaignMetadataMap && typeof campaignMetadataMap === 'object'
+        ? campaignMetadataMap[campaignKey]
+        : undefined
+    );
+    const mappedMetadata = cleanCampaignMapEntry(rawMappedMetadata);
+    if (!mappedMetadata) continue;
+    Object.assign(result, mappedMetadata);
+    break;
+  }
+  for (const key of Object.keys(result)) {
+    if (!result[key]) delete result[key];
+  }
+  return Object.keys(result).length ? result : undefined;
 }
 
 mkdirSync(SESSION_DIR, { recursive: true });
@@ -678,7 +803,18 @@ let onMessagesUpsert = async ({ messages, type }) => {
       }
     }
 
-    let chatId = msg.key.remoteJid;
+    const rawChatId = msg.key.remoteJid;
+    const rawSenderId = msg.key.participant || rawChatId;
+    const senderIdAlt = msg.key.participant ? msg.key.participantAlt : msg.key.remoteJidAlt;
+    const originalChatId = [rawChatId, msg.key.remoteJidAlt]
+      .find((jid) => jid?.endsWith('@lid'));
+    const originalSenderId = [
+      msg.key.participant,
+      msg.key.participantAlt,
+      rawChatId,
+      msg.key.remoteJidAlt,
+    ].find((jid) => jid?.endsWith('@lid'));
+    let chatId = rawChatId;
     if (chatId === 'status@broadcast' || (chatId && chatId.includes('status'))) {
       continue;
     }
@@ -695,13 +831,16 @@ let onMessagesUpsert = async ({ messages, type }) => {
         }));
       } catch {}
     }
-    let senderId = msg.key.participant || chatId;
+    let senderId = rawSenderId;
 
-    // Resolve LID to phone JID if necessary
-    // onWhatsApp() nao suporta LIDs — usar apenas o mapa local (lidToPhone)
+    // Resolve LID com a identidade PN alternativa do Baileys ou, em sessões
+    // antigas que não a trazem, com o mapa local persistido (lidToPhone).
     if (senderId && senderId.endsWith('@lid')) {
       const cleanLid = senderId.split(':')[0].split('@')[0];
-      if (lidToPhone[cleanLid]) {
+      if (senderIdAlt?.endsWith('@s.whatsapp.net')) {
+        senderId = senderIdAlt;
+        console.log(`[bridge] LID ${cleanLid} resolvido via identidade alternativa para ${senderId}`);
+      } else if (lidToPhone[cleanLid]) {
         senderId = `${lidToPhone[cleanLid]}@s.whatsapp.net`;
         console.log(`[bridge] LID ${cleanLid} resolvido via cache para ${senderId}`);
       }
@@ -710,7 +849,10 @@ let onMessagesUpsert = async ({ messages, type }) => {
 
     if (chatId && chatId.endsWith('@lid')) {
       const cleanLid = chatId.split(':')[0].split('@')[0];
-      if (lidToPhone[cleanLid]) {
+      if (msg.key.remoteJidAlt?.endsWith('@s.whatsapp.net')) {
+        chatId = msg.key.remoteJidAlt;
+        console.log(`[bridge] LID chatId ${cleanLid} resolvido via identidade alternativa para ${chatId}`);
+      } else if (lidToPhone[cleanLid]) {
         chatId = `${lidToPhone[cleanLid]}@s.whatsapp.net`;
         console.log(`[bridge] LID chatId ${cleanLid} resolvido via cache para ${chatId}`);
       }
@@ -1071,6 +1213,9 @@ let onMessagesUpsert = async ({ messages, type }) => {
       botIds,
       timestamp: msg.messageTimestamp,
       fromMe: !!msg.key.fromMe,
+      leadMetadata: extractLeadMetadata(contextInfo),
+      ...(originalChatId?.endsWith('@lid') ? { originalChatId } : {}),
+      ...(originalSenderId?.endsWith('@lid') ? { originalSenderId } : {}),
     };
 
     // ── DEBOUNCE PROGRESSIVO: apenas mensagens de texto puro ─────────────────
@@ -2254,6 +2399,7 @@ export {
   clearRecentlyProcessedIds,
   stripExecLines,
   stripFishCues,
+  extractLeadMetadata,
 };
 
 function getBotPaused() { return botPaused; }

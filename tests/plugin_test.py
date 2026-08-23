@@ -169,6 +169,51 @@ class TestMessageRoutingAndDispatch(BaseWhatsAppManagerTest):
             self.assertIsNone(res) # Should not skip or rewrite (returns None)
             mock_fetch.assert_not_called() # Should not fetch history at dispatch stage
 
+    def test_pre_gateway_stages_structured_us_lead_metadata_for_first_llm_turn(self):
+        pre_dispatch = self.ctx.hooks.get("pre_gateway_dispatch")
+        event = MagicMock()
+        event.source.platform = "whatsapp"
+        event.source.user_id = "12025550199@s.whatsapp.net"
+        event.source.chat_id = "12025550199@s.whatsapp.net"
+        event.text = "¿Cuánto cuesta?"
+        event.raw = {}
+        event.raw_message = {
+            "fromMe": False,
+            "isGroup": False,
+            "originalChatId": "123456789012345@lid",
+            "originalSenderId": "123456789012345@lid",
+            "leadMetadata": {
+                "market_id": "US",
+                "origin": "Meta Ads",
+                "campaign": "US Cleaning Spanish",
+                "country": "United States",
+                "currency": "USD",
+                "offer": "international",
+                "timezone": "America/New_York",
+                "language": "es",
+            },
+        }
+        event.is_historical = False
+
+        gateway = MagicMock()
+        gateway._session_key_for_source.return_value = "session-us-es"
+        gateway._session_model_overrides = {}
+
+        with patch("whatsapp_manager._check_bot_paused", return_value=False), \
+             patch("whatsapp_manager._check_chat_silenced", return_value=False), \
+             patch("whatsapp_manager._followup_note_activity"), \
+             patch("whatsapp_manager._track_inbound") as mock_track:
+            result = pre_dispatch("pre_gateway_dispatch", {"event": event, "gateway": gateway})
+
+        self.assertIsNone(result)
+        staged = mock_track.call_args.args[3]
+        self.assertEqual(staged["market_id"], "US")
+        self.assertEqual(staged["currency"], "USD")
+        self.assertEqual(staged["offer"], "international")
+        self.assertEqual(staged["language"], "es")
+        self.assertEqual(staged["campaign"], "US Cleaning Spanish")
+        self.assertEqual(staged["_identity_lid"], "123456789012345@lid")
+
     def test_non_whatsapp_platforms_are_ignored(self):
         pre_llm = self.ctx.hooks.get("pre_llm_call")
         
@@ -639,6 +684,367 @@ class TestLLMContextAndPrompting(BaseWhatsAppManagerTest):
         # Não forçar handoff só por pergunta de integração
         self.assertIn("NÃO encaminhe para humano só porque perguntaram sobre integração", ctx)
         self.assertIn("1 a 4 frases", ctx)
+        self.assertIn("português, inglês ou espanhol", ctx)
+        self.assertIn("continua nesse mercado mesmo conversando em espanhol", ctx)
+
+    def test_build_support_prompt_injects_market_metadata_without_language_reclassification(self):
+        import whatsapp_manager
+        res = whatsapp_manager._build_support_prompt(
+            "custom soul",
+            "custom rules",
+            "",
+            contact_info={
+                "market_id": "US",
+                "origin": "Meta Ads",
+                "campaign": "US Cleaning Spanish",
+                "country": "United States",
+                "currency": "USD",
+                "offer": "international",
+                "timezone": "America/New_York",
+                "language": "es",
+            },
+        )
+        ctx = res["context"]
+        self.assertIn("METADADOS COMERCIAIS DO LEAD — FONTE EXTERNA", ctx)
+        self.assertIn("Mercado: US", ctx)
+        self.assertIn("Campanha: US Cleaning Spanish", ctx)
+        self.assertIn("Moeda: USD", ctx)
+        self.assertIn("Idioma preferido: es", ctx)
+        self.assertIn("Idioma preferido governa somente a língua da resposta", ctx)
+
+    def test_pre_llm_persists_us_market_while_replying_in_spanish(self):
+        pre_llm = self.ctx.hooks.get("pre_llm_call")
+        contact_key = "12025550199@s.whatsapp.net"
+        personal_contacts = {
+            contact_key: {
+                "name": "María",
+                "relationship": "Cliente",
+                "summary": "Lead de cleaning.",
+                "intent": "Contratar atendimento.",
+                "frequency": "esporádica",
+            }
+        }
+        context = {
+            "platform": "whatsapp",
+            "sender_id": contact_key,
+            "user_message": "Tengo una empresa de limpieza en Massachusetts y quiero avanzar.",
+        }
+
+        with patch("whatsapp_manager._load_support_files", return_value=("AYA", "rules")), \
+             patch("whatsapp_manager._load_personal_contacts", return_value=personal_contacts), \
+             patch("whatsapp_manager._fetch_chat_history", return_value=""), \
+             patch("whatsapp_manager._write_personal_contacts_atomic") as mock_write:
+            result = pre_llm("pre_llm_call", context)
+
+        saved = personal_contacts[contact_key]
+        self.assertEqual(saved["market_id"], "US")
+        self.assertEqual(saved["currency"], "USD")
+        self.assertEqual(saved["offer"], "international")
+        self.assertEqual(saved["language"], "es")
+        mock_write.assert_called_once_with(personal_contacts)
+        self.assertIn("Mercado: US", result["context"])
+        self.assertIn("Moeda: USD", result["context"])
+        self.assertIn("Idioma preferido: es", result["context"])
+
+    def test_pre_llm_external_us_market_overrides_stale_brazil_while_language_follows_message(self):
+        pre_llm = self.ctx.hooks.get("pre_llm_call")
+        contact_key = "12025550199@s.whatsapp.net"
+        personal_contacts = {
+            contact_key: {
+                "name": "María",
+                "relationship": "Cliente",
+                "summary": "Lead de cleaning.",
+                "intent": "Conhecer a oferta.",
+                "frequency": "esporádica",
+                "market_id": "BR",
+                "currency": "BRL",
+                "offer": "brazil",
+                "language": "pt",
+            }
+        }
+
+        with patch("whatsapp_manager._load_support_files", return_value=("AYA", "rules")), \
+             patch("whatsapp_manager._load_personal_contacts", return_value=personal_contacts), \
+             patch("whatsapp_manager._fetch_chat_history", return_value=""), \
+             patch("whatsapp_manager._write_personal_contacts_atomic") as mock_write:
+            result = pre_llm(
+                platform="whatsapp",
+                sender_id=contact_key,
+                user_message="¿Cuánto cuesta?",
+                market_id="US",
+                origin="Meta Ads",
+                campaign="US Cleaning Spanish",
+                country="United States",
+                currency="USD",
+                offer="international",
+                timezone="America/New_York",
+                language="en",
+            )
+
+        saved = personal_contacts[contact_key]
+        self.assertEqual(saved["market_id"], "US")
+        self.assertEqual(saved["country"], "United States")
+        self.assertEqual(saved["currency"], "USD")
+        self.assertEqual(saved["offer"], "international")
+        self.assertEqual(saved["language"], "es")
+        self.assertEqual(saved["campaign"], "US Cleaning Spanish")
+        mock_write.assert_called_once_with(personal_contacts)
+        self.assertIn("Mercado: US", result["context"])
+        self.assertIn("Campanha: US Cleaning Spanish", result["context"])
+        self.assertIn("Idioma preferido: es", result["context"])
+
+    def test_pre_llm_consumes_metadata_staged_by_gateway_contract(self):
+        pre_llm = self.ctx.hooks.get("pre_llm_call")
+        contact_key = "12025550199@s.whatsapp.net"
+        personal_contacts = {
+            contact_key: {
+                "relationship": "Cliente",
+                "summary": "Lead de cleaning.",
+                "intent": "Conhecer a oferta.",
+                "frequency": "esporádica",
+            }
+        }
+        whatsapp_manager._pending_inbound.clear()
+        self.addCleanup(whatsapp_manager._pending_inbound.clear)
+        whatsapp_manager._track_inbound(
+            contact_key,
+            "msg-meta",
+            "¿Cuánto cuesta?",
+            {
+                "market_id": "US",
+                "origin": "Meta Ads",
+                "campaign": "US Cleaning Spanish",
+                "country": "United States",
+                "currency": "USD",
+                "offer": "international",
+                "timezone": "America/New_York",
+                "language": "es",
+            },
+        )
+
+        with patch("whatsapp_manager._load_support_files", return_value=("AYA", "rules")), \
+             patch("whatsapp_manager._load_personal_contacts", return_value=personal_contacts), \
+             patch("whatsapp_manager._fetch_chat_history", return_value=""), \
+             patch("whatsapp_manager._write_personal_contacts_atomic") as mock_write:
+            result = pre_llm(
+                platform="whatsapp",
+                sender_id=contact_key,
+                session_id=contact_key,
+                user_message="¿Cuánto cuesta?",
+            )
+
+        saved = personal_contacts[contact_key]
+        self.assertEqual(saved["market_id"], "US")
+        self.assertEqual(saved["currency"], "USD")
+        self.assertEqual(saved["language"], "es")
+        self.assertEqual(saved["campaign"], "US Cleaning Spanish")
+        mock_write.assert_called_once_with(personal_contacts)
+        self.assertIn("Mercado: US", result["context"])
+        self.assertIn("Idioma preferido: es", result["context"])
+
+    def test_gateway_to_pre_llm_keeps_us_market_on_spanish_lid_first_turn(self):
+        pre_dispatch = self.ctx.hooks.get("pre_gateway_dispatch")
+        pre_llm = self.ctx.hooks.get("pre_llm_call")
+        lid = "123456789012345@lid"
+        phone_key = "12025550199@s.whatsapp.net"
+        session = "session-us-es-contract"
+        personal_contacts = {
+            phone_key: {
+                "lid": lid,
+                "relationship": "Cliente",
+                "summary": "Lead de cleaning.",
+                "intent": "Conhecer a oferta.",
+                "frequency": "esporádica",
+                "ai_enabled": True,
+                "in_flow": True,
+            }
+        }
+        whatsapp_manager._pending_inbound.clear()
+        self.addCleanup(whatsapp_manager._pending_inbound.clear)
+        self.addCleanup(whatsapp_manager._sender_to_chat.pop, session, None)
+        self.addCleanup(whatsapp_manager._sender_to_chat.pop, lid, None)
+
+        event = MagicMock()
+        event.source.platform = "whatsapp"
+        # O bridge resolve o endereço de entrega para telefone, mas preserva o LID
+        # original dentro do raw_message para a associação sobreviver a cache frio.
+        event.source.user_id = phone_key
+        event.source.chat_id = phone_key
+        event.text = "¿Cuánto cuesta?"
+        event.raw = {}
+        event.raw_message = {
+            "fromMe": False,
+            "isGroup": False,
+            "originalChatId": lid,
+            "originalSenderId": lid,
+            "leadMetadata": {
+                "market_id": "US",
+                "origin": "Meta Ads",
+                "campaign": "US Cleaning Spanish",
+                "timezone": "America/New_York",
+                "language": "es",
+                "unknown_internal_field": "must not persist",
+            },
+        }
+        event.is_historical = False
+        gateway = MagicMock()
+        gateway._session_key_for_source.return_value = session
+        gateway._session_model_overrides = {}
+        gateway._session_profile_overrides = {}
+
+        def resolve(jid):
+            return phone_key if str(jid).endswith("@lid") else jid
+
+        with patch("whatsapp_manager._resolve_phone_from_jid", side_effect=resolve), \
+             patch("whatsapp_manager._check_bot_paused", return_value=False), \
+             patch("whatsapp_manager._check_chat_silenced", return_value=False), \
+             patch("whatsapp_manager._followup_note_activity"), \
+             patch("whatsapp_manager._load_support_files", return_value=("AYA", "rules")), \
+             patch("whatsapp_manager._load_personal_contacts", return_value=personal_contacts), \
+             patch("whatsapp_manager._fetch_chat_history", return_value=""), \
+             patch("whatsapp_manager._write_personal_contacts_atomic") as mock_write:
+            self.assertIsNone(pre_dispatch(event=event, gateway=gateway))
+            result = pre_llm(
+                session_id=session,
+                task_id="task-1",
+                turn_id="turn-1",
+                user_message="¿Cuánto cuesta?",
+                conversation_history=[],
+                is_first_turn=True,
+                model="test-model",
+                platform="whatsapp",
+                sender_id=phone_key,
+            )
+
+        saved = personal_contacts[phone_key]
+        self.assertEqual(saved["market_id"], "US")
+        self.assertEqual(saved["currency"], "USD")
+        self.assertEqual(saved["offer"], "international")
+        self.assertEqual(saved["language"], "es")
+        self.assertEqual(saved["campaign"], "US Cleaning Spanish")
+        self.assertEqual(saved["lid"], lid)
+        self.assertNotIn("unknown_internal_field", saved)
+        self.assertNotIn(lid, personal_contacts)
+        mock_write.assert_called_once_with(personal_contacts)
+        self.assertIn("Mercado: US", result["context"])
+        self.assertIn("Campanha: US Cleaning Spanish", result["context"])
+        self.assertIn("Idioma preferido: es", result["context"])
+
+    def test_pre_llm_persists_lid_association_on_canonical_market_record(self):
+        pre_llm = self.ctx.hooks.get("pre_llm_call")
+        lid = "123456789012345@lid"
+        phone_key = "12025550199@s.whatsapp.net"
+        personal_contacts = {
+            phone_key: {
+                "name": "María",
+                "relationship": "Cliente",
+                "summary": "Lead US.",
+                "intent": "Conhecer a oferta.",
+                "frequency": "esporádica",
+                "market_id": "US",
+                "currency": "USD",
+                "offer": "international",
+                "language": "es",
+            }
+        }
+
+        with patch("whatsapp_manager._load_support_files", return_value=("AYA", "rules")), \
+             patch("whatsapp_manager._load_personal_contacts", return_value=personal_contacts), \
+             patch("whatsapp_manager._resolve_phone_from_jid", return_value=phone_key), \
+             patch("whatsapp_manager._fetch_chat_history", return_value=""), \
+             patch("whatsapp_manager._write_personal_contacts_atomic") as mock_write:
+            result = pre_llm(
+                platform="whatsapp",
+                sender_id=lid,
+                user_message="¿Cuánto cuesta?",
+            )
+
+        self.assertEqual(personal_contacts[phone_key]["lid"], lid)
+        self.assertEqual(personal_contacts[phone_key]["market_id"], "US")
+        self.assertIn("Mercado: US", result["context"])
+        mock_write.assert_called_once_with(personal_contacts)
+
+    def test_pre_llm_finds_canonical_us_record_when_lid_map_is_unavailable(self):
+        pre_llm = self.ctx.hooks.get("pre_llm_call")
+        lid = "123456789012345@lid"
+        phone_key = "12025550199@s.whatsapp.net"
+        personal_contacts = {
+            phone_key: {
+                "lid": lid,
+                "name": "María",
+                "relationship": "Cliente",
+                "summary": "Lead de cleaning nos EUA.",
+                "intent": "Conhecer a oferta.",
+                "frequency": "esporádica",
+                "market_id": "US",
+                "country": "United States",
+                "currency": "USD",
+                "offer": "international",
+                "language": "es",
+            }
+        }
+        context = {
+            "platform": "whatsapp",
+            "sender_id": lid,
+            "user_message": "¿Cuánto cuesta?",
+        }
+
+        with patch("whatsapp_manager._load_support_files", return_value=("AYA", "rules")), \
+             patch("whatsapp_manager._load_personal_contacts", return_value=personal_contacts), \
+             patch("whatsapp_manager._resolve_phone_from_jid", side_effect=lambda jid: jid), \
+             patch("whatsapp_manager._fetch_chat_history", return_value=""), \
+             patch("whatsapp_manager._live_classify_contact") as mock_classify, \
+             patch("whatsapp_manager._write_personal_contacts_atomic") as mock_write:
+            result = pre_llm("pre_llm_call", context)
+
+        self.assertIn("Mercado: US", result["context"])
+        self.assertIn("Moeda: USD", result["context"])
+        self.assertIn("Idioma preferido: es", result["context"])
+        self.assertNotIn(lid, personal_contacts)
+        mock_classify.assert_not_called()
+        mock_write.assert_not_called()
+
+    def test_support_prompt_hides_payment_details_until_explicit_intent(self):
+        import whatsapp_manager
+        rules = (
+            "<!-- AYA_PAYMENT_DETAILS:BR:START -->\n"
+            "Pix CNPJ: 00.000.000/0000-00\n"
+            "<!-- AYA_PAYMENT_DETAILS:BR:END -->\n"
+            "Método: Zelle\n"
+            "<!-- AYA_PAYMENT_DETAILS:US:START -->\n"
+            "Recipient: Test Recipient\n"
+            "Zelle email: pay@example.com\n"
+            "<!-- AYA_PAYMENT_DETAILS:US:END -->"
+        )
+
+        hidden = whatsapp_manager._build_support_prompt(
+            "AYA", rules, "", contact_info={"market_id": "US"}
+        )["context"]
+        allowed = whatsapp_manager._build_support_prompt(
+            "AYA",
+            rules,
+            "",
+            contact_info={"market_id": "US"},
+            payment_market_id="US",
+            allow_payment_details=True,
+        )["context"]
+
+        self.assertNotIn("Test Recipient", hidden)
+        self.assertNotIn("pay@example.com", hidden)
+        self.assertNotIn("00.000.000/0000-00", hidden)
+        self.assertIn("Test Recipient", allowed)
+        self.assertIn("pay@example.com", allowed)
+        self.assertNotIn("00.000.000/0000-00", allowed)
+
+    def test_instance_support_prompt_never_injects_generic_pix_catalog(self):
+        import whatsapp_manager
+        with patch.dict(os.environ, {"WHATSAPP_CONFIG_SUBDIR": "instance"}), \
+             patch("whatsapp_manager._build_catalog_context_block", return_value="PIX-ONLY-CATALOG"):
+            prompt = whatsapp_manager._build_support_prompt(
+                "AYA", "rules", "", contact_info={"market_id": "US", "language": "es"}
+            )["context"]
+
+        self.assertNotIn("PIX-ONLY-CATALOG", prompt)
 
 
 class TestContactManagementAndSync(BaseWhatsAppManagerTest):
@@ -1887,6 +2293,47 @@ class TestSalesDetection(BaseWhatsAppManagerTest):
         self.assertNotIn("pedido confirmado", client_message)
 
     @patch("whatsapp_manager._save_sales")
+    @patch("whatsapp_manager._load_sales", return_value={})
+    @patch("whatsapp_manager._load_personal_contacts", return_value={
+        "12025550199@s.whatsapp.net": {
+            "name": "María",
+            "market_id": "US",
+            "currency": "USD",
+            "language": "es",
+        },
+    })
+    @patch("whatsapp_manager._process_media_message", return_value="foto de un comprobante de pago")
+    @patch("whatsapp_manager._detect_and_extract_sale_from_image", return_value={
+        "is_payment_receipt": True, "amount": "US$ 497", "payment_datetime": "23/08 14:30",
+        "sender_name": "María", "bank_app": "Zelle", "address": None,
+    })
+    @patch("urllib.request.urlopen")
+    def test_us_spanish_payment_receipt_ack_stays_spanish(
+        self, mock_urlopen, mock_detect, mock_process, mock_contacts, mock_load, mock_save
+    ):
+        import whatsapp_manager
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b'{"success": true, "messageId": "test-mid"}'
+        mock_urlopen.return_value.__enter__.return_value = mock_resp
+        lid = "123456789012345@lid"
+
+        with patch(
+            "whatsapp_manager._resolve_phone_from_jid",
+            side_effect=lambda jid: (
+                "12025550199@s.whatsapp.net" if jid == lid else jid
+            ),
+        ), patch("whatsapp_manager._human_send") as mock_send:
+            event = self._make_image_event(lid, lid, caption="Aquí está el comprobante")
+            res = self._dispatch_event(event)
+
+        self.assertEqual(res, {"action": "skip", "reason": "sale-detected"})
+        client_call = next(c for c in mock_send.call_args_list if c.args[0] == lid)
+        client_message = client_call.args[1].lower()
+        self.assertIn("recibimos tu comprobante", client_message)
+        self.assertIn("confirmación del equipo", client_message)
+        self.assertNotIn("pago fue confirmado", client_message)
+
+    @patch("whatsapp_manager._save_sales")
     @patch("whatsapp_manager._process_media_message", return_value="uma selfie")
     @patch("whatsapp_manager._detect_and_extract_sale_from_image", return_value={
         "is_payment_receipt": True, "amount": "R$ 15,00",
@@ -2027,6 +2474,99 @@ class TestSalesDetection(BaseWhatsAppManagerTest):
         self.assertEqual(mock_send.call_count, 2)
         client_call = next(c for c in mock_send.call_args_list if c.args[0] == "5511888877777@s.whatsapp.net")
         self.assertIn("https://exemplo.com/ebook", client_call.args[1])
+
+    @patch("whatsapp_manager._save_sales")
+    @patch("whatsapp_manager._load_sales", return_value={
+        "aya-us-1": {
+            "contact_name": "María",
+            "contact_key": "123456789012345@lid",
+            "product": "WhatsAYA",
+            "status": "pending_review",
+        },
+    })
+    @patch("whatsapp_manager._load_product_catalog", return_value={})
+    @patch("whatsapp_manager._load_personal_contacts", return_value={
+        "12025550199@s.whatsapp.net": {
+            "market_id": "US",
+            "currency": "USD",
+            "language": "es",
+        },
+    })
+    @patch("urllib.request.urlopen")
+    def test_confirm_aya_sale_continues_spanish_onboarding(
+        self, mock_urlopen, mock_contacts, mock_catalog, mock_load, mock_save
+    ):
+        import whatsapp_manager
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b'{"success": true, "messageId": "test-mid"}'
+        mock_urlopen.return_value.__enter__.return_value = mock_resp
+
+        owner_id = "5511999999999@s.whatsapp.net"
+        event = self._make_text_event(owner_id, owner_id, "confirmar venda aya-us-1")
+        with patch.dict(os.environ, {"WHATSAPP_CONFIG_SUBDIR": "instance"}), \
+             patch(
+                 "whatsapp_manager._resolve_phone_from_jid",
+                 side_effect=lambda jid: (
+                     "12025550199@s.whatsapp.net"
+                     if jid == "123456789012345@lid"
+                     else jid
+                 ),
+             ), \
+             patch("whatsapp_manager._human_send") as mock_send:
+            self._dispatch_event(event)
+
+        client_call = next(
+            c for c in mock_send.call_args_list if c.args[0] == "123456789012345@lid"
+        )
+        self.assertIn("Tu pago fue confirmado", client_call.args[1])
+        self.assertIn("onboarding", client_call.args[1])
+        self.assertNotIn("envio", client_call.args[1].lower())
+
+    @patch("whatsapp_manager._save_sales")
+    @patch("whatsapp_manager._load_sales", return_value={
+        "aya-us-1": {
+            "contact_name": "María",
+            "contact_key": "123456789012345@lid",
+            "product": "WhatsAYA",
+            "status": "pending_review",
+        },
+    })
+    @patch("whatsapp_manager._load_personal_contacts", return_value={
+        "12025550199@s.whatsapp.net": {
+            "market_id": "US",
+            "currency": "USD",
+            "language": "es",
+        },
+    })
+    @patch("urllib.request.urlopen")
+    def test_reject_aya_sale_stays_in_spanish(
+        self, mock_urlopen, mock_contacts, mock_load, mock_save
+    ):
+        import whatsapp_manager
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b'{"success": true, "messageId": "test-mid"}'
+        mock_urlopen.return_value.__enter__.return_value = mock_resp
+
+        owner_id = "5511999999999@s.whatsapp.net"
+        event = self._make_text_event(owner_id, owner_id, "rejeitar venda aya-us-1")
+        with patch.dict(os.environ, {"WHATSAPP_CONFIG_SUBDIR": "instance"}), \
+             patch(
+                 "whatsapp_manager._resolve_phone_from_jid",
+                 side_effect=lambda jid: (
+                     "12025550199@s.whatsapp.net"
+                     if jid == "123456789012345@lid"
+                     else jid
+                 ),
+             ), \
+             patch("whatsapp_manager._human_send") as mock_send:
+            self._dispatch_event(event)
+
+        client_call = next(
+            c for c in mock_send.call_args_list if c.args[0] == "123456789012345@lid"
+        )
+        self.assertIn("No pudimos confirmar tu pago", client_call.args[1])
+        self.assertIn("envíamelo de nuevo", client_call.args[1])
+        self.assertNotIn("Não conseguimos", client_call.args[1])
 
     @patch("whatsapp_manager._load_sales", return_value={
         "001-30072026-0031": {
@@ -3403,6 +3943,77 @@ class TestFetchChatHistory(BaseWhatsAppManagerTest):
         result = _fetch_chat_history("5511888@s.whatsapp.net")
         self.assertEqual(result, "")
 
+    @patch("urllib.request.urlopen", side_effect=OSError("message server offline"))
+    def test_falls_back_to_local_sqlite_when_server_is_offline(self, mock_urlopen):
+        from whatsapp_manager import _fetch_chat_history
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "whatsapp_messages.db"
+            conn = sqlite3.connect(db_path)
+            conn.execute(
+                """
+                CREATE TABLE messages (
+                    chat_id TEXT,
+                    sender_name TEXT,
+                    body TEXT,
+                    timestamp REAL,
+                    from_me INTEGER
+                )
+                """
+            )
+            conn.executemany(
+                "INSERT INTO messages VALUES (?, ?, ?, ?, ?)",
+                [
+                    ("12025550123@s.whatsapp.net", "Taylor", "We operate in Massachusetts", 1, 0),
+                    ("12025550123@s.whatsapp.net", "AYA", "How do you manage the schedule?", 2, 1),
+                    ("other@s.whatsapp.net", "Other", "must not leak", 3, 0),
+                ],
+            )
+            conn.commit()
+            conn.close()
+
+            with patch.object(whatsapp_manager, "_MSG_DB_PATH", db_path):
+                result = _fetch_chat_history("12025550123@s.whatsapp.net", limit=10)
+
+        self.assertEqual(
+            result,
+            "Taylor: We operate in Massachusetts\nAYA: How do you manage the schedule?",
+        )
+
+    @patch("urllib.request.urlopen", side_effect=OSError("message server offline"))
+    def test_local_fallback_resolves_phone_to_lid_history(self, mock_urlopen):
+        from whatsapp_manager import _fetch_chat_history
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "whatsapp_messages.db"
+            conn = sqlite3.connect(db_path)
+            conn.execute(
+                """
+                CREATE TABLE messages (
+                    chat_id TEXT,
+                    sender_name TEXT,
+                    body TEXT,
+                    timestamp REAL,
+                    from_me INTEGER
+                )
+                """
+            )
+            conn.execute(
+                "INSERT INTO messages VALUES (?, ?, ?, ?, ?)",
+                ("777000111@lid", "Taylor", "My cleaning company operates in the US", 1, 0),
+            )
+            conn.commit()
+            conn.close()
+
+            with patch.object(whatsapp_manager, "_MSG_DB_PATH", db_path), patch.dict(
+                whatsapp_manager._lid_to_phone,
+                {"777000111": "12025550123"},
+                clear=True,
+            ):
+                result = _fetch_chat_history("12025550123@s.whatsapp.net", limit=10)
+
+        self.assertEqual(result, "Taylor: My cleaning company operates in the US")
+
 
 class TestResolveContactNameFromBridge(BaseWhatsAppManagerTest):
     """Testes para _resolve_contact_name_from_bridge."""
@@ -3631,6 +4242,10 @@ class TestSyncContactsNamePreservation(BaseWhatsAppManagerTest):
                 "relationship": "Parente",
                 "tone": "informal",
                 "guidelines": "seja gentil",
+                "market_id": "US",
+                "country": "United States",
+                "currency": "USD",
+                "language": "es",
                 "last_interaction": 1686450000,
             }
         }
@@ -3670,6 +4285,11 @@ class TestSyncContactsNamePreservation(BaseWhatsAppManagerTest):
         saved_name = written.get("5511777777777@s.whatsapp.net", {}).get("name")
         self.assertEqual(saved_name, "Isabel Alencar",
                          f"Nome real deve ser preservado, mas ficou: {saved_name!r}")
+        saved = written["5511777777777@s.whatsapp.net"]
+        self.assertEqual(saved["market_id"], "US")
+        self.assertEqual(saved["country"], "United States")
+        self.assertEqual(saved["currency"], "USD")
+        self.assertEqual(saved["language"], "es")
 
 
 class TestLiveClassifyContact(BaseWhatsAppManagerTest):
@@ -3798,6 +4418,10 @@ class TestLiveClassifyContact(BaseWhatsAppManagerTest):
             "manual_relationship": "Amigo",  # dono definiu como amigo
             "relationship": "Amigo",
             "notes": "vizinho de longa data",
+            "market_id": "US",
+            "country": "United States",
+            "currency": "USD",
+            "language": "es",
         }
 
         from whatsapp_manager import _live_classify_contact
@@ -3816,6 +4440,10 @@ class TestLiveClassifyContact(BaseWhatsAppManagerTest):
         self.assertEqual(result["manual_relationship"], "Amigo")
         # notes devem ser preservadas
         self.assertEqual(result["notes"], "vizinho de longa data")
+        self.assertEqual(result["market_id"], "US")
+        self.assertEqual(result["country"], "United States")
+        self.assertEqual(result["currency"], "USD")
+        self.assertEqual(result["language"], "es")
 
     @patch("whatsapp_manager._push_personal_contacts_to_github")
     @patch("sqlite3.connect")
@@ -4680,6 +5308,26 @@ class TestDedupPersonalContacts(unittest.TestCase):
         self.assertEqual(removed, 0)
         self.assertEqual(len(pc), 2)
 
+    def test_merge_preserves_commercial_market_metadata(self):
+        primary = {"relationship": "Cliente"}
+        secondary = {
+            "market_id": "US",
+            "country": "United States",
+            "currency": "USD",
+            "offer": "international",
+            "timezone": "America/New_York",
+            "language": "es",
+        }
+
+        self._merge(primary, secondary)
+
+        self.assertEqual(primary["market_id"], "US")
+        self.assertEqual(primary["country"], "United States")
+        self.assertEqual(primary["currency"], "USD")
+        self.assertEqual(primary["offer"], "international")
+        self.assertEqual(primary["timezone"], "America/New_York")
+        self.assertEqual(primary["language"], "es")
+
 
 class TestSanitizeSensitive(unittest.TestCase):
     """Testa _sanitize_sensitive — segurança dos exemplos de diálogo."""
@@ -5479,6 +6127,72 @@ class TestPrepareContactReply(BaseWhatsAppManagerTest):
         out = whatsapp_manager._prepare_contact_reply("Self-improvement review")
         self.assertEqual(out, "")
 
+    def test_internal_commercial_authorization_is_never_sent(self):
+        import whatsapp_manager
+        text = (
+            "Não posso oferecer desconto sem autorização explícita do Gustavo.\n"
+            "Esse é o valor atual da condição."
+        )
+        out = whatsapp_manager._prepare_contact_reply(text)
+        self.assertEqual(out, "Esse é o valor atual da condição.")
+
+    def test_human_validation_jargon_is_never_sent(self):
+        import whatsapp_manager
+        text = (
+            "The next step is human validation before payment.\n"
+            "I can send the official payment details now."
+        )
+        out = whatsapp_manager._prepare_contact_reply(text)
+        self.assertEqual(out, "I can send the official payment details now.")
+
+    def test_internal_commercial_rules_are_never_sent_in_spanish(self):
+        import whatsapp_manager
+        text = (
+            "No puedo cambiarlo sin autorización explícita de Gustavo.\n"
+            "El siguiente paso es validación humana.\n"
+            "Esta es la condición actual."
+        )
+        out = whatsapp_manager._prepare_contact_reply(text)
+        self.assertEqual(out, "Esta es la condición actual.")
+
+    def test_internal_approval_variations_are_never_sent(self):
+        import whatsapp_manager
+        samples = (
+            "Preciso da aprovação do Gustavo antes de enviar o pagamento.",
+            "Gustavo precisa aprovar essa condição.",
+            "I need Gustavo approval before payment.",
+            "Gustavo must approve this condition.",
+            "Necesito la aprobación de Gustavo antes del pago.",
+            "Gustavo tiene que aprobar esta condición.",
+            "No puedo cambiarlo sin la autorización explícita de Gustavo.",
+            "Isso precisa ser aprovado pelo Gustavo.",
+            "Antes de cobrar, preciso validar isso com o Gustavo.",
+            "This must be approved by Gustavo.",
+            "Necesito verificarlo con Gustavo antes del pago.",
+            "Antes de cobrar, preciso verificar com o André.",
+        )
+        for sample in samples:
+            self.assertEqual(whatsapp_manager._prepare_contact_reply(sample), "", sample)
+
+    def test_official_zelle_recipient_is_preserved(self):
+        import whatsapp_manager
+        text = (
+            "Zelle:\n"
+            "Izabella Kristiny de Freitas\n"
+            "izabellafreitas2002@hotmail.com"
+        )
+        self.assertEqual(whatsapp_manager._prepare_contact_reply(text), text)
+
+    def test_integration_caveats_are_not_mistaken_for_internal_approval(self):
+        import whatsapp_manager
+        samples = (
+            "Precisamos validar a integração com o Google Calendar durante a configuração.",
+            "Vou verificar com o QuickBooks como a conexão funciona.",
+            "Só precisamos confirmar como a conexão com o calendário será feita durante a configuração.",
+        )
+        for sample in samples:
+            self.assertEqual(whatsapp_manager._prepare_contact_reply(sample), sample)
+
     def test_core_fallback_notice_suppressed(self):
         """Família de aviso de retry/fallback do core — vazou pro cliente em 2026-08-20."""
         import whatsapp_manager
@@ -5529,8 +6243,11 @@ class TestTransformLlmOutput(BaseWhatsAppManagerTest):
         whatsapp_manager._turn_key.clear()
         whatsapp_manager._turn_sent.clear()
         whatsapp_manager._turn_inflight.clear()
+        whatsapp_manager._turn_inbound.clear()
+        whatsapp_manager._turn_context_bindings.set(())
         whatsapp_manager._sender_to_chat.clear()
         whatsapp_manager._responded_sessions.clear()
+        whatsapp_manager._pending_inbound.clear()
         whatsapp_manager._HUMAN_DELIVER_SYNC = True
         self.delivery_gate_patcher = patch("whatsapp_manager._assert_delivery_allowed")
         self.delivery_gate_patcher.start()
@@ -5546,8 +6263,11 @@ class TestTransformLlmOutput(BaseWhatsAppManagerTest):
         whatsapp_manager._turn_key.clear()
         whatsapp_manager._turn_sent.clear()
         whatsapp_manager._turn_inflight.clear()
+        whatsapp_manager._turn_inbound.clear()
+        whatsapp_manager._turn_context_bindings.set(())
         whatsapp_manager._sender_to_chat.clear()
         whatsapp_manager._responded_sessions.clear()
+        whatsapp_manager._pending_inbound.clear()
         whatsapp_manager._HUMAN_DELIVER_SYNC = False
         super().tearDown()
 
@@ -5614,7 +6334,8 @@ class TestTransformLlmOutput(BaseWhatsAppManagerTest):
         result = self._call("5511888888888@s.whatsapp.net", "pronto, adicionei o contato.")
         self.assertEqual(result, "\n")
         sent = mock_send.call_args[0][1]
-        self.assertIn("André", sent)
+        self.assertNotIn("André", sent)
+        self.assertIn("não é algo que consigo fazer", sent)
         self.assertNotIn("adicionei", sent)
 
     @patch("whatsapp_manager._human_send")
@@ -5635,6 +6356,58 @@ class TestTransformLlmOutput(BaseWhatsAppManagerTest):
         r2 = self._call(session, "segunda resposta duplicada")
         self.assertEqual(r2, "\n")
         mock_send.assert_called_once()
+
+    @patch("whatsapp_manager._human_send", side_effect=("sent-old", "sent-new"))
+    def test_old_response_keeps_its_turn_when_new_pre_llm_already_started(self, mock_send):
+        session = "12025550199@s.whatsapp.net"
+        whatsapp_manager._track_inbound(session, "msg-old", "Quiero avanzar.")
+        old_turn = whatsapp_manager._register_contact_turn(
+            session,
+            session,
+            "Quiero avanzar.",
+        )
+
+        whatsapp_manager._track_inbound(session, "msg-new", "No quiero pagar.")
+        new_turn = whatsapp_manager._register_contact_turn(
+            session,
+            session,
+            "No quiero pagar.",
+        )
+
+        self.assertNotEqual(old_turn, new_turn)
+        self.assertIn(old_turn, whatsapp_manager._turn_inbound)
+        self.assertIn(new_turn, whatsapp_manager._turn_inbound)
+
+        self.assertEqual(self._call(session, "Old reply"), "\n")
+        self.assertIn(old_turn, whatsapp_manager._turn_sent)
+        self.assertNotIn(new_turn, whatsapp_manager._turn_sent)
+        self.assertEqual(
+            whatsapp_manager._current_inbound_text(session),
+            "No quiero pagar.",
+        )
+
+        self.assertEqual(self._call(session, "New reply"), "\n")
+        self.assertIn(new_turn, whatsapp_manager._turn_sent)
+        self.assertEqual(mock_send.call_args_list[0].args[1], "Old reply")
+        self.assertEqual(mock_send.call_args_list[1].args[1], "New reply")
+        self.assertEqual(whatsapp_manager._current_inbound_text(session), "")
+
+    def test_identical_messages_with_different_ids_are_distinct_turns(self):
+        session = "12025550199@s.whatsapp.net"
+        whatsapp_manager._track_inbound(session, "msg-one", "Ok")
+        first = whatsapp_manager._register_contact_turn(session, session, "Ok")
+        whatsapp_manager._track_inbound(session, "msg-two", "Ok")
+        second = whatsapp_manager._register_contact_turn(session, session, "Ok")
+
+        self.assertNotEqual(first, second)
+        self.assertEqual(
+            whatsapp_manager._turn_inbound[first]["message_id"],
+            "msg-one",
+        )
+        self.assertEqual(
+            whatsapp_manager._turn_inbound[second]["message_id"],
+            "msg-two",
+        )
 
     def test_reservation_does_not_mark_sent_before_confirmation(self):
         session = "5511888888888@s.whatsapp.net"
@@ -5722,6 +6495,461 @@ class TestTransformLlmOutput(BaseWhatsAppManagerTest):
             automation=True,
         )
 
+    @staticmethod
+    def _payment_rules():
+        return (
+            "| Mercado | Implementação | Mensalidade |\n"
+            "| --- | --- | --- |\n"
+            "| Brasil | R$ 1.500 | R$ 497/mês |\n"
+            "| Estados Unidos | US$ 497 | US$ 99/mês |\n"
+            "<!-- AYA_PAYMENT_DETAILS:BR:START -->\n"
+            "- **Pix CNPJ:** 44.249.819/0001-62\n"
+            "- **Titular:** Titular Brasil\n"
+            "<!-- AYA_PAYMENT_DETAILS:BR:END -->\n"
+            "<!-- AYA_PAYMENT_DETAILS:US:START -->\n"
+            "- **Recipient:** Test Recipient\n"
+            "- **Zelle email:** pay@example.com\n"
+            "<!-- AYA_PAYMENT_DETAILS:US:END -->"
+        )
+
+    def _call_aya_payment_reply(self, inbound, response, contact):
+        session = "12025550199@s.whatsapp.net"
+        test_turn = f"test-turn:{session}"
+        whatsapp_manager._turn_key.pop(session, None)
+        whatsapp_manager._turn_sent.discard(test_turn)
+        whatsapp_manager._turn_inflight.discard(test_turn)
+        whatsapp_manager._turn_inbound.pop(test_turn, None)
+        whatsapp_manager._track_inbound(session, "msg-payment", inbound)
+        with patch.dict(os.environ, {"WHATSAPP_CONFIG_SUBDIR": "instance"}), \
+             patch("whatsapp_manager._load_personal_contacts", return_value={session: contact}), \
+             patch("whatsapp_manager._load_support_files", return_value=("AYA", self._payment_rules())), \
+             patch("whatsapp_manager._human_send") as mock_send:
+            result = self._call(session, response)
+        return result, mock_send
+
+    def test_zelle_details_are_blocked_for_price_question(self):
+        response = "Zelle:\nTest Recipient\npay@example.com"
+        result, mock_send = self._call_aya_payment_reply(
+            "¿Cuánto cuesta?",
+            response,
+            {"market_id": "US", "currency": "USD", "language": "es"},
+        )
+
+        self.assertEqual(result, "\n")
+        sent = mock_send.call_args.args[1]
+        self.assertNotIn("Test Recipient", sent)
+        self.assertNotIn("pay@example.com", sent)
+
+    def test_zelle_details_are_preserved_for_explicit_us_purchase_intent(self):
+        response = "Zelle:\nTest Recipient\npay@example.com"
+        result, mock_send = self._call_aya_payment_reply(
+            "Quiero avanzar.",
+            response,
+            {"market_id": "US", "currency": "USD", "language": "es"},
+        )
+
+        self.assertEqual(result, "\n")
+        self.assertEqual(mock_send.call_args.args[1], response)
+
+    def test_invented_zelle_details_are_blocked_even_with_purchase_intent(self):
+        response = "Zelle email: attacker@example.com\nRecipient: Persona Inventada"
+        _result, mock_send = self._call_aya_payment_reply(
+            "Quiero avanzar.",
+            response,
+            {"market_id": "US", "currency": "USD", "language": "es"},
+        )
+
+        sent = mock_send.call_args.args[1]
+        self.assertNotIn("attacker@example.com", sent)
+        self.assertNotIn("Persona Inventada", sent)
+
+    def test_unicode_obfuscation_cannot_bypass_payment_gate(self):
+        response = "Z\u200belle:\nTest Recipient\npay\u200b@example.com"
+        _result, mock_send = self._call_aya_payment_reply(
+            "¿Cuánto cuesta?",
+            response,
+            {"market_id": "US", "currency": "USD", "language": "es"},
+        )
+
+        sent = mock_send.call_args.args[1]
+        self.assertNotIn("Test Recipient", sent)
+        self.assertNotIn("pay", sent)
+
+    def test_unregistered_payment_link_is_blocked_even_with_purchase_intent(self):
+        response = "Payment link: https://checkout.attacker.test/pay"
+        _result, mock_send = self._call_aya_payment_reply(
+            "I want to pay now.",
+            response,
+            {"market_id": "US", "currency": "USD", "language": "en"},
+        )
+
+        self.assertNotIn("checkout.attacker.test", mock_send.call_args.args[1])
+
+    def test_payment_method_is_not_sent_before_purchase_intent(self):
+        _result, mock_send = self._call_aya_payment_reply(
+            "How much does it cost?",
+            "The payment method is Zelle.",
+            {"market_id": "US", "currency": "USD", "language": "en"},
+        )
+
+        self.assertNotIn("Zelle", mock_send.call_args.args[1])
+
+    def test_wrong_market_currency_is_blocked_without_payment_details(self):
+        _result, mock_send = self._call_aya_payment_reply(
+            "¿Cuánto cuesta?",
+            "La implementación cuesta R$ 1.500 y la mensualidad R$ 497.",
+            {"market_id": "US", "currency": "USD", "language": "es"},
+        )
+
+        sent = mock_send.call_args.args[1]
+        self.assertNotIn("R$", sent)
+        self.assertNotIn("1.500", sent)
+
+    def test_fragmented_zelle_recipient_is_blocked_without_purchase_intent(self):
+        response = "Zelle:\nTest\nRecipient"
+        _result, mock_send = self._call_aya_payment_reply(
+            "¿Cuánto cuesta?",
+            response,
+            {"market_id": "US", "currency": "USD", "language": "es"},
+        )
+
+        sent = mock_send.call_args.args[1]
+        self.assertNotIn("Test", sent)
+        self.assertNotIn("Recipient", sent)
+
+    def test_pix_phone_key_is_blocked_without_purchase_intent(self):
+        response = "Pague via Pix para 551199887766."
+        _result, mock_send = self._call_aya_payment_reply(
+            "Quanto custa?",
+            response,
+            {"market_id": "BR", "currency": "BRL", "language": "pt"},
+        )
+
+        self.assertNotIn("551199887766", mock_send.call_args.args[1])
+
+    def test_pix_is_blocked_for_us_market_even_with_purchase_intent(self):
+        response = "Pix CNPJ: 44.249.819/0001-62\nTitular Brasil"
+        _result, mock_send = self._call_aya_payment_reply(
+            "I want to move forward.",
+            response,
+            {"market_id": "US", "currency": "USD", "language": "en"},
+        )
+
+        sent = mock_send.call_args.args[1]
+        self.assertNotIn("44.249.819/0001-62", sent)
+        self.assertNotIn("Titular Brasil", sent)
+
+    def test_zelle_is_blocked_for_brazil_market_even_with_purchase_intent(self):
+        response = "Zelle:\nTest Recipient\npay@example.com"
+        _result, mock_send = self._call_aya_payment_reply(
+            "Quero contratar.",
+            response,
+            {"market_id": "BR", "currency": "BRL", "language": "pt"},
+        )
+
+        sent = mock_send.call_args.args[1]
+        self.assertNotIn("Test Recipient", sent)
+        self.assertNotIn("pay@example.com", sent)
+
+    def test_negated_or_cancelled_intent_never_releases_zelle(self):
+        response = "Zelle:\nTest Recipient\npay@example.com"
+        for inbound in (
+            "Não quero pagar.",
+            "No quiero pagar.",
+            "Don't send the payment details.",
+            "I want to move forward — actually no.",
+            "Quiero avanzar, pero cambié de opinión.",
+            "I said 'I want to move forward' last week, not now.",
+            "I want to move forward, but not today.",
+            "Quero avançar, mas não hoje.",
+            "Quiero avanzar, pero no hoy.",
+            "I want to move forward, but let me think about it.",
+            "Quero avançar, mas deixa eu pensar.",
+            "Quiero avanzar, pero déjame pensarlo.",
+            "I want to move forward, but do **not** send the payment details.",
+            "Quero avançar, mas **não** envie os dados de pagamento ainda.",
+            "Quiero avanzar, pero **no** envíes los datos de pago todavía.",
+            "I want to move forward, but do n\u200bot send anything yet.",
+            "Quero avançar, mas a**inda** n\u200bão.",
+            "I want to move forward, but n**ot** y\u200bet.",
+            "Quiero avanzar, pero t**odavía** n\u200bo.",
+            "Quero avançar, mas só semana que vem.",
+            "I want to move forward, but only next week.",
+            "Quiero avanzar, pero la próxima semana.",
+        ):
+            with self.subTest(inbound=inbound):
+                _result, mock_send = self._call_aya_payment_reply(
+                    inbound,
+                    response,
+                    {"market_id": "US", "currency": "USD", "language": "es"},
+                )
+                sent = mock_send.call_args.args[1]
+                self.assertNotIn("Test Recipient", sent)
+                self.assertNotIn("pay@example.com", sent)
+
+    def test_new_cancellation_vetoes_bound_old_purchase_turn(self):
+        session = "12025550199@s.whatsapp.net"
+        turn_key = f"test-turn:{session}"
+        whatsapp_manager._track_inbound(session, "msg-old", "Quiero avanzar.")
+        whatsapp_manager._turn_key[session] = turn_key
+        whatsapp_manager._turn_inbound[turn_key] = whatsapp_manager._current_inbound_record(session)
+        whatsapp_manager._track_inbound(session, "msg-new", "No quiero pagar.")
+
+        response = "Zelle:\nTest Recipient\npay@example.com"
+        with patch.dict(os.environ, {"WHATSAPP_CONFIG_SUBDIR": "instance"}), \
+             patch(
+                 "whatsapp_manager._load_personal_contacts",
+                 return_value={
+                     session: {"market_id": "US", "currency": "USD", "language": "es"}
+                 },
+             ), \
+             patch(
+                 "whatsapp_manager._load_support_files",
+                 return_value=("AYA", self._payment_rules()),
+             ), \
+             patch("whatsapp_manager._human_send") as mock_send:
+            self._call(session, response)
+
+        sent = mock_send.call_args.args[1]
+        self.assertNotIn("Test Recipient", sent)
+        self.assertNotIn("pay@example.com", sent)
+        self.assertEqual(whatsapp_manager._current_inbound_text(session), "No quiero pagar.")
+
+    def test_rendered_markdown_cannot_hide_invented_payment_details(self):
+        responses = (
+            "Pay by Zelle to Persona Inventada",
+            "Zelle: attacker**@**example.com",
+            "Pay here: https://evil.test/pay",
+        )
+        for response in responses:
+            with self.subTest(response=response):
+                _result, mock_send = self._call_aya_payment_reply(
+                    "I want to pay now.",
+                    response,
+                    {"market_id": "US", "currency": "USD", "language": "en"},
+                )
+                sent = mock_send.call_args.args[1]
+                self.assertNotEqual(sent, response)
+                self.assertNotIn("attacker", sent)
+                self.assertNotIn("evil.test", sent)
+                self.assertNotIn("Persona Inventada", sent)
+
+    def test_markdown_obfuscated_zelle_is_blocked_for_brazil(self):
+        response = "Pay using Z**e**l**l**e"
+        _result, mock_send = self._call_aya_payment_reply(
+            "Quero contratar.",
+            response,
+            {"market_id": "BR", "currency": "BRL", "language": "pt"},
+        )
+
+        self.assertNotEqual(mock_send.call_args.args[1], response)
+
+    def test_unapproved_payment_methods_are_blocked(self):
+        for method in (
+            "Venmo", "credit card", "Apple Pay", "boleto", "cartão",
+            "Wise", "Bitcoin", "crypto", "Interac",
+        ):
+            response = f"Pay via {method}."
+            with self.subTest(method=method):
+                _result, mock_send = self._call_aya_payment_reply(
+                    "I want to pay now.",
+                    response,
+                    {"market_id": "US", "currency": "USD", "language": "en"},
+                )
+                self.assertNotEqual(mock_send.call_args.args[1], response)
+
+    def test_unapproved_method_cannot_hide_next_to_official_zelle_block(self):
+        responses = (
+            "Pay via Wise to Mallory.\nZelle:\nTest Recipient\npay@example.com",
+            "Use Bitcoin for the setup fee.\nZelle:\nTest Recipient\npay@example.com",
+            "Use Wise to send the $497 setup fee.",
+            "Zelle:\nTest Recipient\npay@example.com\nAlternatively, use Monero.",
+            "Zelle:\nTest Recipient\npay@example.com\nYou may also send via Western Union.",
+            "Zelle:\nTest Recipient\npay@example.com\nor Mallory",
+            "Zelle:\nTest Recipient\npay@example.com\nOther payment method: Alipay.",
+            "Payment method: Klarna.",
+            "Other payment method: cash.",
+            "Payment option: Alipay.",
+            "Payment choice: Alipay.",
+            "Method of payment: Klarna.",
+            "Zelle:\nTest Recipient\npay@example.com\nPayment option: Alipay.",
+        )
+        for response in responses:
+            with self.subTest(response=response):
+                _result, mock_send = self._call_aya_payment_reply(
+                    "I want to pay now.",
+                    response,
+                    {"market_id": "US", "currency": "USD", "language": "en"},
+                )
+                self.assertNotEqual(mock_send.call_args.args[1], response)
+
+    def test_confusable_zelle_and_extended_recipient_are_blocked(self):
+        responses = (
+            "Zеlle: attacker@example.com",
+            "Zelle:\nTest Recipient or Mallory\npay@example.com",
+        )
+        for response in responses:
+            with self.subTest(response=response):
+                _result, mock_send = self._call_aya_payment_reply(
+                    "I want to pay now.",
+                    response,
+                    {"market_id": "US", "currency": "USD", "language": "en"},
+                )
+                sent = mock_send.call_args.args[1]
+                self.assertNotEqual(sent, response)
+                self.assertNotIn("attacker", sent)
+                self.assertNotIn("Mallory", sent)
+
+    def test_wrong_same_market_prices_and_foreign_currencies_are_blocked(self):
+        cases = (
+            (
+                "The setup is $997 and the monthly fee is $397.",
+                {"market_id": "US", "currency": "USD", "language": "en"},
+            ),
+            (
+                "A implementação é R$ 997 e a mensalidade é R$ 397.",
+                {"market_id": "BR", "currency": "BRL", "language": "pt"},
+            ),
+            (
+                "The setup is €497 and the monthly fee is €99.",
+                {"market_id": "US", "currency": "USD", "language": "en"},
+            ),
+            (
+                "The setup is £497 and the monthly fee is £99.",
+                {"market_id": "US", "currency": "USD", "language": "en"},
+            ),
+            (
+                "The setup is CHF 497 and the monthly fee is INR 99.",
+                {"market_id": "US", "currency": "USD", "language": "en"},
+            ),
+            (
+                "The setup is $497.99 and the monthly fee is $99.50.",
+                {"market_id": "US", "currency": "USD", "language": "en"},
+            ),
+            (
+                "A implementação é R$ 1.500,99 e a mensalidade é R$ 497,50.",
+                {"market_id": "BR", "currency": "BRL", "language": "pt"},
+            ),
+            (
+                "The setup is five hundred dollars.",
+                {"market_id": "US", "currency": "USD", "language": "en"},
+            ),
+            (
+                "The setup is eleven dollars and the monthly fee is ninety dollars.",
+                {"market_id": "US", "currency": "USD", "language": "en"},
+            ),
+            (
+                "The setup is KWD 497 and the monthly fee is SAR 99.",
+                {"market_id": "US", "currency": "USD", "language": "en"},
+            ),
+            (
+                "The setup is kwd 497 and the monthly fee is sar 99.",
+                {"market_id": "US", "currency": "USD", "language": "en"},
+            ),
+            (
+                "The setup is c$497 and the monthly fee is a$99.",
+                {"market_id": "US", "currency": "USD", "language": "en"},
+            ),
+            (
+                "The setup is ₺497 and the monthly fee is ₦99.",
+                {"market_id": "US", "currency": "USD", "language": "en"},
+            ),
+            (
+                "The setup is 997 USD and the monthly fee is 397 USD.",
+                {"market_id": "US", "currency": "USD", "language": "en"},
+            ),
+            (
+                "A implementação é 997 BRL e a mensalidade é 397 BRL.",
+                {"market_id": "BR", "currency": "BRL", "language": "pt"},
+            ),
+            (
+                "The setup is $99 and the monthly fee is $497.",
+                {"market_id": "US", "currency": "USD", "language": "en"},
+            ),
+            (
+                "The setup is $497 and the monthly fee is $497.",
+                {"market_id": "US", "currency": "USD", "language": "en"},
+            ),
+            (
+                "The one-time fee is $99 and the recurring fee is $497.",
+                {"market_id": "US", "currency": "USD", "language": "en"},
+            ),
+            (
+                "The one-time fee is USD five hundred and the recurring fee is USD ninety.",
+                {"market_id": "US", "currency": "USD", "language": "en"},
+            ),
+            (
+                "A implementação é R$ 497 e a mensalidade é R$ 1.500.",
+                {"market_id": "BR", "currency": "BRL", "language": "pt"},
+            ),
+        )
+        for response, contact in cases:
+            with self.subTest(response=response):
+                _result, mock_send = self._call_aya_payment_reply(
+                    "How much does it cost?",
+                    response,
+                    contact,
+                )
+                self.assertNotEqual(mock_send.call_args.args[1], response)
+
+    def test_official_prices_are_preserved_without_purchase_intent(self):
+        cases = (
+            (
+                "The setup is $497 and the monthly fee is $99.",
+                {"market_id": "US", "currency": "USD", "language": "en"},
+            ),
+            (
+                "A implementação é R$ 1.500 e a mensalidade é R$ 497.",
+                {"market_id": "BR", "currency": "BRL", "language": "pt"},
+            ),
+        )
+        for response, contact in cases:
+            with self.subTest(response=response):
+                _result, mock_send = self._call_aya_payment_reply(
+                    "Quanto custa?" if contact["market_id"] == "BR" else "How much is it?",
+                    response,
+                    contact,
+                )
+                self.assertEqual(mock_send.call_args.args[1], response)
+
+    def test_official_labeled_payment_method_is_preserved_with_purchase_intent(self):
+        response = "Payment method: Zelle.\nZelle:\nTest Recipient\npay@example.com"
+        _result, mock_send = self._call_aya_payment_reply(
+            "I want to pay now.",
+            response,
+            {"market_id": "US", "currency": "USD", "language": "en"},
+        )
+
+        sent = "\n".join(call.args[1] for call in mock_send.call_args_list)
+        self.assertIn("Payment method: Zelle.", sent)
+        self.assertIn("Test Recipient", sent)
+        self.assertIn("pay@example.com", sent)
+
+    def test_integration_account_language_is_not_treated_as_banking(self):
+        for response in (
+            "We can validate your Google Calendar account during setup.",
+            "We can confirm your Google Ads account number during setup.",
+            "We can validate the QuickBooks account number during setup.",
+        ):
+            with self.subTest(response=response):
+                _result, mock_send = self._call_aya_payment_reply(
+                    "How does the integration work?",
+                    response,
+                    {"market_id": "US", "currency": "USD", "language": "en"},
+                )
+
+                self.assertEqual(mock_send.call_args.args[1], response)
+
+    def test_bare_dollar_price_is_blocked_for_brazil_market(self):
+        response = "The setup is $497 and the monthly fee is $99."
+        _result, mock_send = self._call_aya_payment_reply(
+            "Quanto custa?",
+            response,
+            {"market_id": "BR", "currency": "BRL", "language": "pt"},
+        )
+
+        self.assertNotEqual(mock_send.call_args.args[1], response)
+
 
 class TestWhatsAppAdapterWhitespace(unittest.TestCase):
     """Adapter não reenvia o whitespace que transform_llm_output devolve ao Hermes."""
@@ -5805,8 +7033,245 @@ class TestPreToolCall(BaseWhatsAppManagerTest):
         self.assertIn(result, [None, "Ferramentas não disponíveis para sessões de contato."])
 
 
+class TestPluginConfigDeployRoot(unittest.TestCase):
+    def test_instance_subdir_selects_instance_bootstrap(self):
+        import whatsapp_manager
+        with patch.dict(os.environ, {"WHATSAPP_CONFIG_SUBDIR": "instance"}, clear=False):
+            self.assertTrue(whatsapp_manager.config.plugin_deploy_raw_root.endswith("/deploy/instance"))
+
+    def test_empty_subdir_keeps_generic_bootstrap(self):
+        import whatsapp_manager
+        with patch.dict(os.environ, {"WHATSAPP_CONFIG_SUBDIR": ""}, clear=False):
+            self.assertTrue(whatsapp_manager.config.plugin_deploy_raw_root.endswith("/deploy"))
+
+    def test_generic_sentinel_keeps_generic_bootstrap(self):
+        import whatsapp_manager
+        with patch.dict(os.environ, {"WHATSAPP_CONFIG_SUBDIR": "generic"}, clear=False):
+            self.assertEqual(whatsapp_manager.config.plugin_config_subdir, "")
+            self.assertTrue(whatsapp_manager.config.plugin_deploy_raw_root.endswith("/deploy"))
+
+    def test_instance_bootstrap_falls_back_per_file(self):
+        import whatsapp_manager
+        with patch.dict(os.environ, {"WHATSAPP_CONFIG_SUBDIR": "instance"}, clear=False):
+            self.assertTrue(whatsapp_manager._plugin_bootstrap_url("SOUL_WHATSAPP.md").endswith(
+                "/deploy/instance/SOUL_WHATSAPP.md"
+            ))
+            self.assertTrue(whatsapp_manager._plugin_bootstrap_url("support_rules.md").endswith(
+                "/deploy/instance/support_rules.md"
+            ))
+            self.assertTrue(whatsapp_manager._plugin_bootstrap_url("SOUL_EMAIL.md").endswith(
+                "/deploy/SOUL_EMAIL.md"
+            ))
+            self.assertTrue(whatsapp_manager._plugin_bootstrap_url("personal_contacts.json.example").endswith(
+                "/deploy/personal_contacts.json.example"
+            ))
+
+    def test_unsafe_subdir_cannot_escape_deploy_root(self):
+        import whatsapp_manager
+        with patch.dict(os.environ, {"WHATSAPP_CONFIG_SUBDIR": "../instance"}, clear=False):
+            self.assertEqual(whatsapp_manager.config.plugin_config_subdir, "")
+            self.assertTrue(whatsapp_manager.config.plugin_deploy_raw_root.endswith("/deploy"))
+
+
+class TestCommercialContextInference(unittest.TestCase):
+    def test_external_metadata_only_accepts_authoritative_market_id(self):
+        import whatsapp_manager
+        extracted = whatsapp_manager._extract_external_commercial_metadata({
+            "commercial_metadata": {
+                "market_id": "invalid",
+                "country": "United States",
+                "currency": "USD",
+                "offer": "international",
+                "_identity_lid": "999999999999999@lid",
+                "campaign": "campaign-123",
+            }
+        })
+
+        self.assertNotIn("market_id", extracted)
+        self.assertNotIn("country", extracted)
+        self.assertNotIn("currency", extracted)
+        self.assertNotIn("offer", extracted)
+        self.assertNotIn("_identity_lid", extracted)
+        self.assertEqual(extracted["campaign"], "campaign-123")
+
+    def test_detects_current_language_without_using_it_as_market(self):
+        import whatsapp_manager
+        samples = {
+            "Tengo una empresa de limpieza y quiero avanzar.": "es",
+            "I have a cleaning company and want to move forward.": "en",
+            "Tenho uma empresa de limpeza e quero avançar.": "pt",
+        }
+        for message, expected in samples.items():
+            self.assertEqual(whatsapp_manager._infer_message_language(message), expected, message)
+        self.assertIsNone(whatsapp_manager._infer_message_language("Ok"))
+        self.assertEqual(
+            whatsapp_manager._infer_explicit_market_metadata("Quiero saber más sobre el servicio."),
+            {},
+        )
+
+    def test_spanish_english_code_switch_keeps_us_market(self):
+        import whatsapp_manager
+        message = "Tengo una cleaning company en Massachusetts."
+
+        self.assertEqual(whatsapp_manager._infer_message_language(message), "es")
+        metadata = whatsapp_manager._infer_explicit_market_metadata(message)
+        self.assertEqual(metadata["market_id"], "US")
+        self.assertEqual(metadata["currency"], "USD")
+
+    def test_purchase_intent_is_explicit_and_multilingual(self):
+        import whatsapp_manager
+        for message in (
+            "Quero avançar.",
+            "Me manda o pagamento.",
+            "I want to move forward.",
+            "I’m ready to start.",
+            "Send me the payment information.",
+            "Quiero contratar.",
+            "¿Cómo puedo pagar?",
+            "Envíame el pago.",
+            "Pode me mandar a chave Pix?",
+            "I want to pay now.",
+            "Please send the Zelle details.",
+            "Estoy listo para pagar.",
+            "Can I pay by Zelle?",
+            "Fechado, manda o Pix.",
+            "Mándame el Zelle.",
+        ):
+            self.assertTrue(whatsapp_manager._has_explicit_purchase_intent(message), message)
+        for message in (
+            "¿Cuánto cuesta?",
+            "How much does it cost?",
+            "No quiero contratar.",
+            "Não estou pronto para começar.",
+            "No estoy listo para empezar.",
+            "I don't want to move forward.",
+            "Ella dijo «quiero contratar»; yo no.",
+            "She said ‘I want to move forward’. Not me.",
+            "Não quero pagar.",
+            "No quiero pagar.",
+            "Don't send the payment details.",
+            "I want to move forward — actually no.",
+            "Quiero avanzar, pero cambié de opinión.",
+            "I said 'I want to move forward' last week, not now.",
+            "I want to move forward, but not today.",
+            "Quero avançar, mas não hoje.",
+            "Quiero avanzar, pero no hoy.",
+            "I want to move forward, but let me think about it.",
+            "Quero avançar, mas deixa eu pensar.",
+            "Quiero avanzar, pero déjame pensarlo.",
+            "I want to move forward, but do **not** send the payment details.",
+            "Quero avançar, mas **não** envie os dados de pagamento ainda.",
+            "Quiero avanzar, pero **no** envíes los datos de pago todavía.",
+            "I want to move forward, but do n\u200bot send anything yet.",
+            "Quero avançar, mas a**inda** n\u200bão.",
+            "I want to move forward, but n**ot** y\u200bet.",
+            "Quiero avanzar, pero t**odavía** n\u200bo.",
+            "Quero avançar, mas só semana que vem.",
+            "I want to move forward, but only next week.",
+            "Quiero avanzar, pero la próxima semana.",
+        ):
+            self.assertFalse(whatsapp_manager._has_explicit_purchase_intent(message), message)
+
+    def test_external_metadata_saves_lid_on_digits_only_canonical_key(self):
+        import whatsapp_manager
+        phone_key = "12025550199"
+        lid = "999999999999999@lid"
+        contacts = {
+            phone_key: {
+                "market_id": "US",
+                "currency": "USD",
+                "language": "es",
+            }
+        }
+
+        with patch("whatsapp_manager._load_personal_contacts", return_value=contacts), \
+             patch("whatsapp_manager._write_personal_contacts_atomic") as mock_write:
+            result = whatsapp_manager._persist_external_commercial_metadata(
+                "12025550199@s.whatsapp.net",
+                "12025550199@s.whatsapp.net",
+                {"market_id": "US", "language": "es", "_identity_lid": lid},
+            )
+
+        self.assertEqual(result["lid"], lid)
+        saved_contacts = mock_write.call_args.args[0]
+        self.assertEqual(saved_contacts[phone_key]["lid"], lid)
+
+    def test_detects_market_only_from_explicit_business_operation(self):
+        import whatsapp_manager
+        us = whatsapp_manager._infer_explicit_market_metadata(
+            "Tengo una empresa de limpieza en Massachusetts."
+        )
+        brazil = whatsapp_manager._infer_explicit_market_metadata(
+            "Tenho uma empresa de limpeza em São Paulo."
+        )
+
+        self.assertEqual(us["market_id"], "US")
+        self.assertEqual(us["currency"], "USD")
+        self.assertEqual(brazil["market_id"], "BR")
+        self.assertEqual(brazil["currency"], "BRL")
+        self.assertEqual(
+            whatsapp_manager._infer_explicit_market_metadata(
+                "Vocês atendem empresas nos Estados Unidos?"
+            ),
+            {},
+        )
+
+    def test_commercial_lookup_prefers_canonical_market_record_over_stale_lid(self):
+        import whatsapp_manager
+        lid = "123456789012345@lid"
+        contacts = {
+            lid: {
+                "market_id": "BR",
+                "market": "Brazil",
+                "market_source": "stale",
+                "origin": "old import",
+                "campaign": "old campaign",
+                "country": "Brazil",
+                "currency": "BRL",
+                "offer": "brazil",
+                "timezone": "America/Sao_Paulo",
+                "language": "pt",
+            },
+            "12025550199@s.whatsapp.net": {
+                "lid": lid,
+                "market_id": "US",
+                "currency": "USD",
+                "offer": "international",
+                "language": "es",
+            },
+        }
+
+        with patch("whatsapp_manager._resolve_phone_from_jid", side_effect=lambda jid: jid):
+            record = whatsapp_manager._contact_record_for_chat(lid, contacts)
+
+        self.assertEqual(record["market_id"], "US")
+        self.assertEqual(record["country"], "United States")
+        self.assertEqual(record["currency"], "USD")
+        self.assertEqual(record["offer"], "international")
+        self.assertEqual(record["language"], "es")
+
+
 class TestFishAsr(unittest.TestCase):
     """Transcrição pela API do Fish — áudio não passa mais pelos modelos do OpenRouter."""
+
+    def test_idioma_padrao_e_detectado_automaticamente(self):
+        import whatsapp_manager
+        with patch.dict(
+            os.environ,
+            {"WHATSAPP_STT_LANGUAGE": "", "HERMES_LOCAL_STT_LANGUAGE": "pt"},
+            clear=False,
+        ):
+            self.assertIsNone(whatsapp_manager._fish_asr_language())
+
+    def test_override_explicito_de_idioma_e_preservado(self):
+        import whatsapp_manager
+        with patch.dict(os.environ, {"WHATSAPP_STT_LANGUAGE": "es"}, clear=False):
+            self.assertEqual(whatsapp_manager._fish_asr_language(), "es")
+
+    def test_override_invalido_volta_para_deteccao_automatica(self):
+        import whatsapp_manager
+        with patch.dict(os.environ, {"WHATSAPP_STT_LANGUAGE": "espanol"}, clear=False):
+            self.assertIsNone(whatsapp_manager._fish_asr_language())
 
     def test_multipart_carrega_campos_e_binario(self):
         from whatsapp_manager import _build_multipart
@@ -5846,6 +7311,30 @@ class TestFishAsr(unittest.TestCase):
                     whatsapp_manager._transcribe_via_fish(path),
                     "quanto custa a implementação?",
                 )
+        finally:
+            os.unlink(path)
+
+    def test_transcricao_multilingue_omite_language_no_multipart(self):
+        import whatsapp_manager
+        resp = MagicMock()
+        resp.read.return_value = json.dumps(
+            {"text": "quiero avanzar", "duration": 2.5, "language_code": "es"}
+        ).encode()
+        resp.__enter__ = lambda s: s
+        resp.__exit__ = lambda *a: None
+        with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
+            tmp.write(b"audio-bytes")
+            path = tmp.name
+        try:
+            with patch.dict(
+                os.environ,
+                {"FISH_API_KEY": "fk-test", "WHATSAPP_STT_LANGUAGE": ""},
+                clear=False,
+            ), patch("urllib.request.urlopen", return_value=resp) as mock_open:
+                self.assertEqual(whatsapp_manager._transcribe_via_fish(path), "quiero avanzar")
+            request = mock_open.call_args.args[0]
+            self.assertNotIn(b'name="language"', request.data)
+            self.assertIn(b'name="ignore_timestamps"', request.data)
         finally:
             os.unlink(path)
 
@@ -5889,8 +7378,15 @@ class TestPrecoNaoVazaNoCodigo(unittest.TestCase):
         from whatsapp_manager import _lead_name_prompt_block
         bloco = _lead_name_prompt_block("Gustavo")
         self.assertIn("Gustavo", bloco)
-        for valor in ("997", "397", "1.497", "497", "R$", "US$"):
+        for valor in ("997", "397", "1.497", "1.500", "497", "99", "R$", "US$"):
             self.assertNotIn(valor, bloco, f"{valor!r} vazou no bloco de nome do lead")
+
+    def test_bloco_sem_nome_nao_cria_friccao_no_fechamento(self):
+        from whatsapp_manager import _lead_name_prompt_block
+        bloco = _lead_name_prompt_block(None)
+        self.assertIn("NÃO faça essa pergunta", bloco)
+        self.assertIn("pagamento", bloco)
+        self.assertIn("fechamento", bloco)
 
     def test_fonte_do_plugin_sem_valor_da_oferta(self):
         """Os valores da oferta não podem existir no .py — só na tabela comercial.
@@ -5902,7 +7398,7 @@ class TestPrecoNaoVazaNoCodigo(unittest.TestCase):
         from pathlib import Path
         import whatsapp_manager
         fonte = Path(whatsapp_manager.__file__).read_text(encoding="utf-8")
-        valores = (r"997", r"1\.497", r"397", r"US\$\s?497", r"US\$\s?99")
+        valores = (r"997", r"1\.497", r"1\.500", r"397", r"497", r"99")
         achados = [
             f"linha {n}: {linha.strip()[:120]}"
             for n, linha in enumerate(fonte.splitlines(), 1)
@@ -6088,6 +7584,66 @@ class TestInboundWatchdog(unittest.TestCase):
         whatsapp_manager._track_inbound("5511@s.whatsapp.net", "msg-1", "oi")
         self.assertEqual(len(whatsapp_manager._sweep_unanswered(now=time.time() + 9999)), 1)
         self.assertEqual(whatsapp_manager._sweep_unanswered(now=time.time() + 9999), [])
+
+    def test_newest_alias_inbound_wins_and_delivery_clears_all_aliases(self):
+        import whatsapp_manager
+        phone = "12025550199@s.whatsapp.net"
+        lid = "123456789012345@lid"
+        session = "session-us-es"
+        whatsapp_manager._sender_to_chat[session] = lid
+        self.addCleanup(whatsapp_manager._sender_to_chat.pop, session, None)
+
+        def resolve(jid):
+            return phone if str(jid).endswith("@lid") else jid
+
+        with patch("whatsapp_manager._resolve_phone_from_jid", side_effect=resolve):
+            whatsapp_manager._track_inbound(
+                phone,
+                "old",
+                "Quiero avanzar.",
+                {"market_id": "US", "currency": "USD", "language": "es"},
+            )
+            whatsapp_manager._pending_inbound[phone]["at"] = time.time() - 1
+            whatsapp_manager._track_inbound(lid, "new", "No quiero contratar.")
+            whatsapp_manager._pending_inbound[lid]["at"] = time.time()
+
+            self.assertEqual(
+                whatsapp_manager._current_inbound_text(phone, session),
+                "No quiero contratar.",
+            )
+            self.assertEqual(
+                whatsapp_manager._current_inbound_commercial_metadata(phone, session)["market_id"],
+                "US",
+            )
+            whatsapp_manager._clear_inbound(phone)
+
+        self.assertNotIn(phone, whatsapp_manager._pending_inbound)
+        self.assertNotIn(lid, whatsapp_manager._pending_inbound)
+
+    def test_delivery_of_old_turn_does_not_clear_new_concurrent_inbound(self):
+        import whatsapp_manager
+        phone = "12025550199@s.whatsapp.net"
+        whatsapp_manager._track_inbound(phone, "msg-old", "Quiero avanzar.")
+        old_record = whatsapp_manager._current_inbound_record(phone)
+        old_token = whatsapp_manager._inbound_record_token(old_record)
+
+        def send_and_receive_new(*_args, **_kwargs):
+            whatsapp_manager._track_inbound(phone, "msg-new", "No quiero pagar.")
+            return "sent-old-reply"
+
+        with patch("whatsapp_manager._assert_delivery_allowed"), \
+             patch("whatsapp_manager._maybe_send_voice", return_value=None), \
+             patch("whatsapp_manager._human_send", side_effect=send_and_receive_new):
+            whatsapp_manager._deliver_contact_reply(
+                phone,
+                "Old reply",
+                consumed_inbound_token=old_token,
+            )
+
+        self.assertEqual(
+            whatsapp_manager._current_inbound_text(phone),
+            "No quiero pagar.",
+        )
 
 
 if __name__ == "__main__":

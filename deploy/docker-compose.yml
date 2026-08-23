@@ -130,6 +130,8 @@
 #   HERMES_SETUP_GITHUB_USER  Dono do GitHub de onde o plugin é clonado (padrão: raizandu)
 #   HERMES_SETUP_GITHUB_REPO  Nome do repositório do plugin (padrão: whatsaya)
 #   KEEP_LOCAL_PLUGIN         true/1 = não faz fetch/reset no boot (patch local no volume)
+#   WHATSAPP_CONFIG_SUBDIR    Configuração da instância dentro de deploy/ (padrão: instance)
+#   WHATSAPP_LEAD_CAMPAIGN_METADATA_JSON  Mapa JSON exato de campanha CTWA para mercado/idioma/fuso/origem
 #   CONFIG_REPO               Repositório privado de contexto do cliente (padrão: vazio = desligado)
 #
 # ⏱️ TIMEOUTS E OUTROS
@@ -227,10 +229,22 @@ services:
         # 2) Personas a partir do proprio clone, so se ainda nao existirem no volume.
         #    O register() do plugin baixa esses arquivos do GitHub quando faltam; tendo
         #    o clone local, esse download deixa de acontecer.
+        CONFIG_SUBDIR="$${WHATSAPP_CONFIG_SUBDIR#/}"
+        CONFIG_SUBDIR="$${CONFIG_SUBDIR%/}"
+        case "$$CONFIG_SUBDIR" in
+          ""|generic) CONFIG_SUBDIR="" ;;
+          *[!A-Za-z0-9_-]*) CONFIG_SUBDIR="" ;;
+        esac
         for f in SOUL.md SOUL_WHATSAPP.md SOUL_EMAIL.md support_rules.md; do
-          if [ ! -f "/opt/data/$$f" ] && [ -f "$$PLUGIN_DIR/deploy/$$f" ]; then
-            cp "$$PLUGIN_DIR/deploy/$$f" "/opt/data/$$f"
-            echo "[setup] $$f inicializado a partir do repositorio"
+          SRC=""
+          if [ -n "$$CONFIG_SUBDIR" ] && [ -f "$$PLUGIN_DIR/deploy/$$CONFIG_SUBDIR/$$f" ]; then
+            SRC="$$PLUGIN_DIR/deploy/$$CONFIG_SUBDIR/$$f"
+          elif [ -f "$$PLUGIN_DIR/deploy/$$f" ]; then
+            SRC="$$PLUGIN_DIR/deploy/$$f"
+          fi
+          if [ ! -f "/opt/data/$$f" ] && [ -n "$$SRC" ]; then
+            cp "$$SRC" "/opt/data/$$f"
+            echo "[setup] $$f inicializado a partir de $$SRC"
           fi
         done
 
@@ -592,8 +606,12 @@ services:
       # resposta em áudio, inclusive para lead que escreveu em texto. Com o gate de
       # modalidade, "true" significa: áudio só para quem mandou áudio.
       - WHATSAPP_AUTO_TTS=${WHATSAPP_AUTO_TTS:-true}
-      # Idioma da transcrição no Fish ASR (cai em HERMES_LOCAL_STT_LANGUAGE e depois "pt").
+      # Fish ASR detecta o idioma quando vazio; use pt/en/es apenas para forçar um idioma.
       - WHATSAPP_STT_LANGUAGE=${WHATSAPP_STT_LANGUAGE:-}
+      # Esta composição é a instância comercial AYA; use "generic" para os templates genéricos.
+      - WHATSAPP_CONFIG_SUBDIR=${WHATSAPP_CONFIG_SUBDIR:-instance}
+      # IDs/nomes nativos CTWA -> metadados comerciais confiáveis; vazio desativa o mapa.
+      - WHATSAPP_LEAD_CAMPAIGN_METADATA_JSON=${WHATSAPP_LEAD_CAMPAIGN_METADATA_JSON:-}
       # Segundos que uma mensagem pode ficar sem resposta antes de o watchdog avisar o dono.
       - WHATSAPP_UNANSWERED_ALERT_S=${WHATSAPP_UNANSWERED_ALERT_S:-180}
       - WHATSAPP_INBOUND_BUFFER_S=${WHATSAPP_INBOUND_BUFFER_S:-0}
