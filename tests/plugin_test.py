@@ -5882,6 +5882,35 @@ class TestFishAsr(unittest.TestCase):
             os.unlink(path)
 
 
+class TestPrecoNaoVazaNoCodigo(unittest.TestCase):
+    """Preço vive só na base comercial. Exemplo de prompt com número apodrece e vaza."""
+
+    def test_bloco_de_nome_nao_carrega_valor(self):
+        from whatsapp_manager import _lead_name_prompt_block
+        bloco = _lead_name_prompt_block("Gustavo")
+        self.assertIn("Gustavo", bloco)
+        for valor in ("997", "397", "1.497", "497", "R$", "US$"):
+            self.assertNotIn(valor, bloco, f"{valor!r} vazou no bloco de nome do lead")
+
+    def test_fonte_do_plugin_sem_valor_da_oferta(self):
+        """Os valores da oferta não podem existir no .py — só na tabela comercial.
+
+        Exemplos genéricos do catálogo ("mentoria individual, R$ 500") ensinam sintaxe de
+        comando ao dono e não são oferta; o que não pode voltar é o preço da AYA.
+        """
+        import re
+        from pathlib import Path
+        import whatsapp_manager
+        fonte = Path(whatsapp_manager.__file__).read_text(encoding="utf-8")
+        valores = (r"997", r"1\.497", r"397", r"US\$\s?497", r"US\$\s?99")
+        achados = [
+            f"linha {n}: {linha.strip()[:120]}"
+            for n, linha in enumerate(fonte.splitlines(), 1)
+            if re.search(r"(R\$\s?|US\$\s?)(" + "|".join(valores) + r")\b", linha)
+        ]
+        self.assertEqual(achados, [], f"valor da oferta hardcoded: {achados}")
+
+
 class TestAudioFallbackText(BaseWhatsAppManagerTest):
     """Transcrição que falha entrega instrução explícita, não o marcador cru do bridge."""
 
