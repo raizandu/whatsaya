@@ -5882,6 +5882,66 @@ class TestFishAsr(unittest.TestCase):
             os.unlink(path)
 
 
+class TestAudioFallbackText(BaseWhatsAppManagerTest):
+    """Transcrição que falha entrega instrução explícita, não o marcador cru do bridge."""
+
+    def _dispatch(self, transcricao, message_id):
+        import whatsapp_manager
+        pre_dispatch = self.ctx.hooks.get("pre_gateway_dispatch")
+        self.assertIsNotNone(pre_dispatch)
+
+        event = MagicMock()
+        event.source.platform = "whatsapp"
+        event.has_media = True
+        event.media_type = "ptt"
+        event.media_urls = ["/path/to/voice.ogg"]
+        event.message_id = message_id
+        event.text = "[audio received]"
+        event.source.user_id = "5511987654321@s.whatsapp.net"
+        event.source.chat_id = "5511987654321@s.whatsapp.net"
+
+        gateway = MagicMock()
+        gateway._session_key_for_source.return_value = "session_audio_fb"
+        gateway._session_model_overrides = {}
+
+        with patch("whatsapp_manager._process_media_message", return_value=transcricao), \
+             patch("whatsapp_manager._persist_transcription_to_db") as mock_persist, \
+             patch("pathlib.Path.exists", return_value=True), \
+             patch("whatsapp_manager._check_bot_paused", return_value=False), \
+             patch("whatsapp_manager._check_chat_silenced", return_value=False):
+            pre_dispatch("pre_gateway_dispatch", {"event": event, "gateway": gateway})
+        return event, mock_persist
+
+    def test_falha_entrega_instrucao_e_nao_grava_no_historico(self):
+        import whatsapp_manager
+        event, mock_persist = self._dispatch(None, "msg_audio_falha")
+        self.assertEqual(event.text, whatsapp_manager.AUDIO_FALLBACK_TEXT)
+        self.assertIn("não foi possível transcrever", event.text)
+        self.assertIn("TEXTO", event.text)
+        # instrução de turno não é conteúdo de conversa
+        mock_persist.assert_not_called()
+
+    def test_falha_nao_libera_resposta_em_audio(self):
+        import whatsapp_manager
+        with patch.dict(os.environ, {"FISH_API_KEY": "fk", "WHATSAPP_AUTO_TTS": "true"}, clear=False):
+            self._dispatch(None, "msg_audio_falha_2")
+            self.assertFalse(
+                whatsapp_manager._voice_reply_allowed_for("5511987654321@s.whatsapp.net"))
+
+    def test_sucesso_entrega_transcricao_e_grava(self):
+        event, mock_persist = self._dispatch("quanto custa?", "msg_audio_ok")
+        self.assertEqual(event.text, '[Áudio: "quanto custa?"]')
+        mock_persist.assert_called_once_with(
+            "/opt/data/.hermes/whatsapp_messages.db", "msg_audio_ok", '[Áudio: "quanto custa?"]')
+
+    def test_sucesso_libera_resposta_em_audio(self):
+        import whatsapp_manager
+        with patch.dict(os.environ, {"FISH_API_KEY": "fk", "WHATSAPP_AUTO_TTS": "true"}, clear=False):
+            self._dispatch("quanto custa?", "msg_audio_ok_2")
+            self.assertTrue(
+                whatsapp_manager._voice_reply_allowed_for("5511987654321@s.whatsapp.net"))
+
+
 class TestVoiceModalityGate(unittest.TestCase):
     """Áudio responde áudio; texto responde texto."""
 

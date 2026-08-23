@@ -954,6 +954,13 @@ def _get_mime_type(file_path: str) -> str:
 
 FISH_ASR_URL = "https://api.fish.audio/v1/asr"
 
+# Texto entregue ao agente quando o áudio do lead não pôde ser transcrito.
+AUDIO_FALLBACK_TEXT = (
+    "[O cliente enviou um áudio que não foi possível transcrever. "
+    "Peça em TEXTO, de forma curta e natural, que ele repita por escrito ou reenvie o áudio. "
+    "Não responda em áudio, não invente o conteúdo do que ele disse e não dê explicação técnica.]"
+)
+
 
 def _fish_asr_language() -> str:
     return (
@@ -7299,13 +7306,20 @@ def pre_gateway_dispatch(*args, **kwargs):
                 logger.error(f"[sale-detect] Erro ao analisar imagem para comprovante: {sale_detect_err}")
         if media_type in ["ptt", "audio", "image"]:
             result_text = _process_media_message(event)
+            display_text = None
             if result_text:
                 if media_type in ["ptt", "audio"]:
                     audio_transcribed = True
                     display_text = f'[Áudio: "{result_text}"]'
                 else:
                     display_text = f'[Imagem: {result_text}]'
-                
+            elif media_type in ["ptt", "audio"]:
+                # Sem transcrição, o agente recebia o marcador cru do bridge
+                # ("[audio received]") e tinha que adivinhar o que fazer com ele. Entregar a
+                # instrução explícita torna o fallback determinístico em vez de sorte.
+                display_text = AUDIO_FALLBACK_TEXT
+
+            if display_text:
                 # Atualizar o evento em memória
                 event.text = display_text
                 if hasattr(event, "body"):
@@ -7316,8 +7330,10 @@ def pre_gateway_dispatch(*args, **kwargs):
                         if isinstance(val, dict):
                             val["body"] = display_text
                             val["text"] = display_text
-                
-                # Atualizar o banco SQLite local do Hermes em background
+
+            # Só transcrição/descrição real vai para o histórico; a instrução de fallback
+            # é orientação de turno, não conteúdo da conversa.
+            if result_text:
                 db_path = Path("/opt/data/.hermes/whatsapp_messages.db")
                 if db_path.exists() and media_info["message_id"]:
                     _persist_transcription_to_db(str(db_path), media_info["message_id"], display_text)
