@@ -6605,6 +6605,60 @@ class TestTransformLlmOutput(BaseWhatsAppManagerTest):
         self.assertNotIn("R$", sent)
         self.assertNotIn("1.500", sent)
 
+    def test_wrong_market_price_keeps_the_rest_of_the_message(self):
+        """Citar moeda errada não é vazar pagamento: só a bolha do valor sai."""
+        response = (
+            "Oi! Eu sou a AYA, a IA da WhatsAYA.\n\n"
+            "No seu WhatsApp eu atendo seus clientes, qualifico e conduzo até o próximo passo.\n\n"
+            "A implementação fica em R$ 1.500 e a mensalidade R$ 497.\n\n"
+            "Que tipo de empresa você tem?"
+        )
+        _result, mock_send = self._call_aya_payment_reply(
+            "Tenho uma empresa nos Estados Unidos.",
+            response,
+            {"market_id": "US", "currency": "USD", "language": "pt"},
+        )
+        sent = mock_send.call_args.args[1]
+        # o valor errado sai
+        self.assertNotIn("R$", sent)
+        self.assertNotIn("1.500", sent)
+        # o resto da resposta permanece
+        self.assertIn("Eu sou a AYA", sent)
+        self.assertIn("Que tipo de empresa você tem?", sent)
+        # e a correção de mercado entra, sem linguagem de política interna
+        self.assertIn("Estados Unidos", sent)
+        self.assertNotIn("dados de pagamento oficiais", sent)
+
+    def test_market_mismatch_fallback_nao_fala_de_pagamento(self):
+        """O lead não mencionou pagamento; a resposta não pode falar de pagamento."""
+        from whatsapp_manager import _payment_gate_fallback
+        for idioma, esperado in (("pt", "dólar"), ("en", "US dollars"), ("es", "dólares")):
+            with self.subTest(idioma=idioma):
+                texto = _payment_gate_fallback(
+                    "Tenho uma empresa nos Estados Unidos.",
+                    {"market_id": "US", "language": idioma},
+                    "market_mismatch",
+                )
+                self.assertIn(esperado, texto)
+                self.assertNotIn("dados de pagamento oficiais", texto)
+                self.assertNotIn("official payment details", texto)
+
+    def test_credencial_de_pagamento_continua_descartando_tudo(self):
+        """O raio menor vale só para preço. Dado de pagamento segue fail-closed."""
+        response = (
+            "Oi! Eu sou a AYA e posso te ajudar bastante.\n\n"
+            "Pix CNPJ: 44.249.819/0001-62\n\n"
+            "Qualquer coisa é só chamar."
+        )
+        _result, mock_send = self._call_aya_payment_reply(
+            "Tenho uma empresa nos Estados Unidos.",
+            response,
+            {"market_id": "US", "currency": "USD", "language": "pt"},
+        )
+        sent = mock_send.call_args.args[1]
+        self.assertNotIn("44.249.819", sent)
+        self.assertNotIn("Qualquer coisa é só chamar", sent)
+
     def test_fragmented_zelle_recipient_is_blocked_without_purchase_intent(self):
         response = "Zelle:\nTest\nRecipient"
         _result, mock_send = self._call_aya_payment_reply(

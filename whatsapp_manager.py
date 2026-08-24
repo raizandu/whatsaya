@@ -10608,25 +10608,84 @@ def _mentioned_price_amounts(value: str) -> tuple[dict[str, set[str]], bool]:
     return amounts, unsupported_currency
 
 
+_MARKET_CORRECTION_LINE = {
+    "US": {
+        "pt": "Como sua empresa opera nos Estados Unidos, os valores são em dólar. "
+              "Quer que eu te passe a condição certa?",
+        "en": "Since your company operates in the United States, the pricing is in US dollars. "
+              "Want me to walk you through it?",
+        "es": "Como tu empresa opera en Estados Unidos, los valores son en dólares. "
+              "¿Quieres que te pase la condición correcta?",
+    },
+    "BR": {
+        "pt": "Como sua empresa opera no Brasil, os valores são em reais. "
+              "Quer que eu te passe a condição certa?",
+        "en": "Since your company operates in Brazil, the pricing is in Brazilian reais. "
+              "Want me to walk you through it?",
+        "es": "Como tu empresa opera en Brasil, los valores son en reales. "
+              "¿Quieres que te pase la condición correcta?",
+    },
+}
+
+
+def _payment_gate_language(user_message: str, contact_info: dict) -> str:
+    idioma = _infer_message_language(user_message) or str(contact_info.get("language") or "").lower()
+    for prefixo in ("es", "en"):
+        if idioma.startswith(prefixo):
+            return prefixo
+    return "pt"
+
+
 def _payment_gate_fallback(user_message: str, contact_info: dict, reason: str) -> str:
-    language = _infer_message_language(user_message) or str(contact_info.get("language") or "").lower()
+    language = _payment_gate_language(user_message, contact_info)
     if reason == "market_unknown":
-        if language.startswith("es"):
-            return "¿En qué país opera tu empresa?"
-        if language.startswith("en"):
-            return "Which country does your company operate in?"
-        return "Em qual país sua empresa atua?"
+        return {
+            "es": "¿En qué país opera tu empresa?",
+            "en": "Which country does your company operate in?",
+        }.get(language, "Em qual país sua empresa atua?")
     if reason == "intent_missing":
-        if language.startswith("es"):
-            return "Puedo enviarte los datos de pago cuando quieras avanzar con la contratación."
-        if language.startswith("en"):
-            return "I can send the payment details when you're ready to move forward."
-        return "Posso enviar os dados de pagamento quando você quiser avançar com a contratação."
-    if language.startswith("es"):
-        return "Solo voy a usar los datos de pago oficiales correspondientes al mercado de tu empresa."
-    if language.startswith("en"):
-        return "I'll only use the official payment details for your company's market."
-    return "Vou usar somente os dados de pagamento oficiais do mercado da sua empresa."
+        return {
+            "es": "Puedo enviarte los datos de pago cuando quieras avanzar con la contratación.",
+            "en": "I can send the payment details when you're ready to move forward.",
+        }.get(language, "Posso enviar os dados de pagamento quando você quiser avançar com a contratação.")
+    if reason == "market_mismatch":
+        # Antes esta frase era institucional ("vou usar somente os dados de pagamento
+        # oficiais…") e chegava ao lead como resposta inteira, falando de pagamento sem
+        # que ninguém tivesse mencionado pagamento. Corrigir o mercado e devolver a
+        # conversa ao lead resolve o mesmo risco sem parecer aviso de sistema.
+        market = _canonical_commercial_market(contact_info)
+        linha = _MARKET_CORRECTION_LINE.get(market, {}).get(language)
+        if linha:
+            return linha
+    return {
+        "es": "Solo voy a usar los datos de pago oficiales correspondientes al mercado de tu empresa.",
+        "en": "I'll only use the official payment details for your company's market.",
+    }.get(language, "Vou usar somente os dados de pagamento oficiais do mercado da sua empresa.")
+
+
+_MARKET_MONEY_MARKERS = {
+    "BR": r"(?:\br\s*\$|\bbrl\b|\breais?\b|\bp[\s._-]*i[\s._-]*x\b)",
+    "US": r"(?:\bus\s*\$|\busd\b|\bdollars?\b|\bdolares?\b|(?<![a-z])\$\s*\d|"
+          r"\bz[\s._-]*e[\s._-]*l[\s._-]*l[\s._-]*e\b)",
+}
+
+
+def _strip_wrong_market_money(text: str, wrong_markets: set[str]) -> str:
+    """Remove os parágrafos que citam dinheiro do mercado errado, preservando o resto.
+
+    O plugin já entrega cada parágrafo como uma bolha separada, então cortar por parágrafo
+    remove exatamente a bolha problemática sem quebrar as outras.
+    """
+    padroes = [_MARKET_MONEY_MARKERS[m] for m in wrong_markets if m in _MARKET_MONEY_MARKERS]
+    if not padroes:
+        return str(text or "").strip()
+    mantidos = [
+        paragrafo
+        for paragrafo in re.split(r"\n\s*\n+", str(text or ""))
+        if paragrafo.strip()
+        and not any(re.search(p, _payment_canonical_text(paragrafo)) for p in padroes)
+    ]
+    return "\n\n".join(paragrafo.strip() for paragrafo in mantidos).strip()
 
 
 def _enforce_aya_payment_output_gate(
@@ -10960,6 +11019,27 @@ def _enforce_aya_payment_output_gate(
         reason = "unofficial_details"
     else:
         return text
+
+    # Citar moeda do mercado errado não é vazar dado de pagamento. Descartar a resposta
+    # inteira nesse caso mandava ao lead um aviso sobre pagamento que ele nem pediu — foi o
+    # que ele viu em 23/08. Aqui remove-se só o parágrafo com o valor errado e devolve-se o
+    # resto com a correção de mercado. Credencial de pagamento segue fail-closed abaixo.
+    if (
+        reason == "market_mismatch"
+        and not payment_content_present
+        and not unofficial_destination
+    ):
+        restante = _strip_wrong_market_money(
+            text, {market for market in mentioned_markets if market != market_id}
+        )
+        if len(restante) >= 40:
+            logger.warning(
+                "[payment-gate] parágrafo de mercado errado removido market=%r markets=%s",
+                market_id,
+                sorted(mentioned_markets),
+            )
+            correcao = _payment_gate_fallback(user_message, contact_info, reason)
+            return f"{restante}\n\n{correcao}"
 
     logger.warning(
         "[payment-gate] resposta comercial substituída reason=%s market=%r intent=%s methods=%s",
