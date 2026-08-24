@@ -7836,7 +7836,18 @@ def _build_support_prompt(
             f"- NUNCA conceda desconto, condição especial, parceria, favor, empréstimo ou combinado fora "
             f"do preço/catálogo oficial em nome do {owner_name}. Informe que a condição atual é a cadastrada. "
             "Se a pessoa pedir que outra condição seja verificada, faça handoff sem citar nome, alçada, "
-            "autorização, regra interna ou prazo."
+            "autorização, regra interna ou prazo.\n"
+            # Última posição de propósito: a regra de formato já existia no bloco de estilo
+            # lá em cima e era ignorada em todo turno — QA de 24/08 mediu 4 e 5 bolhas com
+            # listas de 6 e 7 itens, uma delas respondendo a uma mensagem de 18 caracteres.
+            # O fim do prompt é onde o modelo obedece, comprovado no 688c5e5.
+            "- FORMATO DA RESPOSTA: no máximo 3 bolhas e 4 frases no total, somando tudo. NUNCA "
+            "responda com lista, bullets ou passos numerados numa conversa comum — nem com hífen, "
+            "nem com travessão, nem numerado, nem quebrando linha para fazer as vezes de item. "
+            "Se a explicação não couber em 4 frases, ela está grande demais: entregue só o próximo "
+            "passo e faça UMA pergunta. Enumerar etapas ou requisitos é exatamente o que está "
+            "proibido — descreva em texto corrido e curto. Única exceção: dados de pagamento, que "
+            "podem ficar em linhas separadas para o lead copiar."
         )
     }
 
@@ -11110,39 +11121,50 @@ def _enforce_aya_payment_output_gate(
         or _payment_compact_text(value) != expected_method
         for value in labeled_methods
     )
-    unofficial_destination = (
-        banking_detail_found
-        or unsupported_method_found
-        or unsupported_currency
-        or non_numeric_price_found
-        or alternative_destination_found
-        or wrong_price_amount
-        or wrong_price_role
-        or unapproved_labeled_method
-    )
     # Toda instrução/método/dado de pagamento deve carregar o conjunto oficial inteiro.
     # Blacklists isoladas não bastam: um método novo ou um destinatário sem label não
     # pode atravessar só porque ainda não ganhou uma expressão específica.
-    if payment_family_found and not all_official_values_present:
-        unofficial_destination = True
-    if payment_family_found and url_candidates:
-        unofficial_destination = True
-    if destination_present and not all_official_values_present:
-        unofficial_destination = True
-    if payment_family_found and any(
-        _payment_compact_text(value) not in allowed_compact_values for value in email_candidates
-    ):
-        unofficial_destination = True
-    if (payment_family_found or cnpj_candidate_found) and any(
-        value not in allowed_digit_values for value in digit_candidates
-    ):
-        unofficial_destination = True
+    #
+    # São catorze gatilhos independentes, e o log dizia só "unofficial=True" — sem saber
+    # qual reprovou, não dá para distinguir modelo vazando Pix de campo faltando no
+    # support_rules.md do mercado. Por isso cada um tem nome.
+    unofficial_checks = {
+        "banking_detail": banking_detail_found,
+        "unsupported_method": unsupported_method_found,
+        "unsupported_currency": unsupported_currency,
+        "non_numeric_price": non_numeric_price_found,
+        "alternative_destination": alternative_destination_found,
+        "wrong_price_amount": wrong_price_amount,
+        "wrong_price_role": wrong_price_role,
+        "unapproved_labeled_method": unapproved_labeled_method,
+        "family_without_official_set": bool(
+            payment_family_found and not all_official_values_present
+        ),
+        "family_with_url": bool(payment_family_found and url_candidates),
+        "destination_without_official_set": bool(
+            destination_present and not all_official_values_present
+        ),
+        "unknown_email": bool(
+            payment_family_found
+            and any(
+                _payment_compact_text(value) not in allowed_compact_values
+                for value in email_candidates
+            )
+        ),
+        "unknown_digits": bool(
+            (payment_family_found or cnpj_candidate_found)
+            and any(value not in allowed_digit_values for value in digit_candidates)
+        ),
+    }
     for label, value in labeled_values:
         expected = official_fields.get(label)
         if not expected or not _official_field_present(label, expected) or (
             value and _payment_compact_text(value) != _payment_compact_text(expected)
         ):
-            unofficial_destination = True
+            # Só o rótulo vai para o log. O valor pode ser credencial de pagamento.
+            unofficial_checks[f"label:{label}"] = True
+    unofficial_destination = any(unofficial_checks.values())
+    unofficial_reasons = sorted(name for name, hit in unofficial_checks.items() if hit)
 
     if wrong_market:
         reason = "market_unknown" if not market_id else "market_mismatch"
@@ -11190,7 +11212,7 @@ def _enforce_aya_payment_output_gate(
         sorted(mentioned_markets),
         len(restante),
         payment_content_present,
-        unofficial_destination,
+        unofficial_reasons or False,
     )
     return _payment_gate_fallback(
         user_message, contact_info, reason, rules_content=rules_content
