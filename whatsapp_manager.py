@@ -10710,6 +10710,26 @@ def _payment_gate_language(user_message: str, contact_info: dict) -> str:
     return "pt"
 
 
+_PRICE_QUESTION_RE = re.compile(
+    r"\b(?:quanto\s+(?:custa|fica|sai|e|seria)|qual\s+(?:o\s+)?(?:valor|preco|investimento)|"
+    r"valores?|precos?|investimento|orcamento|mensalidade|implantacao|"
+    r"how\s+much|price|pricing|cost|budget|"
+    r"cuanto\s+(?:cuesta|sale|es)|precios?|inversion)\b"
+)
+_NO_PRICE_CONTINUATION = {
+    "pt": "Me conta como funciona seu atendimento hoje que eu te explico como a AYA se encaixa.",
+    "en": "Tell me how your customer service works today and I'll explain how AYA fits in.",
+    "es": "Cuéntame cómo funciona tu atención hoy y te explico cómo encaja la AYA.",
+}
+
+
+def _asks_about_price(user_message: str) -> bool:
+    """True quando o lead puxou o assunto valor. Preço não se oferece sozinho."""
+    return bool(_PRICE_QUESTION_RE.search(_normalize_text(str(user_message or ""))))
+
+
+# Sobra mínima do modelo que ainda vale entregar ao lead no lugar do texto da guarda.
+_MARKET_STRIP_MIN_CHARS = 20
 _MARKET_PRICE_SENTENCE = {
     "pt": "{setup} de implantação e {monthly} por mês.",
     "en": "{setup} setup and {monthly} per month.",
@@ -10756,9 +10776,16 @@ def _payment_gate_fallback(
         # soa como justificativa e faz o lead desconfiar do preço — e ainda devolvia a
         # bola ao modelo, que errava a linha de novo. O mercado já é conhecido: responde
         # o valor daquele mercado e encerra o assunto.
-        linha = _aya_market_price_line(market, language, rules_content)
-        if linha:
-            return linha
+        #
+        # Mas só quando o lead puxou o assunto. Em 24/08 um lead abriu com "quero
+        # entender como a AYA funcionaria" e recebeu um preço seco como primeira
+        # resposta, porque a guarda derrubou a resposta inteira do modelo.
+        if _asks_about_price(user_message) or _has_explicit_purchase_intent(user_message):
+            linha = _aya_market_price_line(market, language, rules_content)
+            if linha:
+                return linha
+        else:
+            return _NO_PRICE_CONTINUATION.get(language) or _NO_PRICE_CONTINUATION["pt"]
         # Só quando a tabela não traz os dois valores do mercado.
         linha = _MARKET_CORRECTION_LINE.get(market, {}).get(language)
         if linha:
@@ -11130,6 +11157,7 @@ def _enforce_aya_payment_output_gate(
     # inteira nesse caso mandava ao lead um aviso sobre pagamento que ele nem pediu — foi o
     # que ele viu em 23/08. Aqui remove-se só o parágrafo com o valor errado e devolve-se o
     # resto com a correção de mercado. Credencial de pagamento segue fail-closed abaixo.
+    restante = ""
     if (
         reason == "market_mismatch"
         and not payment_content_present
@@ -11138,23 +11166,31 @@ def _enforce_aya_payment_output_gate(
         restante = _strip_wrong_market_money(
             text, {market for market in mentioned_markets if market != market_id}
         )
-        if len(restante) >= 40:
+        # O limiar era 40, e derrubava resposta boa por pouca margem: o lead que abriu
+        # com "quero entender como a AYA funcionaria" perdeu a explicação inteira e
+        # recebeu só o texto da guarda. Vale a pena entregar uma frase curta do modelo.
+        if len(restante) >= _MARKET_STRIP_MIN_CHARS:
             logger.warning(
-                "[payment-gate] parágrafo de mercado errado removido market=%r markets=%s",
+                "[payment-gate] parágrafo de mercado errado removido market=%r markets=%s restante=%d",
                 market_id,
                 sorted(mentioned_markets),
+                len(restante),
             )
             correcao = _payment_gate_fallback(
                 user_message, contact_info, reason, rules_content=rules_content
             )
-            return f"{restante}\n\n{correcao}"
+            return f"{restante}\n\n{correcao}".strip()
 
     logger.warning(
-        "[payment-gate] resposta comercial substituída reason=%s market=%r intent=%s methods=%s",
+        "[payment-gate] resposta comercial substituída reason=%s market=%r intent=%s "
+        "methods=%s restante=%d payment_content=%s unofficial=%s",
         reason,
         market_id,
         has_intent,
         sorted(mentioned_markets),
+        len(restante),
+        payment_content_present,
+        unofficial_destination,
     )
     return _payment_gate_fallback(
         user_message, contact_info, reason, rules_content=rules_content

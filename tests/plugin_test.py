@@ -6678,9 +6678,30 @@ class TestTransformLlmOutput(BaseWhatsAppManagerTest):
         # o resto da resposta permanece
         self.assertIn("Eu sou a AYA", sent)
         self.assertIn("Que tipo de empresa você tem?", sent)
-        # e o valor certo entra no lugar, sem linguagem de política interna
-        self.assertIn("US$ 497", sent)
+        # o lead não perguntou preço: nenhum valor entra no lugar
+        self.assertNotIn("US$", sent)
+        self.assertNotIn("497", sent)
         self.assertNotIn("dados de pagamento oficiais", sent)
+
+    def test_wrong_market_price_responde_o_valor_certo_quando_perguntam(self):
+        """Mesma resposta, mas o lead perguntou preço: o valor do mercado dele entra."""
+        response = (
+            "Oi! Eu sou a AYA, a IA da WhatsAYA.\n\n"
+            "No seu WhatsApp eu atendo seus clientes, qualifico e conduzo até o próximo passo.\n\n"
+            "A implementação fica em R$ 1.500 e a mensalidade R$ 497.\n\n"
+            "Que tipo de empresa você tem?"
+        )
+        _result, mock_send = self._call_aya_payment_reply(
+            "Entendi. E quanto custa?",
+            response,
+            {"market_id": "US", "currency": "USD", "language": "pt"},
+        )
+        sent = mock_send.call_args.args[1]
+        self.assertNotIn("R$", sent)
+        self.assertNotIn("1.500", sent)
+        self.assertIn("Eu sou a AYA", sent)
+        self.assertIn("US$ 497", sent)
+        self.assertIn("US$ 99", sent)
 
     def test_market_mismatch_responde_o_valor_sem_justificar_a_moeda(self):
         """O lead pediu preço: recebe o valor do mercado dele, não uma aula sobre moeda."""
@@ -6715,6 +6736,45 @@ class TestTransformLlmOutput(BaseWhatsAppManagerTest):
                 # nunca vaza o valor do outro mercado
                 outro = "R$" if mercado == "US" else "US$"
                 self.assertNotIn(outro, texto)
+
+    def test_preco_nao_sai_sem_o_lead_perguntar(self):
+        """24/08: lead abriu com 'quero entender como funciona' e levou um preço seco."""
+        from whatsapp_manager import _payment_gate_fallback
+        regras = (
+            "| Mercado | Implementação | Mensalidade |\n"
+            "| Brasil | R$ 1.500 | R$ 497/mês |\n"
+            "| Estados Unidos | US$ 497 | US$ 99/mês |\n"
+        )
+        texto = _payment_gate_fallback(
+            "Oi! Tenho uma empresa nos Estados Unidos e quero entender como a AYA funcionaria.",
+            {"market_id": "US", "language": "pt"},
+            "market_mismatch",
+            rules_content=regras,
+        )
+        self.assertNotIn("US$", texto)
+        self.assertNotIn("R$", texto)
+        self.assertNotIn("497", texto)
+        self.assertIn("AYA", texto)
+
+    def test_pergunta_de_preco_reconhecida_em_tres_idiomas(self):
+        from whatsapp_manager import _asks_about_price
+        for msg in (
+            "Entendi. E quanto custa?",
+            "Qual o valor?",
+            "Me passa os valores por favor",
+            "How much does it cost?",
+            "What's the pricing?",
+            "¿Cuánto cuesta?",
+        ):
+            with self.subTest(msg=msg):
+                self.assertTrue(_asks_about_price(msg))
+        for msg in (
+            "Oi! Quero entender como a AYA funcionaria no meu WhatsApp.",
+            "Tenho uma empresa de limpeza aqui nos EUA.",
+            "Bom dia!",
+        ):
+            with self.subTest(msg=msg):
+                self.assertFalse(_asks_about_price(msg))
 
     def test_price_literal_mantem_a_grafia_da_tabela(self):
         """Preço nunca é reformatado pelo código — sai como está escrito na tabela."""
