@@ -6044,6 +6044,59 @@ class TestSplitHumanBubbles(unittest.TestCase):
     def test_empty_returns_empty_list(self):
         self.assertEqual(whatsapp_manager._split_human_bubbles("   "), [])
 
+    def test_list_block_keeps_line_breaks(self):
+        """Bug do QA de 23/08: lista virava uma parede de texto sem quebra nenhuma."""
+        text = (
+            "Para uma empresa nos Estados Unidos, ela pode:\n"
+            "- Responder os leads automaticamente, inclusive em inglês.\n"
+            "- Explicar seus produtos ou serviços com base nas informações aprovadas.\n"
+            "- Fazer perguntas para entender o perfil e a necessidade do lead.\n"
+            "- Qualificar quem tem real potencial de compra.\n"
+            "- Conduzir o contato para reunião, orçamento ou pagamento."
+        )
+        parts = whatsapp_manager._split_human_bubbles(text)
+        self.assertEqual(len(parts), 1)
+        self.assertEqual(parts[0].count("\n"), 5)
+        self.assertTrue(parts[0].startswith("Para uma empresa nos Estados Unidos, ela pode:\n- Responder"))
+
+    def test_numbered_list_is_one_bubble(self):
+        text = (
+            "A conversa poderia funcionar assim:\n"
+            "1. O cliente chama no WhatsApp.\n"
+            "2. A AYA entende qual serviço ele procura.\n"
+            "3. Solicita o endereço para confirmar a área atendida.\n"
+            "4. Apresenta os dias e horários disponíveis."
+        )
+        parts = whatsapp_manager._split_human_bubbles(text)
+        self.assertEqual(len(parts), 1)
+        self.assertIn("\n1. O cliente chama", parts[0])
+        self.assertIn("\n4. Apresenta os dias", parts[0])
+
+    def test_structured_answer_gets_more_bubbles_than_cap(self):
+        """Conteúdo estruturado passa de 3 bolhas em vez de virar um bloco só."""
+        text = (
+            "A AYA funciona como sua primeira atendente comercial no WhatsApp. "
+            "Para uma empresa nos Estados Unidos, ela pode:\n\n"
+            "- Responder os leads automaticamente, inclusive em inglês.\n"
+            "- Qualificar quem tem real potencial de compra.\n"
+            "- Encaminhar a conversa quando houver necessidade de negociação.\n\n"
+            "Você define a oferta, o público, as perguntas e o tom da conversa. "
+            "A AYA segue esse processo sem inventar preços, prazos ou condições.\n\n"
+            "Para configurar no seu caso, precisamos definir o idioma e o fuso horário dos EUA."
+        )
+        parts = whatsapp_manager._split_human_bubbles(text)
+        self.assertEqual(len(parts), 5)
+        self.assertTrue(parts[1].startswith("Para uma empresa nos Estados Unidos, ela pode:\n-"))
+        self.assertTrue(all(len(p) <= 520 for p in parts), [len(p) for p in parts])
+
+    def test_overflow_never_glued_with_space(self):
+        """Sobra acima do teto é colada com linha em branco, nunca com espaço."""
+        text = "\n\n".join(f"Frase número {i} do bloco de teste que precisa continuar longa." for i in range(8))
+        parts = whatsapp_manager._split_human_bubbles(text)
+        self.assertLessEqual(len(parts), 5)
+        self.assertIn("\n\n", parts[-1])
+        self.assertNotIn("teste. Frase", parts[-1])
+
 
 class TestPostLlmCall(BaseWhatsAppManagerTest):
     """post_llm_call só processa EXEC do dono. Contatos vão em transform_llm_output."""
@@ -6625,23 +6678,52 @@ class TestTransformLlmOutput(BaseWhatsAppManagerTest):
         # o resto da resposta permanece
         self.assertIn("Eu sou a AYA", sent)
         self.assertIn("Que tipo de empresa você tem?", sent)
-        # e a correção de mercado entra, sem linguagem de política interna
-        self.assertIn("Estados Unidos", sent)
+        # e o valor certo entra no lugar, sem linguagem de política interna
+        self.assertIn("US$ 497", sent)
         self.assertNotIn("dados de pagamento oficiais", sent)
 
-    def test_market_mismatch_fallback_nao_fala_de_pagamento(self):
-        """O lead não mencionou pagamento; a resposta não pode falar de pagamento."""
+    def test_market_mismatch_responde_o_valor_sem_justificar_a_moeda(self):
+        """O lead pediu preço: recebe o valor do mercado dele, não uma aula sobre moeda."""
         from whatsapp_manager import _payment_gate_fallback
-        for idioma, esperado in (("pt", "dólar"), ("en", "US dollars"), ("es", "dólares")):
-            with self.subTest(idioma=idioma):
+        regras = (
+            "| Mercado | Implementação | Mensalidade |\n"
+            "| --- | --- | --- |\n"
+            "| Brasil | R$ 1.500 | R$ 497/mês |\n"
+            "| Estados Unidos | US$ 497 | US$ 99/mês |\n"
+        )
+        for idioma, mercado, esperados in (
+            ("pt", "US", ("US$ 497", "US$ 99", "por mês")),
+            ("en", "US", ("US$ 497", "US$ 99", "per month")),
+            ("es", "US", ("US$ 497", "US$ 99", "al mes")),
+            ("pt", "BR", ("R$ 1.500", "R$ 497", "por mês")),
+        ):
+            with self.subTest(idioma=idioma, mercado=mercado):
                 texto = _payment_gate_fallback(
-                    "Tenho uma empresa nos Estados Unidos.",
-                    {"market_id": "US", "language": idioma},
+                    "Quanto custa?",
+                    {"market_id": mercado, "language": idioma},
                     "market_mismatch",
+                    rules_content=regras,
                 )
-                self.assertIn(esperado, texto)
+                for esperado in esperados:
+                    self.assertIn(esperado, texto)
+                # nada de justificar a moeda nem devolver a pergunta pro lead
+                self.assertNotIn("opera", texto)
+                self.assertNotIn("operates", texto)
+                self.assertNotIn("condição certa", texto)
                 self.assertNotIn("dados de pagamento oficiais", texto)
                 self.assertNotIn("official payment details", texto)
+                # nunca vaza o valor do outro mercado
+                outro = "R$" if mercado == "US" else "US$"
+                self.assertNotIn(outro, texto)
+
+    def test_price_literal_mantem_a_grafia_da_tabela(self):
+        """Preço nunca é reformatado pelo código — sai como está escrito na tabela."""
+        from whatsapp_manager import _aya_price_literal
+        self.assertEqual(_aya_price_literal("US$ 99/mês"), "US$ 99")
+        self.assertEqual(_aya_price_literal("R$ 1.500"), "R$ 1.500")
+        self.assertEqual(_aya_price_literal("R$ 497 por mês"), "R$ 497")
+        self.assertEqual(_aya_price_literal("US$ 99/month"), "US$ 99")
+        self.assertEqual(_aya_price_literal("sob consulta"), "")
 
     def test_credencial_de_pagamento_continua_descartando_tudo(self):
         """O raio menor vale só para preço. Dado de pagamento segue fail-closed."""

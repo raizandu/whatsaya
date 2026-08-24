@@ -1378,7 +1378,12 @@ _CLAUSE_BREAK = re.compile(
     r",\s+(?=porque\b|pois\b|já que\b|ja que\b|uma vez que\b)",
     re.I,
 )
+_LIST_LINE = re.compile(r"^\s*(?:[-*•·–—]|\d+[.)])\s+\S")
 _BUBBLE_CAP = 3
+# Resposta estruturada ganha teto maior: mais bolhas curtas é melhor do que uma
+# parede de texto. O teto de 3 vale para conversa comum, que é o caso normal.
+_BUBBLE_CAP_STRUCTURED = 5
+_BUBBLE_MERGE_LIMIT = 350
 
 
 def _looks_like_question(text: str) -> bool:
@@ -1432,30 +1437,77 @@ def _split_sentences_for_bubbles(block: str) -> list[str]:
     return merged
 
 
+def _is_list_block(block: str) -> bool:
+    lines = [line for line in (block or "").split("\n") if line.strip()]
+    return len(lines) >= 2 and all(_LIST_LINE.match(line) for line in lines)
+
+
+def _segment_blocks(text: str) -> list[str]:
+    """Separa o texto em blocos. Linha em branco separa; itens seguidos viram um bloco só."""
+    blocks: list[str] = []
+    buffer: list[str] = []
+    in_list = False
+
+    def flush() -> None:
+        nonlocal buffer, in_list
+        if buffer:
+            blocks.append("\n".join(buffer).strip())
+        buffer = []
+        in_list = False
+
+    for raw in (text or "").split("\n"):
+        line = raw.strip()
+        if not line:
+            flush()
+            continue
+        item = bool(_LIST_LINE.match(line))
+        if buffer and item != in_list:
+            flush()
+        in_list = item
+        buffer.append(line)
+    flush()
+    return [block for block in blocks if block]
+
+
 def _split_human_bubbles(message: str) -> list[str]:
     """Quebra a resposta em bolhas curtas, estilo WhatsApp humano.
 
-    Corta tag de voz antes de fatiar. Parágrafo vira bolha; bloco longo
-    vira uma frase por bolha. No máximo 3 para não virar rajada.
+    Corta tag de voz antes de fatiar. Parágrafo vira bolha; bloco longo vira uma
+    frase por bolha. Lista é unidade visual: vai inteira, com as quebras de linha,
+    grudada na frase que a apresenta. A sobra acima do teto é colada com linha em
+    branco — colar com espaço virava uma parede de texto sem formatação.
     """
     text = _strip_fish_cues(message or "")
     if not text:
         return []
 
-    parts = [p.strip() for p in re.split(r"\n\s*\n+", text) if p.strip()]
-    if len(parts) == 1:
-        lines = [p.strip() for p in text.split("\n") if p.strip()]
-        if 2 <= len(lines) <= _BUBBLE_CAP and all(len(line) <= 180 for line in lines):
-            parts = lines
+    blocks = _segment_blocks(text)
+    structured = any(_is_list_block(block) for block in blocks)
 
     exploded: list[str] = []
-    for part in parts:
-        exploded.extend(_split_sentences_for_bubbles(part))
+    for block in blocks:
+        if _is_list_block(block):
+            if exploded and exploded[-1].rstrip().endswith(":"):
+                exploded[-1] = f"{exploded[-1]}\n{block}"
+            else:
+                exploded.append(block)
+            continue
+        lines = [line.strip() for line in block.split("\n") if line.strip()]
+        if 2 <= len(lines) <= _BUBBLE_CAP and all(len(line) <= 180 for line in lines):
+            exploded.extend(lines)
+            continue
+        exploded.extend(_split_sentences_for_bubbles(block))
 
     cleaned = [re.sub(r"[ \t]+\n", "\n", p).strip() for p in exploded if p and p.strip()]
     cleaned = [re.sub(r"[ \t]{2,}", " ", p) for p in cleaned]
-    if len(cleaned) > _BUBBLE_CAP:
-        cleaned = cleaned[: _BUBBLE_CAP - 1] + [" ".join(cleaned[_BUBBLE_CAP - 1 :])]
+
+    cap = _BUBBLE_CAP
+    if len(cleaned) > cap:
+        tail = "\n\n".join(cleaned[cap - 1 :])
+        if structured or len(tail) > _BUBBLE_MERGE_LIMIT:
+            cap = _BUBBLE_CAP_STRUCTURED
+    if len(cleaned) > cap:
+        cleaned = cleaned[: cap - 1] + ["\n\n".join(cleaned[cap - 1 :])]
     return cleaned or [text]
 
 
@@ -10467,9 +10519,16 @@ def _price_amount_token(value: str) -> str:
     return f"{major}.{cents}"
 
 
-def _aya_official_prices(rules_content: str) -> dict[str, dict[str, str]]:
-    """Lê implantação e mensalidade por posição na tabela comercial."""
-    prices: dict[str, dict[str, str]] = {"BR": {}, "US": {}}
+_PRICE_MARKET_MARKER = {"BR": r"(?:r\s*\$|brl)", "US": r"(?:us\s*\$|usd)"}
+_PRICE_PERIOD_SUFFIX = re.compile(
+    r"\s*(?:/\s*|\bpor\s+|\bal\s+|\bper\s+)?(?:m[êe]s|mes|month|mo|mensal|monthly)\s*$",
+    re.I,
+)
+
+
+def _aya_price_cells(rules_content: str) -> dict[str, dict[str, str]]:
+    """Célula crua de implantação e mensalidade por mercado, como está na tabela."""
+    cells_by_market: dict[str, dict[str, str]] = {"BR": {}, "US": {}}
     for raw_line in str(rules_content or "").splitlines():
         if "|" not in raw_line:
             continue
@@ -10479,13 +10538,22 @@ def _aya_official_prices(rules_content: str) -> dict[str, dict[str, str]]:
         market_label = _normalize_text(cells[0])
         if market_label in {"brasil", "brazil", "br"}:
             market = "BR"
-            marker = r"(?:r\s*\$|brl)"
         elif market_label in {"estados unidos", "united states", "eua", "usa", "us"}:
             market = "US"
-            marker = r"(?:us\s*\$|usd)"
         else:
             continue
         for role, cell in zip(("setup", "monthly"), cells[1:3]):
+            if cell:
+                cells_by_market[market][role] = cell
+    return cells_by_market
+
+
+def _aya_official_prices(rules_content: str) -> dict[str, dict[str, str]]:
+    """Lê implantação e mensalidade por posição na tabela comercial."""
+    prices: dict[str, dict[str, str]] = {"BR": {}, "US": {}}
+    for market, cells in _aya_price_cells(rules_content).items():
+        marker = _PRICE_MARKET_MARKER[market]
+        for role, cell in cells.items():
             match = re.search(
                 marker + r"\s*([0-9]+(?:[.,\s][0-9]+)*)",
                 cell,
@@ -10494,6 +10562,12 @@ def _aya_official_prices(rules_content: str) -> dict[str, dict[str, str]]:
             if match and (amount := _price_amount_token(match.group(1))):
                 prices[market][role] = amount
     return prices
+
+
+def _aya_price_literal(cell: str) -> str:
+    """Valor como está escrito na tabela, sem o sufixo de período. Nunca reformatar preço."""
+    literal = _PRICE_PERIOD_SUFFIX.sub("", str(cell or "")).strip()
+    return literal if re.search(r"\d", literal) else ""
 
 
 def _aya_official_price_amounts(rules_content: str) -> dict[str, set[str]]:
@@ -10636,7 +10710,31 @@ def _payment_gate_language(user_message: str, contact_info: dict) -> str:
     return "pt"
 
 
-def _payment_gate_fallback(user_message: str, contact_info: dict, reason: str) -> str:
+_MARKET_PRICE_SENTENCE = {
+    "pt": "{setup} de implantação e {monthly} por mês.",
+    "en": "{setup} setup and {monthly} per month.",
+    "es": "{setup} de implementación y {monthly} al mes.",
+}
+
+
+def _aya_market_price_line(market: str, language: str, rules_content: str) -> str:
+    """Valor oficial do mercado, sem justificar a moeda."""
+    cells = _aya_price_cells(rules_content).get(str(market or ""), {})
+    setup = _aya_price_literal(cells.get("setup", ""))
+    monthly = _aya_price_literal(cells.get("monthly", ""))
+    if not setup or not monthly:
+        return ""
+    template = _MARKET_PRICE_SENTENCE.get(language) or _MARKET_PRICE_SENTENCE["pt"]
+    return template.format(setup=setup, monthly=monthly)
+
+
+def _payment_gate_fallback(
+    user_message: str,
+    contact_info: dict,
+    reason: str,
+    *,
+    rules_content: str = "",
+) -> str:
     language = _payment_gate_language(user_message, contact_info)
     if reason == "market_unknown":
         return {
@@ -10654,6 +10752,14 @@ def _payment_gate_fallback(user_message: str, contact_info: dict, reason: str) -
         # que ninguém tivesse mencionado pagamento. Corrigir o mercado e devolver a
         # conversa ao lead resolve o mesmo risco sem parecer aviso de sistema.
         market = _canonical_commercial_market(contact_info)
+        # Explicar a moeda ("como sua empresa opera nos EUA, os valores são em dólar")
+        # soa como justificativa e faz o lead desconfiar do preço — e ainda devolvia a
+        # bola ao modelo, que errava a linha de novo. O mercado já é conhecido: responde
+        # o valor daquele mercado e encerra o assunto.
+        linha = _aya_market_price_line(market, language, rules_content)
+        if linha:
+            return linha
+        # Só quando a tabela não traz os dois valores do mercado.
         linha = _MARKET_CORRECTION_LINE.get(market, {}).get(language)
         if linha:
             return linha
@@ -11038,7 +11144,9 @@ def _enforce_aya_payment_output_gate(
                 market_id,
                 sorted(mentioned_markets),
             )
-            correcao = _payment_gate_fallback(user_message, contact_info, reason)
+            correcao = _payment_gate_fallback(
+                user_message, contact_info, reason, rules_content=rules_content
+            )
             return f"{restante}\n\n{correcao}"
 
     logger.warning(
@@ -11048,7 +11156,9 @@ def _enforce_aya_payment_output_gate(
         has_intent,
         sorted(mentioned_markets),
     )
-    return _payment_gate_fallback(user_message, contact_info, reason)
+    return _payment_gate_fallback(
+        user_message, contact_info, reason, rules_content=rules_content
+    )
 
 
 def _prepare_contact_reply(response_text: str) -> str:
