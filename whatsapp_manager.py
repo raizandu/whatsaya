@@ -5026,6 +5026,18 @@ def _update_contact_fields(identifier: str, fields: dict) -> str:
     fields: dict com os campos a atualizar (ex: {"relationship": "Filho", "notes": "..."})
     Retorna string de resultado para exibir ao owner.
     """
+    # Corrigir mercado é operação em bloco: market_id/market/country/currency/offer
+    # viram juntos via _cohere_commercial_market_metadata (decisão de 24/08 — o dono
+    # corrige mercado errado pelo chat). Valor não reconhecido é recusado na entrada
+    # para não gravar meio-bloco.
+    market_block_fields = {"market_id", "market", "country", "currency", "offer"}
+    market_update = {f: fields[f] for f in market_block_fields if f in fields}
+    if market_update and not _canonical_commercial_market(market_update):
+        return (
+            "❌ Mercado não reconhecido. Use `market_id=BR` ou `market_id=US` "
+            "(aceita brasil, eua, usa, estados unidos)."
+        )
+
     pc_path = Path("/opt/data/personal_contacts.json")
     if not pc_path.exists():
         return "❌ personal_contacts.json não encontrado."
@@ -5261,6 +5273,13 @@ def _update_contact_fields(identifier: str, fields: dict) -> str:
     if not updated_fields:
         return f"⚠️ Nenhum campo válido para atualizar em '{contact_name}'."
 
+    if market_update:
+        # O que o dono NÃO atualizou sai antes de coerir: um market_id velho no
+        # registro venceria um `currency=BRL` recém-passado, revertendo a correção.
+        for stale_field in market_block_fields - set(market_update):
+            contact.pop(stale_field, None)
+        contact = _cohere_commercial_market_metadata(contact, source="owner_manual")
+
     personal_contacts[matched_key] = contact
 
     # Atualizar entrada espelhada (@lid ↔ @s.whatsapp.net) com os mesmos campos
@@ -5282,6 +5301,10 @@ def _update_contact_fields(identifier: str, fields: dict) -> str:
         for field, value in fields.items():
             if field not in protected:
                 mirror[field] = value
+        if market_update:
+            for stale_field in market_block_fields - set(market_update):
+                mirror.pop(stale_field, None)
+            mirror = _cohere_commercial_market_metadata(mirror, source="owner_manual")
         personal_contacts[mirror_key] = mirror
         logger.info(f"[update-contact] espelhado em mirror_key={mirror_key}")
     else:
@@ -9005,7 +9028,9 @@ def pre_gateway_dispatch(*args, **kwargs):
             "• Em linguagem natural: _\"a Isabel é minha filha, apelido Bebel\"_\n"
             "• Comando direto: `update contact <nome> campo=valor`\n"
             "  Campos: `relationship`, `nickname`, `notes`, `tone`, `guidelines`\n"
-            "  Relacionamentos: `Amigo`, `AmigoProximo`, `Parente`, `Filho`, `Cliente`, `Vendedor`\n\n"
+            "  Relacionamentos: `Amigo`, `AmigoProximo`, `Parente`, `Filho`, `Cliente`, `Vendedor`\n"
+            "• Corrigir mercado errado de um lead: `update contact <numero> market_id=BR` "
+            "(ou `US`) — país, moeda e oferta viram juntos, nas duas chaves do contato\n\n"
             "*🛒 CATÁLOGO DE PRODUTOS/SERVIÇOS*\n"
             "• Cadastrar: _\"adiciona um produto: mentoria individual, R$ 500\"_\n"
             "• Editar: _\"muda o preço da mentoria pra 550\"_\n"

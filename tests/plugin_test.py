@@ -5996,6 +5996,87 @@ class TestOwnerCommands(BaseWhatsAppManagerTest):
         mock_update.assert_called_once()
 
 
+class TestOwnerMarketCorrection(BaseWhatsAppManagerTest):
+    """Decisão de 24/08: mercado errado no cadastro se corrige pelo chat do dono
+    (`update contact <numero> market_id=BR`). O bloco mercado/país/moeda/oferta
+    vira junto — corrigir só market_id deixaria currency=USD velho no cadastro."""
+
+    def _run_update(self, contacts, identifier, fields):
+        chunks = []
+
+        def fake_open(path, mode="r", **kwargs):
+            m = unittest.mock.mock_open(read_data=json.dumps(contacts))()
+            if "w" in mode:
+                m.write = chunks.append
+            return m
+
+        with patch("whatsapp_manager._push_personal_contacts_to_github"), \
+             patch("pathlib.Path.exists", return_value=True), \
+             patch("builtins.open", side_effect=fake_open):
+            result = whatsapp_manager._update_contact_fields(identifier, fields)
+        written = json.loads("".join(chunks)) if chunks else {}
+        return result, written
+
+    def _contacts_lead_us(self):
+        return {
+            "5562999995459@s.whatsapp.net": {
+                "name": "Lead Teste",
+                "lid": "111222333444555@lid",
+                "market_id": "US",
+                "market": "United States",
+                "country": "United States",
+                "currency": "USD",
+                "offer": "international",
+            },
+            "111222333444555@lid": {
+                "name": "Lead Teste",
+                "market_id": "US",
+                "currency": "USD",
+            },
+        }
+
+    def test_corrigir_market_id_vira_o_bloco_inteiro_nas_duas_chaves(self):
+        result, written = self._run_update(
+            self._contacts_lead_us(), "5562999995459", {"market_id": "BR"}
+        )
+        self.assertIn("✅", result)
+        rec = written["5562999995459@s.whatsapp.net"]
+        self.assertEqual(rec["market_id"], "BR")
+        self.assertEqual(rec["currency"], "BRL")
+        self.assertEqual(rec["offer"], "brazil")
+        self.assertEqual(rec["market_source"], "owner_manual")
+        mirror = written["111222333444555@lid"]
+        self.assertEqual(mirror["market_id"], "BR")
+        self.assertEqual(mirror["currency"], "BRL")
+
+    def test_alias_de_mercado_e_normalizado(self):
+        contacts = self._contacts_lead_us()
+        contacts["5562999995459@s.whatsapp.net"].update(
+            {"market_id": "BR", "currency": "BRL"}
+        )
+        result, written = self._run_update(contacts, "5562999995459", {"market_id": "eua"})
+        self.assertIn("✅", result)
+        rec = written["5562999995459@s.whatsapp.net"]
+        self.assertEqual(rec["market_id"], "US")
+        self.assertEqual(rec["currency"], "USD")
+
+    def test_corrigir_por_currency_nao_e_revertido_pelo_market_id_velho(self):
+        result, written = self._run_update(
+            self._contacts_lead_us(), "5562999995459", {"currency": "BRL"}
+        )
+        self.assertIn("✅", result)
+        rec = written["5562999995459@s.whatsapp.net"]
+        self.assertEqual(rec["market_id"], "BR")
+        self.assertEqual(rec["currency"], "BRL")
+
+    def test_mercado_invalido_nao_grava_nada(self):
+        result, written = self._run_update(
+            self._contacts_lead_us(), "5562999995459", {"market_id": "XX"}
+        )
+        self.assertIn("❌", result)
+        self.assertEqual(written, {})
+
+
 class TestBlockUnblockCommands(BaseWhatsAppManagerTest):
     """Itens 6 e 7 do QA de 24/08: `desbloquear` só gravava blocked=False — o gate
     (ai_enabled/in_flow) continuava barrando como legacy-contact-disabled, e a sessão
