@@ -10831,9 +10831,15 @@ def _payment_gate_language(user_message: str, contact_info: dict) -> str:
 
 
 _PRICE_QUESTION_RE = re.compile(
+    # "valor(?:es)?", não "valores?": a grafia antiga só casava "valores"/"valore",
+    # e "achei o valor caro" caía fora do assunto preço (QA de 24/08).
     r"\b(?:quanto\s+(?:custa|fica|sai|e|seria)|qual\s+(?:o\s+)?(?:valor|preco|investimento)|"
-    r"valores?|precos?|investimento|orcamento|mensalidade|implantacao|"
-    r"how\s+much|price|pricing|cost|budget|"
+    r"valor(?:es)?|precos?|investimento|orcamento|mensalidade|implantacao|"
+    # Objeção é assunto de preço. "cara" fica de fora: é vocativo em pt-BR ("e aí cara"),
+    # e só conta como caro quando qualificada ("es muy cara", "tá cara").
+    r"caros?|caris+im[oa]s?|salgad[oa]|"
+    r"(?:muito|muy|meio|medio|bem|tao|tan|um\s+pouco|un\s+poco|esta|es|ta)\s+cara|"
+    r"how\s+much|price|pricing|cost|budget|expensive|pricey|costly|"
     r"cuanto\s+(?:cuesta|sale|es)|precios?|inversion)\b"
 )
 _NO_PRICE_CONTINUATION = {
@@ -10841,11 +10847,35 @@ _NO_PRICE_CONTINUATION = {
     "en": "Tell me how your customer service works today and I'll explain how AYA fits in.",
     "es": "Cuéntame cómo funciona tu atención hoy y te explico cómo encaja la AYA.",
 }
+# Quando a pergunta acima já foi feita nesta conversa, repetir é pior do que não
+# perguntar nada (teste #05 do QA): segue uma afirmação, sem pergunta.
+_NO_PRICE_CONTINUATION_REPEAT = {
+    "pt": "Quando quiser, te mostro como a AYA ficaria no seu atendimento.",
+    "en": "Whenever you're ready, I can show you how AYA would fit your customer service.",
+    "es": "Cuando quieras, te muestro cómo quedaría la AYA en tu atención.",
+}
 
 
 def _asks_about_price(user_message: str) -> bool:
-    """True quando o lead puxou o assunto valor. Preço não se oferece sozinho."""
+    """True quando o lead puxou o assunto valor — pergunta ou objeção."""
     return bool(_PRICE_QUESTION_RE.search(_normalize_text(str(user_message or ""))))
+
+
+def _no_price_continuation(language: str, chat_id: str) -> str:
+    """Continuação sem preço, sem repetir pergunta que o lead já respondeu."""
+    linha = _NO_PRICE_CONTINUATION.get(language) or _NO_PRICE_CONTINUATION["pt"]
+    if not chat_id:
+        return linha
+    try:
+        historico = _normalize_text(_fetch_chat_history(chat_id, limit=40))
+    except Exception:
+        historico = ""
+    if historico and any(
+        _normalize_text(frase) in historico
+        for frase in _NO_PRICE_CONTINUATION.values()
+    ):
+        return _NO_PRICE_CONTINUATION_REPEAT.get(language) or _NO_PRICE_CONTINUATION_REPEAT["pt"]
+    return linha
 
 
 # Sobra mínima do modelo que ainda vale entregar ao lead no lugar do texto da guarda.
@@ -10874,6 +10904,7 @@ def _payment_gate_fallback(
     reason: str,
     *,
     rules_content: str = "",
+    chat_id: str = "",
 ) -> str:
     language = _payment_gate_language(user_message, contact_info)
     if reason == "market_unknown":
@@ -10905,7 +10936,7 @@ def _payment_gate_fallback(
             if linha:
                 return linha
         else:
-            return _NO_PRICE_CONTINUATION.get(language) or _NO_PRICE_CONTINUATION["pt"]
+            return _no_price_continuation(language, chat_id)
         # Só quando a tabela não traz os dois valores do mercado.
         linha = _MARKET_CORRECTION_LINE.get(market, {}).get(language)
         if linha:
@@ -10981,6 +11012,7 @@ def _enforce_aya_payment_output_gate(
     user_message: str,
     contact_info: dict,
     rules_content: str,
+    chat_id: str = "",
 ) -> str:
     """Bloqueia pagamento precoce, mercado errado e qualquer destino não cadastrado."""
     text = str(response_text or "")
@@ -11342,7 +11374,8 @@ def _enforce_aya_payment_output_gate(
                 len(restante),
             )
             correcao = _payment_gate_fallback(
-                user_message, contact_info, reason, rules_content=rules_content
+                user_message, contact_info, reason,
+                rules_content=rules_content, chat_id=chat_id,
             )
             return f"{restante}\n\n{correcao}".strip()
 
@@ -11372,7 +11405,8 @@ def _enforce_aya_payment_output_gate(
         unofficial_reasons or False,
     )
     return _payment_gate_fallback(
-        user_message, contact_info, reason, rules_content=rules_content
+        user_message, contact_info, reason,
+        rules_content=rules_content, chat_id=chat_id,
     )
 
 
@@ -11603,6 +11637,7 @@ def transform_llm_output(*args, **kwargs):
                 user_message=current_inbound,
                 contact_info=contact_info,
                 rules_content=payment_rules,
+                chat_id=str(chat_id or ""),
             )
         except Exception as payment_gate_err:
             logger.error("[payment-gate] falha ao avaliar saída: %s", payment_gate_err)

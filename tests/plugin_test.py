@@ -6160,6 +6160,80 @@ class TestGateMarketSections(unittest.TestCase):
         self.assertNotIn("44.249.819", s)
 
 
+class TestPriceFallbacks(unittest.TestCase):
+    """Defeitos dos fallbacks da guarda, introduzidos em 99931f6 e medidos no QA de 24/08."""
+
+    def test_objecao_de_preco_e_assunto_de_preco(self):
+        """"Achei o valor caro" caía na frase neutra — objeção é assunto de preço."""
+        for msg in (
+            "Achei o valor de implementação um pouco caro.",
+            "Achei caro",
+            "muito caro pra mim",
+            "tá salgado",
+            "isso tá muito salgado",
+            "fora do orçamento",
+            "that's too expensive",
+            "es muy caro",
+            "la implementación es muy cara",
+            "me parece carísimo",
+        ):
+            with self.subTest(msg=msg):
+                self.assertTrue(whatsapp_manager._asks_about_price(msg))
+
+    def test_cara_como_pessoa_nao_e_preco(self):
+        """"cara" é vocativo comum em pt-BR — não pode virar assunto de preço."""
+        for msg in ("e aí cara, tudo bem?", "valeu cara"):
+            with self.subTest(msg=msg):
+                self.assertFalse(whatsapp_manager._asks_about_price(msg))
+
+    def test_mensagem_neutra_continua_sem_ser_preco(self):
+        for msg in (
+            "oi, tudo bem?",
+            "quero entender como a AYA funcionaria",
+            "vocês atendem clínica?",
+        ):
+            with self.subTest(msg=msg):
+                self.assertFalse(whatsapp_manager._asks_about_price(msg))
+
+    def test_fallback_nao_repete_pergunta_ja_respondida(self):
+        """Teste #05 do QA: no 7º turno o lead recebeu a mesma pergunta do 1º."""
+        historico = (
+            "AYA: Me conta como funciona seu atendimento hoje que eu te explico como a AYA se encaixa.\n"
+            "Lead: A gente atende por telefone e WhatsApp."
+        )
+        with patch("whatsapp_manager._fetch_chat_history", return_value=historico):
+            out = whatsapp_manager._payment_gate_fallback(
+                "hmm entendi",
+                {"market_id": "US", "language": "pt"},
+                "market_mismatch",
+                rules_content="",
+                chat_id="12025550199@s.whatsapp.net",
+            )
+        self.assertNotIn("Me conta como funciona seu atendimento", out)
+        self.assertNotIn("?", out)
+        self.assertTrue(out.strip())
+
+    def test_fallback_pergunta_normalmente_na_primeira_vez(self):
+        with patch("whatsapp_manager._fetch_chat_history", return_value=""):
+            out = whatsapp_manager._payment_gate_fallback(
+                "hmm entendi",
+                {"market_id": "US", "language": "pt"},
+                "market_mismatch",
+                rules_content="",
+                chat_id="12025550199@s.whatsapp.net",
+            )
+        self.assertIn("Me conta como funciona", out)
+
+    def test_fallback_sem_chat_id_segue_perguntando(self):
+        out = whatsapp_manager._payment_gate_fallback(
+            "hmm entendi",
+            {"market_id": "US", "language": "pt"},
+            "market_mismatch",
+            rules_content="",
+        )
+        self.assertIn("Me conta como funciona", out)
+
+
 class TestPurchaseIntentGaps(unittest.TestCase):
     """Buracos medidos no QA de 24/08 no fluxo de fechamento."""
 
