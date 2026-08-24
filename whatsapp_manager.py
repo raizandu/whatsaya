@@ -7482,6 +7482,16 @@ def _has_explicit_purchase_intent(text: str) -> bool:
         r"\b(?:enviame|envia|mandame|manda)\b.{0,25}\b(?:zelle|pix)\b",
         r"\b(?:enviame|envia|mandame|manda)\b.{0,35}\b(?:datos?|informacion)\b.{0,20}\bpago\b",
         r"\bestoy\s+list[oa]\b.{0,20}\b(?:empezar|avanzar|pagar)\b",
+        # Buracos medidos no QA de 24/08: o lead perguntou "Como faço para contratar?"
+        # e a frase não contava como intenção, então o bloco de pagamento do mercado
+        # dele nem entrava no prompt. Perguntar COMO contratar é fechamento; perguntar
+        # QUANTO custa continua não sendo (regra da própria base de conhecimento).
+        r"\bcomo\s+(?:eu\s+)?(?:faco|fazer|posso\s+fazer)\b.{0,25}"
+        r"\b(?:contratar|assinar|fechar|comecar)\b",
+        r"\bcomo\s+(?:posso\s+)?(?:contratar|assinar)\b",
+        r"\bvamos\s+fechar\b",
+        r"\bhow\s+(?:do|can)\s+i\s+(?:sign\s+up|subscribe|get\s+started|hire\s+you)\b",
+        r"\bcomo\s+(?:hago\s+para\s+)?(?:contrato|contratar|suscribirme)\b",
     )
     matches = [
         match
@@ -7533,6 +7543,62 @@ def _gate_payment_details_for_prompt(
         return match.group(2).strip() if block_market == allowed_market else ""
 
     return _AYA_PAYMENT_DETAILS_BLOCK_RE.sub(_replace, str(rules_content or "")).strip()
+
+
+_MARKET_HEADING_TOKENS = {
+    "BR": (r"brasil", r"brazil"),
+    "US": (r"estados\s+unidos", r"united\s+states", r"eua", r"usa"),
+}
+_HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
+
+
+def _heading_market(title: str) -> str:
+    """Mercado que um título de seção nomeia, ou '' se o título for geral."""
+    normalized = _normalize_text(title)
+    hits = {
+        market
+        for market, tokens in _MARKET_HEADING_TOKENS.items()
+        if any(re.search(rf"\b{token}\b", normalized) for token in tokens)
+    }
+    # Título que cita os dois mercados é de roteamento, não de um mercado só.
+    return hits.pop() if len(hits) == 1 else ""
+
+
+def _gate_market_sections_for_prompt(rules_content: str, market_id: str) -> str:
+    """Tira do prompt tudo que pertence a outro mercado.
+
+    Instruir não resolve: a base já diz três vezes "para EUA, não mencione Pix" e no
+    QA de 24/08 o modelo ofereceu Pix a um lead dos EUA em cinco turnos seguidos. O
+    recorte de credencial protegia só os blocos marcados — a linha "método de
+    pagamento: Pix" e a linha BR da tabela de preço continuavam ao alcance dele.
+    Aqui a alternativa errada deixa de existir.
+
+    Mercado desconhecido preserva tudo: o modelo precisa das duas tabelas para
+    conseguir perguntar em qual país a empresa opera.
+    """
+    market = _canonical_commercial_market(market_id)
+    if market not in _MARKET_HEADING_TOKENS:
+        return str(rules_content or "").strip()
+
+    kept: list[str] = []
+    skip_level = 0
+    for line in str(rules_content or "").splitlines():
+        heading = _HEADING_RE.match(line)
+        if heading:
+            level = len(heading.group(1))
+            if skip_level and level <= skip_level:
+                skip_level = 0
+            if not skip_level:
+                owner = _heading_market(heading.group(2))
+                if owner and owner != market:
+                    skip_level = level
+        if skip_level:
+            continue
+        row_market = _price_row_market(line)
+        if row_market and row_market != market:
+            continue
+        kept.append(line)
+    return "\n".join(kept).strip()
 
 
 def _infer_message_language(text: str) -> str | None:
@@ -7723,8 +7789,11 @@ def _build_support_prompt(
 
     spoken = _resolve_lead_spoken_name(contact_info)
     name_block = _lead_name_prompt_block(spoken)
+    # Ordem importa: primeiro some com o mercado alheio inteiro (o que leva junto o
+    # bloco de credencial dele), depois decide se a credencial do mercado do lead
+    # entra neste turno. O inverso deixaria a credencial do outro mercado exposta.
     gated_rules_content = _gate_payment_details_for_prompt(
-        rules_content,
+        _gate_market_sections_for_prompt(rules_content, payment_market_id),
         market_id=payment_market_id,
         allow_payment_details=allow_payment_details,
     )
@@ -10537,22 +10606,34 @@ _PRICE_PERIOD_SUFFIX = re.compile(
 )
 
 
+_PRICE_ROW_MARKET_LABELS = {
+    "BR": {"brasil", "brazil", "br"},
+    "US": {"estados unidos", "united states", "eua", "usa", "us"},
+}
+
+
+def _price_row_market(line: str) -> str:
+    """Mercado de uma linha da tabela comercial, ou '' se não for linha de mercado."""
+    if "|" not in line:
+        return ""
+    cells = [cell.strip() for cell in str(line).strip().strip("|").split("|")]
+    if len(cells) < 2:
+        return ""
+    label = _normalize_text(cells[0])
+    for market, labels in _PRICE_ROW_MARKET_LABELS.items():
+        if label in labels:
+            return market
+    return ""
+
+
 def _aya_price_cells(rules_content: str) -> dict[str, dict[str, str]]:
     """Célula crua de implantação e mensalidade por mercado, como está na tabela."""
     cells_by_market: dict[str, dict[str, str]] = {"BR": {}, "US": {}}
     for raw_line in str(rules_content or "").splitlines():
-        if "|" not in raw_line:
+        market = _price_row_market(raw_line)
+        if not market:
             continue
         cells = [cell.strip() for cell in raw_line.strip().strip("|").split("|")]
-        if len(cells) < 2:
-            continue
-        market_label = _normalize_text(cells[0])
-        if market_label in {"brasil", "brazil", "br"}:
-            market = "BR"
-        elif market_label in {"estados unidos", "united states", "eua", "usa", "us"}:
-            market = "US"
-        else:
-            continue
         for role, cell in zip(("setup", "monthly"), cells[1:3]):
             if cell:
                 cells_by_market[market][role] = cell

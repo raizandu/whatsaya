@@ -5996,6 +5996,151 @@ class TestOwnerCommands(BaseWhatsAppManagerTest):
         mock_update.assert_called_once()
 
 
+REGRAS_DOIS_MERCADOS = """# Base comercial
+
+## Tabela comercial — fonte única de preço
+
+| Mercado | Implementação | Mensalidade |
+|---|---:|---:|
+| Brasil | R$ 1.500 | R$ 497/mês |
+| Estados Unidos | US$ 497 | US$ 99/mês |
+
+## Mercado Brasil
+
+- **método de pagamento da implementação:** Pix
+<!-- AYA_PAYMENT_DETAILS:BR:START -->
+- **Pix CNPJ:** 44.249.819/0001-62
+- **Titular:** Fulano de Tal
+<!-- AYA_PAYMENT_DETAILS:BR:END -->
+
+## Mercado Estados Unidos
+
+- **método de pagamento da implementação:** Zelle
+
+### Zelle — dados oficiais estruturados
+
+<!-- AYA_PAYMENT_DETAILS:US:START -->
+- **Recipient:** Sicrana de Tal
+- **Zelle email:** sicrana@example.com
+<!-- AYA_PAYMENT_DETAILS:US:END -->
+
+## O que a implementação inclui
+
+- Configuração da persona.
+
+## Intenção de compra e pagamento
+
+### Fechamento EUA — modelo de resposta
+
+Copie Recipient e e-mail do bloco liberado.
+
+### Fechamento Brasil
+
+Envie o Pix oficial em texto copiável.
+
+### Confirmação de pagamento
+
+Peça o comprovante.
+"""
+
+
+class TestGateMarketSections(unittest.TestCase):
+    """Recorte por mercado: a alternativa errada não pode existir no prompt."""
+
+    def _gate(self, mercado):
+        return whatsapp_manager._gate_market_sections_for_prompt(
+            REGRAS_DOIS_MERCADOS, mercado
+        )
+
+    def test_lead_us_nao_ve_nada_do_brasil(self):
+        s = self._gate("US")
+        self.assertNotIn("Pix", s)
+        self.assertNotIn("CNPJ", s)
+        self.assertNotIn("R$ 1.500", s)
+        self.assertNotIn("Fechamento Brasil", s)
+        self.assertNotIn("Mercado Brasil", s)
+        # e continua com tudo do mercado dele
+        self.assertIn("Zelle", s)
+        self.assertIn("US$ 497", s)
+        self.assertIn("Fechamento EUA", s)
+        self.assertIn("Recipient", s)
+
+    def test_lead_br_nao_ve_nada_dos_eua(self):
+        s = self._gate("BR")
+        self.assertNotIn("Zelle", s)
+        self.assertNotIn("Recipient", s)
+        self.assertNotIn("US$ 497", s)
+        self.assertNotIn("Fechamento EUA", s)
+        self.assertIn("Pix", s)
+        self.assertIn("R$ 1.500", s)
+        self.assertIn("Fechamento Brasil", s)
+
+    def test_secao_geral_sobrevive_aos_dois(self):
+        for mercado in ("US", "BR"):
+            with self.subTest(mercado=mercado):
+                s = self._gate(mercado)
+                self.assertIn("O que a implementação inclui", s)
+                self.assertIn("Configuração da persona", s)
+                self.assertIn("Confirmação de pagamento", s)
+
+    def test_mercado_desconhecido_preserva_tudo(self):
+        """Sem saber onde a empresa opera, o modelo precisa das duas tabelas para perguntar."""
+        for mercado in ("", "XX", None):
+            with self.subTest(mercado=mercado):
+                s = whatsapp_manager._gate_market_sections_for_prompt(
+                    REGRAS_DOIS_MERCADOS, mercado
+                )
+                self.assertIn("R$ 1.500", s)
+                self.assertIn("US$ 497", s)
+
+    def test_titulo_de_roteamento_nao_e_de_mercado(self):
+        self.assertEqual(whatsapp_manager._heading_market("Roteamento de mercado"), "")
+        self.assertEqual(whatsapp_manager._heading_market("Mercado Brasil"), "BR")
+        self.assertEqual(whatsapp_manager._heading_market("Mercado Estados Unidos"), "US")
+        self.assertEqual(whatsapp_manager._heading_market("Fechamento EUA"), "US")
+        # título citando os dois é de roteamento, fica
+        self.assertEqual(whatsapp_manager._heading_market("Brasil e Estados Unidos"), "")
+
+    def test_credencial_do_outro_mercado_nunca_vaza_com_intencao(self):
+        """Mesmo liberando pagamento, a credencial liberada é a do mercado do lead."""
+        s = whatsapp_manager._gate_payment_details_for_prompt(
+            whatsapp_manager._gate_market_sections_for_prompt(REGRAS_DOIS_MERCADOS, "US"),
+            market_id="US",
+            allow_payment_details=True,
+        )
+        self.assertIn("sicrana@example.com", s)
+        self.assertNotIn("44.249.819", s)
+
+
+class TestPurchaseIntentGaps(unittest.TestCase):
+    """Buracos medidos no QA de 24/08 no fluxo de fechamento."""
+
+    def test_como_faco_para_contratar_e_intencao(self):
+        for msg in (
+            "Como faço para contratar?",
+            "Como faço pra contratar",
+            "Como posso contratar?",
+            "Vamos fechar",
+            "How do I sign up?",
+            "How can I get started?",
+            "¿Cómo hago para contratar?",
+        ):
+            with self.subTest(msg=msg):
+                self.assertTrue(whatsapp_manager._has_explicit_purchase_intent(msg))
+
+    def test_pergunta_de_preco_continua_nao_sendo_intencao(self):
+        """Regra da própria base: perguntar preço não é intenção de pagar."""
+        for msg in (
+            "Quanto custa?",
+            "Qual o valor da implementação?",
+            "How much does it cost?",
+            "Achei o valor de implementação um pouco caro.",
+            "Não quero contratar agora",
+        ):
+            with self.subTest(msg=msg):
+                self.assertFalse(whatsapp_manager._has_explicit_purchase_intent(msg))
+
+
 class TestSplitHumanBubbles(unittest.TestCase):
     """Splitter de bolhas — sem I/O."""
 
