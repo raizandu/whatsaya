@@ -6742,6 +6742,40 @@ class TestPrepareContactReply(BaseWhatsAppManagerTest):
         self.assertIn("[número omitido]", out)
         self.assertNotIn("11999887766", out)
 
+    def test_rotulo_resposta_sugerida_nao_chega_ao_lead(self):
+        """QA de 24/08 pós-reset: a primeira bolha do lead foi literalmente
+        "*Resposta sugerida:*" — a persona default do dono rascunhando em vez
+        de a AYA responder. O rótulo nunca pode sair para o cliente."""
+        out = whatsapp_manager._prepare_contact_reply(
+            "*Resposta sugerida:*\n\nOlá! A AYA atende seus clientes no WhatsApp."
+        )
+        self.assertEqual(out, "Olá! A AYA atende seus clientes no WhatsApp.")
+
+    def test_prefixo_de_rascunho_inline_e_removido(self):
+        out = whatsapp_manager._prepare_contact_reply("Resposta sugerida: Olá! Tudo bem?")
+        self.assertEqual(out, "Olá! Tudo bem?")
+
+    def test_variantes_de_rascunho_en_es(self):
+        casos = (
+            ("Suggested reply: Hi there.", "Hi there."),
+            ("Respuesta sugerida: Hola, ¿cómo estás?", "Hola, ¿cómo estás?"),
+            ("Sugestão de resposta: Oi!", "Oi!"),
+        )
+        for entrada, esperado in casos:
+            with self.subTest(entrada=entrada):
+                self.assertEqual(whatsapp_manager._prepare_contact_reply(entrada), esperado)
+
+    def test_rascunho_entre_aspas_e_desembrulhado(self):
+        """Caso de 19/08: o lead recebeu a resposta inteira entre aspas."""
+        out = whatsapp_manager._prepare_contact_reply(
+            'Resposta sugerida para o lead:\n"Olá, posso ajudar com a AYA?"'
+        )
+        self.assertEqual(out, "Olá, posso ajudar com a AYA?")
+
+    def test_mencao_a_sugestao_no_meio_do_texto_fica(self):
+        texto = "Posso te mandar uma resposta sugerida depois, tudo bem?"
+        self.assertEqual(whatsapp_manager._prepare_contact_reply(texto), texto)
+
     def test_owner_whatsapp_number_preserved(self):
         import whatsapp_manager
         with patch.dict(os.environ, {"WHATSAPP_OWNER_NUMBER": "5562936180895"}):

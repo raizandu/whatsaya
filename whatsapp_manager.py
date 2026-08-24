@@ -11744,9 +11744,54 @@ def _enforce_aya_onboarding_output_gate(
         return text
 
 
+# A persona default do dono às vezes responde como assistente RASCUNHANDO uma
+# resposta ("Resposta sugerida:") em vez de falar como a AYA — o core 0.20.5 não
+# tem mais o override de perfil por sessão que aplicaria a persona de cliente
+# (gateway._session_profile_overrides não existe; o hasattr do plugin pula em
+# silêncio). No QA de 24/08 o rótulo saiu como primeira bolha para o lead, e em
+# 19/08 a resposta inteira foi entregue entre aspas. Até a camada de perfil ser
+# restaurada no core, o enquadramento é removido deterministicamente na saída.
+_DRAFT_LABEL_RE = re.compile(
+    r"^[>\s*_~\"'“”-]*(?:resposta\s+sugerida|sugest[aã]o\s+de\s+resposta|"
+    r"suggested\s+(?:reply|response)|draft\s+(?:reply|response)|"
+    r"respuesta\s+sugerida|sugerencia\s+de\s+respuesta)"
+    # Depois do rótulo só se consomem decorações (*_~) e espaço — aspas ficam,
+    # porque são o embrulho do rascunho e o desembrulho abaixo precisa do par.
+    r"[^:\n]{0,40}:[\s*_~]*",
+    re.IGNORECASE,
+)
+_DRAFT_QUOTE_PAIRS = (('"', '"'), ("“", "”"), ("'", "'"), ("«", "»"))
+
+
+def _strip_assistant_draft_framing(text: str) -> str:
+    """Remove o enquadramento de rascunho do início da resposta ao lead."""
+    value = str(text or "").lstrip()
+    stripped = False
+    for _ in range(2):
+        match = _DRAFT_LABEL_RE.match(value)
+        if not match:
+            break
+        value = value[match.end():].lstrip()
+        stripped = True
+    if not stripped:
+        return str(text or "")
+    for abre, fecha in _DRAFT_QUOTE_PAIRS:
+        if value.startswith(abre) and value.endswith(fecha) and len(value) > 2:
+            inner = value[1:-1].strip()
+            if abre not in inner and fecha not in inner:
+                value = inner
+            break
+    logger.warning("[contact-reply] enquadramento de rascunho removido do início da resposta")
+    return value
+
+
 def _prepare_contact_reply(response_text: str) -> str:
     """Filtra a resposta de contato. String vazia = suprimir o envio."""
     clean_text = _EXEC_PATTERN.sub("", response_text or "").strip()
+    if not clean_text:
+        return ""
+
+    clean_text = _strip_assistant_draft_framing(clean_text).strip()
     if not clean_text:
         return ""
 
