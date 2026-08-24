@@ -6005,6 +6005,19 @@ REGRAS_DOIS_MERCADOS = """# Base comercial
 | Brasil | R$ 1.500 | R$ 497/mês |
 | Estados Unidos | US$ 497 | US$ 99/mês |
 
+## Regras de mercado
+
+Uma empresa que opera nos EUA continua mercado US mesmo falando espanhol.
+Espanhol não puxa preço, Pix ou regras do Brasil.
+
+### Isolamento obrigatório
+
+- Lead do mercado Brasil usa somente a própria oferta, moeda e pagamento.
+- Lead do mercado dos EUA usa somente a própria oferta, moeda e pagamento.
+- Nunca misture R$ e US$ na mesma oferta.
+- Para EUA, não mencione Pix, CNPJ, horário de Goiânia nem condição do Brasil.
+- Para Brasil, não mencione Zelle, destinatário dos EUA nem condição dos EUA.
+
 ## Mercado Brasil
 
 - **método de pagamento da implementação:** Pix
@@ -6100,6 +6113,41 @@ class TestGateMarketSections(unittest.TestCase):
         self.assertEqual(whatsapp_manager._heading_market("Fechamento EUA"), "US")
         # título citando os dois é de roteamento, fica
         self.assertEqual(whatsapp_manager._heading_market("Brasil e Estados Unidos"), "")
+
+    def test_instrucao_de_mercado_some_quando_mercado_e_conhecido(self):
+        """QA de 24/08: as linhas "Para EUA, não mencione Pix..." eram as últimas âncoras
+        de R$/Pix/CNPJ no prompt de um lead US — existem para proibir o que o recorte já
+        removeu, e são a única fonte possível desses literais para o modelo copiar."""
+        s = self._gate("US")
+        self.assertNotIn("Pix", s)
+        self.assertNotIn("CNPJ", s)
+        self.assertNotIn("R$", s)
+        self.assertNotIn("Nunca misture", s)
+        self.assertNotIn("horário de Goiânia", s)
+        b = self._gate("BR")
+        self.assertNotIn("Zelle", b)
+        self.assertNotIn("US$", b)
+        self.assertNotIn("Nunca misture", b)
+
+    def test_linha_que_nomeia_o_outro_mercado_some(self):
+        s = self._gate("US")
+        self.assertNotIn("Lead do mercado Brasil", s)
+        self.assertNotIn("regras do Brasil", s)
+        b = self._gate("BR")
+        self.assertNotIn("Lead do mercado dos EUA", b)
+        self.assertNotIn("empresa que opera nos EUA", b)
+
+    def test_usa_como_verbo_nao_e_token_de_mercado(self):
+        """"Lead do mercado Brasil usa somente..." tem o verbo "usa" — não pode ser
+        confundido com USA e sumir do prompt de um lead brasileiro."""
+        b = self._gate("BR")
+        self.assertIn("Lead do mercado Brasil usa somente", b)
+
+    def test_mercado_desconhecido_preserva_instrucoes_de_isolamento(self):
+        s = whatsapp_manager._gate_market_sections_for_prompt(REGRAS_DOIS_MERCADOS, "")
+        self.assertIn("Nunca misture R$ e US$", s)
+        self.assertIn("Para EUA, não mencione Pix", s)
+        self.assertIn("Para Brasil, não mencione Zelle", s)
 
     def test_credencial_do_outro_mercado_nunca_vaza_com_intencao(self):
         """Mesmo liberando pagamento, a credencial liberada é a do mercado do lead."""
@@ -6748,6 +6796,60 @@ class TestTransformLlmOutput(BaseWhatsAppManagerTest):
 
         self.assertEqual(result, "\n")
         self.assertEqual(mock_send.call_args.args[1], response)
+
+    def test_log_do_gate_diz_se_digito_e_credencial_oficial_sem_expor_o_valor(self):
+        """Item 1 do QA de 24/08: o modelo escreveu rótulo CNPJ com dígitos para lead US
+        e o log não dizia se os dígitos eram o CNPJ real (vazamento) ou invenção.
+        A classificação vai para o log; o valor, nunca."""
+        with self.assertLogs("whatsapp_manager", level="WARNING") as logs:
+            out = whatsapp_manager._enforce_aya_payment_output_gate(
+                "Pode pagar por aqui.\nCNPJ: 44.249.819/0001-62",
+                user_message="quero contratar",
+                contact_info={"market_id": "US"},
+                rules_content=self._payment_rules(),
+            )
+        joined = "\n".join(logs.output)
+        self.assertIn("official:BR:pix cnpj", joined)
+        self.assertNotIn("44249819", joined)
+        self.assertNotIn("44.249.819", joined)
+        self.assertNotIn("44.249.819", out)
+
+    def test_log_do_gate_marca_digito_inventado_como_unknown(self):
+        with self.assertLogs("whatsapp_manager", level="WARNING") as logs:
+            whatsapp_manager._enforce_aya_payment_output_gate(
+                "Pode pagar por aqui.\nCNPJ: 12.345.678/0001-99",
+                user_message="quero contratar",
+                contact_info={"market_id": "US"},
+                rules_content=self._payment_rules(),
+            )
+        joined = "\n".join(logs.output)
+        self.assertIn("unknown:len14", joined)
+        self.assertNotIn("12345678", joined)
+        self.assertNotIn("12.345.678", joined)
+
+    def test_log_do_gate_traz_precos_e_papeis_parseados(self):
+        with self.assertLogs("whatsapp_manager", level="WARNING") as logs:
+            whatsapp_manager._enforce_aya_payment_output_gate(
+                "A mensalidade fica em R$ 497.",
+                user_message="quanto custa?",
+                contact_info={"market_id": "US"},
+                rules_content=self._payment_rules(),
+            )
+        joined = "\n".join(logs.output)
+        self.assertIn("prices=", joined)
+        self.assertIn("497.00", joined)
+
+    def test_log_do_gate_classifica_email_sem_expor_o_endereco(self):
+        with self.assertLogs("whatsapp_manager", level="WARNING") as logs:
+            whatsapp_manager._enforce_aya_payment_output_gate(
+                "Zelle email: attacker@example.com",
+                user_message="quero contratar",
+                contact_info={"market_id": "US"},
+                rules_content=self._payment_rules(),
+            )
+        joined = "\n".join(logs.output)
+        self.assertIn("emails=['unknown']", joined)
+        self.assertNotIn("attacker@example.com", joined)
 
     def test_invented_zelle_details_are_blocked_even_with_purchase_intent(self):
         response = "Zelle email: attacker@example.com\nRecipient: Persona Inventada"

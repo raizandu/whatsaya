@@ -7551,6 +7551,32 @@ _MARKET_HEADING_TOKENS = {
 }
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
 
+# Literais que denunciam uma linha do outro mercado fora das seções recortáveis.
+# "usa"/"us" ficam de fora de propósito: "Lead do mercado Brasil usa somente..."
+# tem o verbo "usa" e sumiria do prompt de um lead brasileiro.
+_MARKET_LINE_TOKENS = {
+    "BR": (r"r\s*\$", r"\bpix\b", r"\bcnpj\b", r"\bbrasil\b", r"\bbrazil\b"),
+    "US": (r"us\s*\$", r"\bzelle\b", r"\bestados\s+unidos\b", r"\bunited\s+states\b", r"\beua\b"),
+}
+
+
+def _foreign_market_line(line: str, market: str) -> bool:
+    """Linha avulsa que cita moeda, método ou nome do outro mercado.
+
+    No QA de 24/08 o modelo escreveu "R$" e rótulo "CNPJ:" para um lead US cujo
+    prompt já não tinha preço nem credencial do Brasil — as únicas ocorrências
+    restantes desses literais eram as instruções "Para EUA, não mencione Pix,
+    CNPJ..." e "Nunca misture R$ e US$". Instrução que proíbe citando o literal
+    vira âncora para o modelo copiar; com o mercado conhecido, ela sai junto.
+    """
+    normalized = _normalize_text(line)
+    return any(
+        re.search(token, normalized)
+        for other, tokens in _MARKET_LINE_TOKENS.items()
+        if other != market
+        for token in tokens
+    )
+
 
 def _heading_market(title: str) -> str:
     """Mercado que um título de seção nomeia, ou '' se o título for geral."""
@@ -7596,6 +7622,8 @@ def _gate_market_sections_for_prompt(rules_content: str, market_id: str) -> str:
             continue
         row_market = _price_row_market(line)
         if row_market and row_market != market:
+            continue
+        if not heading and _foreign_market_line(line, market):
             continue
         kept.append(line)
     return "\n".join(kept).strip()
@@ -10913,6 +10941,40 @@ def _strip_wrong_market_money(text: str, wrong_markets: set[str]) -> str:
     return "\n\n".join(paragrafo.strip() for paragrafo in mantidos).strip()
 
 
+def _payment_gate_evidence(
+    detail_fields: dict[str, dict[str, str]],
+    digit_candidates: list[str],
+    email_candidates: list[str],
+) -> tuple[list[str], list[str]]:
+    """Classifica dígitos e e-mails da resposta contra os campos oficiais, sem expor valor.
+
+    Responde no log a pergunta que o QA de 24/08 não conseguiu responder: os dígitos
+    que o modelo escreveu eram a credencial real (vazamento independente do recorte)
+    ou invenção? `official:BR:pix cnpj` prova reprodução do campo oficial;
+    `unknown:len14` prova invenção. O valor em si nunca vai para o log.
+    """
+    official_digits: dict[str, str] = {}
+    official_emails: dict[str, str] = {}
+    for market, fields in detail_fields.items():
+        for label, value in fields.items():
+            digits = re.sub(r"\D", "", value)
+            if len(digits) >= 8:
+                official_digits[digits] = f"{market}:{label}"
+            if "@" in value:
+                official_emails[_payment_compact_text(value)] = f"{market}:{label}"
+    digit_evidence = sorted({
+        f"official:{official_digits[digits]}"
+        if digits in official_digits else f"unknown:len{len(digits)}"
+        for digits in digit_candidates
+    })
+    email_evidence = sorted({
+        f"official:{official_emails[compact]}"
+        if (compact := _payment_compact_text(email)) in official_emails else "unknown"
+        for email in email_candidates
+    })
+    return digit_evidence, email_evidence
+
+
 def _enforce_aya_payment_output_gate(
     response_text: str,
     *,
@@ -11284,13 +11346,27 @@ def _enforce_aya_payment_output_gate(
             )
             return f"{restante}\n\n{correcao}".strip()
 
+    # Evidência parseada no disparo: preços com papel/mercado, e se dígitos/e-mails
+    # batem com o campo oficial — sem texto de mensagem e sem o valor da credencial.
+    digit_evidence, email_evidence = _payment_gate_evidence(
+        detail_fields, digit_candidates, email_candidates
+    )
     logger.warning(
         "[payment-gate] resposta comercial substituída reason=%s market=%r intent=%s "
-        "methods=%s restante=%d payment_content=%s unofficial=%s",
+        "markets=%s prices=%s price_roles=%s digits=%s emails=%s "
+        "restante=%d payment_content=%s unofficial=%s",
         reason,
         market_id,
         has_intent,
         sorted(mentioned_markets),
+        {market: sorted(amounts) for market, amounts in mentioned_prices.items() if amounts},
+        {
+            market: {role: sorted(amounts) for role, amounts in roles.items()}
+            for market, roles in mentioned_price_roles.items()
+            if roles
+        },
+        digit_evidence,
+        email_evidence,
         len(restante),
         payment_content_present,
         unofficial_reasons or False,
