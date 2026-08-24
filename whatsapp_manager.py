@@ -7700,7 +7700,7 @@ _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
 # Literais que denunciam uma linha do outro mercado fora das seções recortáveis.
 _MARKET_LINE_TOKENS = {
     "BR": (r"r\s*\$", r"\bpix\b", r"\bcnpj\b", r"\bbrasil\b", r"\bbrazil\b",
-           r"\bbrl\b", r"\breais\b"),
+           r"\bbrl\b", r"\breais\b", r"\bgoiania\b"),
     "US": (r"us\s*\$", r"\bzelle\b", r"\bestados\s+unidos\b", r"\bunited\s+states\b",
            r"\beua\b", r"\busd\b", r"\bdolar(?:es)?\b", r"\bdollars?\b"),
 }
@@ -9933,8 +9933,46 @@ def pre_gateway_dispatch(*args, **kwargs):
             getattr(event, "text", "") or "",
             staged_metadata,
         )
+        # Handoff determinístico: pedido explícito de humano não pode depender de o
+        # modelo lembrar do marcador — em 24/08 a AYA prometeu "uma pessoa vai
+        # retomar o atendimento" sem [[HANDOFF]] e ninguém foi avisado. O cooldown
+        # de 15 min do _notify_owner_handoff evita duplicar quando o modelo acerta.
+        if not _is_historical_event and _lead_requests_human(getattr(event, "text", "") or ""):
+            def _notify_human_request(cid=str(chat_id)):
+                try:
+                    _notify_owner_handoff(cid, "lead pediu atendimento humano")
+                except Exception as human_req_err:
+                    logger.error(f"[handoff] erro ao avisar pedido de humano: {human_req_err}")
+
+            threading.Thread(
+                target=_notify_human_request, daemon=True, name="wa-human-request"
+            ).start()
 
     return None
+
+
+# Pedido explícito de humano. Exige verbo de pedido + alvo humano na mesma mensagem:
+# "quero falar com uma pessoa" dispara; "uma pessoa me indicou vocês" não.
+_HUMAN_REQUEST_RE = re.compile(
+    r"(?:\b(?:quero|queria|posso|preciso|prefiro|gostaria\s+de)\s+falar\s+com\b|"
+    r"\bme\s+(?:passa|passe|transfere|transfira|coloca|coloque)\s+(?:pra|para|com)\b|"
+    r"\bfalar\s+com\s+(?:o\s+|a\s+|um\s+|uma\s+)?(?:respons|dono|gerente|atendente|humano)|"
+    r"\b(?:can|could)\s+i\s+(?:talk|speak)\s+(?:to|with)\b|"
+    r"\bi\s+want\s+to\s+(?:talk|speak)\s+(?:to|with)\b|"
+    r"\bquiero\s+hablar\s+con\b)"
+)
+_HUMAN_TARGET_RE = re.compile(
+    r"\b(?:pessoas?|humanos?|atendentes?|alguem|human|person|agent|someone|"
+    r"personas?|agentes?|respons\w*|dono|gerente|manager|owner)\b"
+)
+
+
+def _lead_requests_human(text: str) -> bool:
+    """Pedido explícito de falar com uma pessoa, nas três línguas do atendimento."""
+    normalized = _normalize_text(str(text or ""))
+    return bool(
+        _HUMAN_REQUEST_RE.search(normalized) and _HUMAN_TARGET_RE.search(normalized)
+    )
 
 
 def _bind_turn_to_current_context(turn_key: str) -> None:
@@ -11105,10 +11143,12 @@ def _aya_market_price_line(market: str, language: str, rules_content: str) -> st
     return template.format(setup=setup, monthly=monthly)
 
 
+# Sem "!" no meio: o separador de bolhas quebra em fim de frase, e "Perfeito!"
+# saiu como bolha sozinha no QA de 24/08.
 _OFFICIAL_PAYMENT_INTRO = {
-    "pt": "Perfeito! Os dados oficiais para o pagamento:",
-    "en": "Great! Here are the official payment details:",
-    "es": "¡Perfecto! Estos son los datos oficiales de pago:",
+    "pt": "Perfeito — seguem os dados oficiais para o pagamento:",
+    "en": "Great — here are the official payment details:",
+    "es": "Perfecto — estos son los datos oficiales de pago:",
 }
 
 

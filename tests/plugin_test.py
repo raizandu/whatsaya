@@ -5996,6 +5996,36 @@ class TestOwnerCommands(BaseWhatsAppManagerTest):
         mock_update.assert_called_once()
 
 
+class TestExplicitHumanRequest(unittest.TestCase):
+    """Turno real de 24/08: "Quero falar com uma pessoa" → a AYA prometeu retomada
+    humana sem emitir [[HANDOFF]] e ninguém foi avisado. Pedido explícito de humano
+    dispara o aviso pelo código, sem depender do modelo lembrar do marcador."""
+
+    def test_pedido_explicito_e_reconhecido(self):
+        for msg in (
+            "Quero falar com uma pessoa",
+            "quero falar com um humano",
+            "queria falar com o responsável",
+            "me passa pra um atendente",
+            "posso falar com alguém?",
+            "Can I talk to a human?",
+            "I want to speak with a person",
+            "quiero hablar con una persona",
+        ):
+            with self.subTest(msg=msg):
+                self.assertTrue(whatsapp_manager._lead_requests_human(msg))
+
+    def test_mencao_nao_explicita_nao_dispara(self):
+        for msg in (
+            "uma pessoa me indicou vocês",
+            "vocês atendem pessoas físicas?",
+            "o atendimento humanizado é o diferencial de vocês?",
+            "quero falar com vocês sobre o produto",
+        ):
+            with self.subTest(msg=msg):
+                self.assertFalse(whatsapp_manager._lead_requests_human(msg))
+
+
 class TestOwnerMarketCorrection(BaseWhatsAppManagerTest):
     """Decisão de 24/08: mercado errado no cadastro se corrige pelo chat do dono
     (`update contact <numero> market_id=BR`). O bloco mercado/país/moeda/oferta
@@ -6390,6 +6420,20 @@ class TestGateMarketSections(unittest.TestCase):
         b = whatsapp_manager._gate_market_sections_for_prompt(regras, "BR")
         self.assertNotIn("US$ 497", b)
         self.assertIn("R$ 1.500", b)
+
+    def test_horario_de_goiania_nao_vai_para_lead_us(self):
+        """Turno real de 24/08: lead US recebeu "horário de Goiânia" — o horário
+        comercial vive em seção neutra e sobrevivia ao recorte."""
+        s = whatsapp_manager._gate_market_sections_for_prompt(
+            "Atendimento humano de segunda a sexta, das 08h às 18h, no horário de Goiânia.",
+            "US",
+        )
+        self.assertNotIn("Goiânia", s)
+        b = whatsapp_manager._gate_market_sections_for_prompt(
+            "Atendimento humano de segunda a sexta, das 08h às 18h, no horário de Goiânia.",
+            "BR",
+        )
+        self.assertIn("Goiânia", b)
 
     def test_credencial_do_outro_mercado_nunca_vaza_com_intencao(self):
         """Mesmo liberando pagamento, a credencial liberada é a do mercado do lead."""
