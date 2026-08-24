@@ -7630,6 +7630,18 @@ def _build_support_prompt(
         if name:
             lines.append(f"Nome: {name}")
         lines.append(f"Relacionamento: {relationship}")
+        # O classificador rotula qualquer contato comercial como "Cliente" — inclusive um
+        # lead que mandou a primeira mensagem hoje. Sem esta ressalva a IA lia o rótulo como
+        # "cliente com contrato", disparava a rota de cliente ativo e encaminhava para humano
+        # em vez de vender. Aconteceu no reteste de 23/08.
+        lines.append(
+            "OBS: esse rótulo é classificação de TIPO de contato no CRM, não status de "
+            "contrato. \"Cliente\" aqui significa contato comercial — inclui lead novo que "
+            "nunca comprou. NÃO conclua a partir dele que a pessoa já é cliente ativa, não "
+            "diga \"como você já é cliente\" e não acione a rota de suporte por causa dele. "
+            "Só trate como cliente ativo se a própria pessoa disser que já contratou, ou se "
+            "houver venda confirmada registrada no contexto."
+        )
         if tone:
             lines.append(f"Tom de voz recomendado: {tone}")
         if nickname:

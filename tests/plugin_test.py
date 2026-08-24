@@ -7371,6 +7371,34 @@ class TestFishAsr(unittest.TestCase):
             os.unlink(path)
 
 
+class TestRotuloDeRelacionamento(BaseWhatsAppManagerTest):
+    """"Cliente" no CRM é tipo de contato, não status de contrato."""
+
+    def _contexto(self, relationship):
+        from whatsapp_manager import _build_support_prompt
+        payload = _build_support_prompt(
+            whatsapp_soul="persona",
+            rules_content="regras",
+            history_section="",
+            contact_info={"name": "Gustavo", "relationship": relationship},
+            chat_id="5511987654321@s.whatsapp.net",
+        )
+        return payload["context"] if isinstance(payload, dict) else str(payload)
+
+    def test_rotulo_cliente_vem_com_ressalva(self):
+        ctx = self._contexto("Cliente")
+        self.assertIn("Relacionamento: Cliente", ctx)
+        self.assertIn("não status de contrato", ctx)
+        self.assertIn("inclui lead novo que nunca comprou", ctx)
+        self.assertIn("não acione a rota de suporte", ctx)
+
+    def test_ressalva_acompanha_qualquer_rotulo(self):
+        """A ressalva não pode depender do valor — o classificador muda o rótulo sozinho."""
+        for rel in ("Cliente", "Vendedor", "Amigo"):
+            with self.subTest(rel=rel):
+                self.assertIn("classificação de TIPO de contato", self._contexto(rel))
+
+
 class TestPrecoNaoVazaNoCodigo(unittest.TestCase):
     """Preço vive só na base comercial. Exemplo de prompt com número apodrece e vaza."""
 
