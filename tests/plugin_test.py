@@ -6265,6 +6265,51 @@ class TestGateMarketSections(unittest.TestCase):
         self.assertIn("Para EUA, não mencione Pix", s)
         self.assertIn("Para Brasil, não mencione Zelle", s)
 
+    def test_paragrafo_de_prosa_cai_inteiro_sem_deixar_fragmento(self):
+        """Code-review de 24/08: derrubar linha a linha dentro de prosa deixava um
+        fragmento órfão dizendo o OPOSTO ("...e mantenha USD, oferta internacional,")
+        no prompt de um lead brasileiro."""
+        regras = (
+            "## Regras\n\n"
+            "Uma empresa que opera nos EUA segue mercado US mesmo\n"
+            "se o lead conversar em espanhol. Responda em espanhol e mantenha USD, oferta internacional,\n"
+            "sem puxar preço, Pix ou regras do Brasil.\n\n"
+            "Parágrafo neutro que fica.\n"
+        )
+        b = whatsapp_manager._gate_market_sections_for_prompt(regras, "BR")
+        self.assertNotIn("mantenha USD", b)
+        self.assertNotIn("Responda em espanhol", b)
+        self.assertIn("Parágrafo neutro que fica", b)
+
+    def test_usd_e_dolar_tambem_sao_literais_de_mercado(self):
+        b = whatsapp_manager._gate_market_sections_for_prompt(
+            "Cobre o valor em USD.\n\nPreço em dólares.", "BR"
+        )
+        self.assertNotIn("USD", b)
+        self.assertNotIn("dólares", b)
+        s = whatsapp_manager._gate_market_sections_for_prompt("O valor em reais é fixo.", "US")
+        self.assertNotIn("reais", s)
+
+    def test_verbo_usa_em_titulo_nao_e_mercado(self):
+        """"Quem usa a AYA" era classificado como seção US e sumia para lead BR."""
+        self.assertEqual(whatsapp_manager._heading_market("Quem usa a AYA"), "")
+        self.assertEqual(whatsapp_manager._heading_market("Como a AYA usa o WhatsApp"), "")
+
+    def test_cerca_de_codigo_nao_reabre_secao_recortada(self):
+        regras = (
+            "## Mercado Brasil\n\nsegredo brasileiro\n\n```\n# comentario de exemplo\nmais segredo\n```\n\n"
+            "## Geral\n\nconteudo neutro\n"
+        )
+        s = whatsapp_manager._gate_market_sections_for_prompt(regras, "US")
+        self.assertNotIn("segredo", s)
+        self.assertIn("conteudo neutro", s)
+
+    def test_linha_de_tabela_rotulada_por_moeda_tambem_e_recortada(self):
+        regras = "| USD | US$ 497 | US$ 99/mês |\n| BRL | R$ 1.500 | R$ 497/mês |"
+        b = whatsapp_manager._gate_market_sections_for_prompt(regras, "BR")
+        self.assertNotIn("US$ 497", b)
+        self.assertIn("R$ 1.500", b)
+
     def test_credencial_do_outro_mercado_nunca_vaza_com_intencao(self):
         """Mesmo liberando pagamento, a credencial liberada é a do mercado do lead."""
         s = whatsapp_manager._gate_payment_details_for_prompt(
@@ -6415,6 +6460,38 @@ class TestPurchaseIntentGaps(unittest.TestCase):
         ):
             with self.subTest(msg=msg):
                 self.assertTrue(whatsapp_manager._has_explicit_purchase_intent(msg))
+
+    def test_fechamento_negado_ou_encerramento_nao_e_intencao(self):
+        """Achados do code-review de 24/08: o padrão `vamos fechar` sem guarda
+        liberava credencial de pagamento para recusa e despedida."""
+        for msg in (
+            "Não vamos fechar",
+            "Vamos fechar por hoje, obrigado",
+            "vamos fechar o escopo do projeto primeiro",
+        ):
+            with self.subTest(msg=msg):
+                self.assertFalse(whatsapp_manager._has_explicit_purchase_intent(msg))
+
+    def test_contratar_terceiros_ou_cancelar_nao_e_intencao(self):
+        """Lead é dono de negócio: contratar funcionário/gente não é contratar a AYA."""
+        for msg in (
+            "Como faço para contratar mais funcionários?",
+            "Como posso contratar gente para a clínica?",
+            "No sé cómo contratar personal para mi empresa",
+            "Como faço para cancelar depois de contratar?",
+            "Trabalho como contrato temporário",
+        ):
+            with self.subTest(msg=msg):
+                self.assertFalse(whatsapp_manager._has_explicit_purchase_intent(msg))
+
+    def test_plural_em_ingles_e_intencao(self):
+        """"How do we sign up?" — lead falando pela empresa no plural."""
+        for msg in ("How do we sign up?", "How can we get started?"):
+            with self.subTest(msg=msg):
+                self.assertTrue(whatsapp_manager._has_explicit_purchase_intent(msg))
+
+    def test_como_contrato_espanhol_com_pergunta_e_intencao(self):
+        self.assertTrue(whatsapp_manager._has_explicit_purchase_intent("¿Cómo contrato?"))
 
     def test_pergunta_de_preco_continua_nao_sendo_intencao(self):
         """Regra da própria base: perguntar preço não é intenção de pagar."""

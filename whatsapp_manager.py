@@ -7494,6 +7494,15 @@ def _persist_external_commercial_metadata(
         return updated
 
 
+# "Contratar" com objeto de terceiros (funcionário, gente, equipe) é o lead falando
+# do negócio dele, não de fechar com a AYA — e liberar credencial nessa frase era o
+# risco apontado no code-review de 24/08.
+_HIRE_THIRD_PARTY_GUARD = (
+    r"(?!\s+(?:mais\s+|mas\s+)?(?:funcionari\w*|colaborador\w*|gente|pessoal|"
+    r"equipe|alguem|alguien|personal|emplead\w*|staff|people|uma?\s+pessoa))"
+)
+
+
 def _has_explicit_purchase_intent(text: str) -> bool:
     """Reconhece fechamento explícito em PT/EN/ES sem confundir pergunta de preço."""
     # Avalia o que a pessoa realmente vê: Markdown e caracteres invisíveis não podem
@@ -7509,6 +7518,7 @@ def _has_explicit_purchase_intent(text: str) -> bool:
         return False
     negative_patterns = (
         r"\bnao\s+quero\s+(?:contratar|avancar|comecar|fechar|pagar|receber)\b",
+        r"\b(?:nao|no)\s+vamos\s+(?:fechar|avancar|comecar|a\s+cerrar)\b",
         r"\bnao\s+(?:me\s+)?(?:mande|manda|envie|envia)\b.{0,35}"
         r"\b(?:pix|zelle|pagamento|dados|chave)\b",
         r"\bnao\s+(?:estou|estamos)\s+pront[oa]s?\b.{0,20}\b(?:comecar|avancar)\b",
@@ -7585,12 +7595,20 @@ def _has_explicit_purchase_intent(text: str) -> bool:
         # e a frase não contava como intenção, então o bloco de pagamento do mercado
         # dele nem entrava no prompt. Perguntar COMO contratar é fechamento; perguntar
         # QUANTO custa continua não sendo (regra da própria base de conhecimento).
-        r"\bcomo\s+(?:eu\s+)?(?:faco|fazer|posso\s+fazer)\b.{0,25}"
-        r"\b(?:contratar|assinar|fechar|comecar)\b",
-        r"\bcomo\s+(?:posso\s+)?(?:contratar|assinar)\b",
-        r"\bvamos\s+fechar\b",
-        r"\bhow\s+(?:do|can)\s+i\s+(?:sign\s+up|subscribe|get\s+started|hire\s+you)\b",
-        r"\bcomo\s+(?:hago\s+para\s+)?(?:contrato|contratar|suscribirme)\b",
+        #
+        # Guardas do code-review de 24/08: o lead é dono de negócio, então "contratar"
+        # seguido de funcionário/gente/equipe é contratação de terceiros, não da AYA;
+        # a janela até o verbo não pode saltar por cima de "cancelar"; e "vamos fechar"
+        # solto só conta encerrando a frase — "vamos fechar por hoje" é despedida.
+        r"\bcomo\s+(?:eu\s+)?(?:faco|fazer|posso\s+fazer)\b(?:(?!cancel|desist).){0,25}"
+        r"\b(?:contratar|assinar|fechar|comecar)\b" + _HIRE_THIRD_PARTY_GUARD,
+        r"\bcomo\s+(?:posso\s+)?(?:contratar|assinar)\b" + _HIRE_THIRD_PARTY_GUARD,
+        r"\bvamos\s+fechar\s*[!.?…]*\s*$",
+        r"\bhow\s+(?:do|can)\s+(?:i|we)\s+(?:sign\s+up|subscribe|get\s+started|hire\s+you)\b",
+        r"\bcomo\s+(?:hago\s+para\s+)?(?:contratar|suscribirme)\b" + _HIRE_THIRD_PARTY_GUARD,
+        # "contrato" só como verbo em pergunta ("¿cómo contrato?") — como substantivo
+        # ("trabalho como contrato temporário") não é intenção.
+        r"\bcomo\s+contrato\s*\?",
     )
     matches = [
         match
@@ -7644,19 +7662,26 @@ def _gate_payment_details_for_prompt(
     return _AYA_PAYMENT_DETAILS_BLOCK_RE.sub(_replace, str(rules_content or "")).strip()
 
 
+# "usa"/"us" ficam de fora de propósito em TÍTULO e em linha: "Quem usa a AYA" e
+# "Lead do mercado Brasil usa somente..." têm o verbo "usa" e sumiriam do prompt
+# de um lead brasileiro (achado do code-review de 24/08).
 _MARKET_HEADING_TOKENS = {
     "BR": (r"brasil", r"brazil"),
-    "US": (r"estados\s+unidos", r"united\s+states", r"eua", r"usa"),
+    "US": (r"estados\s+unidos", r"united\s+states", r"eua"),
 }
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
 
 # Literais que denunciam uma linha do outro mercado fora das seções recortáveis.
-# "usa"/"us" ficam de fora de propósito: "Lead do mercado Brasil usa somente..."
-# tem o verbo "usa" e sumiria do prompt de um lead brasileiro.
 _MARKET_LINE_TOKENS = {
-    "BR": (r"r\s*\$", r"\bpix\b", r"\bcnpj\b", r"\bbrasil\b", r"\bbrazil\b"),
-    "US": (r"us\s*\$", r"\bzelle\b", r"\bestados\s+unidos\b", r"\bunited\s+states\b", r"\beua\b"),
+    "BR": (r"r\s*\$", r"\bpix\b", r"\bcnpj\b", r"\bbrasil\b", r"\bbrazil\b",
+           r"\bbrl\b", r"\breais\b"),
+    "US": (r"us\s*\$", r"\bzelle\b", r"\bestados\s+unidos\b", r"\bunited\s+states\b",
+           r"\beua\b", r"\busd\b", r"\bdolar(?:es)?\b", r"\bdollars?\b"),
 }
+
+# Linha que se sustenta sozinha (bullet, tabela, título, comentário, cerca): pode ser
+# recortada individualmente. Linha de prosa faz parte de um parágrafo — ver o gate.
+_STANDALONE_LINE_RE = re.compile(r"^(?:[-*|#>]|\d+[.)]|<!--|```)")
 
 
 def _foreign_market_line(line: str, market: str) -> bool:
@@ -7706,9 +7731,32 @@ def _gate_market_sections_for_prompt(rules_content: str, market_id: str) -> str:
         return str(rules_content or "").strip()
 
     kept: list[str] = []
+    # Prosa é recortada por parágrafo, não por linha: derrubar só a linha com o
+    # literal deixava um fragmento órfão dizendo o oposto ("...e mantenha USD,
+    # oferta internacional,") no prompt do outro mercado.
+    prose_block: list[str] = []
+    prose_block_foreign = False
+
+    def _flush_prose() -> None:
+        nonlocal prose_block_foreign
+        if prose_block and not prose_block_foreign:
+            kept.extend(prose_block)
+        prose_block.clear()
+        prose_block_foreign = False
+
     skip_level = 0
+    in_fence = False
     for line in str(rules_content or "").splitlines():
-        heading = _HEADING_RE.match(line)
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            # Cerca de código não é heading: um "# comentário" dentro dela não pode
+            # reabrir uma seção de mercado que está sendo descartada.
+            in_fence = not in_fence
+            heading = None
+        elif in_fence:
+            heading = None
+        else:
+            heading = _HEADING_RE.match(line)
         if heading:
             level = len(heading.group(1))
             if skip_level and level <= skip_level:
@@ -7722,9 +7770,16 @@ def _gate_market_sections_for_prompt(rules_content: str, market_id: str) -> str:
         row_market = _price_row_market(line)
         if row_market and row_market != market:
             continue
-        if not heading and _foreign_market_line(line, market):
+        if heading or not stripped or _STANDALONE_LINE_RE.match(stripped):
+            _flush_prose()
+            if not heading and stripped and _foreign_market_line(line, market):
+                continue
+            kept.append(line)
             continue
-        kept.append(line)
+        prose_block.append(line)
+        if _foreign_market_line(line, market):
+            prose_block_foreign = True
+    _flush_prose()
     return "\n".join(kept).strip()
 
 
@@ -10760,24 +10815,19 @@ _PRICE_PERIOD_SUFFIX = re.compile(
 )
 
 
-_PRICE_ROW_MARKET_LABELS = {
-    "BR": {"brasil", "brazil", "br"},
-    "US": {"estados unidos", "united states", "eua", "usa", "us"},
-}
-
-
 def _price_row_market(line: str) -> str:
-    """Mercado de uma linha da tabela comercial, ou '' se não for linha de mercado."""
+    """Mercado de uma linha da tabela comercial, ou '' se não for linha de mercado.
+
+    O rótulo passa pelo mesmo vocabulário canônico do resto do plugin
+    (_canonical_commercial_market) — uma lista paralela já deixou "| USD |"
+    passar para lead BR (code-review de 24/08).
+    """
     if "|" not in line:
         return ""
     cells = [cell.strip() for cell in str(line).strip().strip("|").split("|")]
     if len(cells) < 2:
         return ""
-    label = _normalize_text(cells[0])
-    for market, labels in _PRICE_ROW_MARKET_LABELS.items():
-        if label in labels:
-            return market
-    return ""
+    return _canonical_commercial_market(cells[0])
 
 
 def _aya_price_cells(rules_content: str) -> dict[str, dict[str, str]]:

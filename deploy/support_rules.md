@@ -5,6 +5,13 @@
 > Preencha `{{ENTRE_CHAVES}}` e substitua os blocos de exemplo por produtos e FAQs reais.
 > Um `support_rules.md` vazio faz o bot dizer que não sabe; um preenchido com o produto
 > errado faz o bot **inventar oferta que não existe** — o segundo caso é pior.
+>
+> **Operação em mais de um mercado/moeda?** O recorte automático por mercado
+> (`_gate_market_sections_for_prompt`) só remove do prompt as seções cujo **título**
+> nomeia o mercado (`## Mercado Brasil`, `## Mercado Estados Unidos`) e as linhas de
+> tabela/instrução com literais do outro mercado. Conteúdo de um mercado fora de uma
+> seção assim intitulada chega ao prompt dos dois mercados — estruture como em
+> `deploy/instance/support_rules.md`.
 
 Este arquivo é lido pelo assistente de IA toda vez que ele analisa uma mensagem ou e-mail de suporte pendente. Modifique as seções abaixo para ensinar a IA como responder seus clientes de forma personalizada.
 
