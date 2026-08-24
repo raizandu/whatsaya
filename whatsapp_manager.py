@@ -7595,7 +7595,7 @@ def _has_explicit_purchase_intent(text: str) -> bool:
         # "como faço o pagamento" coloquial: só "como fazer o pagamento" deixava
         # o lead quente com intent=False (QA de 24/08 à noite).
         r"\bcomo\s+(?:eu\s+)?(?:posso\s+|faco\s+(?:para\s+|pra\s+)?)?"
-        r"(?:pagar|fazer\s+o\s+pagamento|o\s+pagamento)\b",
+        r"(?:pagar|pago\b|fazer\s+o\s+pagamento|o\s+pagamento)\b",
         r"\b(?:pode|poderia)\s+me\s+(?:mandar|enviar)\b.{0,25}\b(?:pix|chave|pagamento)\b",
         r"\b(?:me\s+)?(?:manda|mande|envia|envie)\b.{0,25}\bpagamento\b",
         r"\b(?:me\s+)?(?:manda|mande|envia|envie)\b.{0,25}\bpix\b",
@@ -11077,8 +11077,9 @@ _PRICE_QUESTION_RE = re.compile(
     # e "achei o valor caro" caía fora do assunto preço (QA de 24/08).
     # "quanto q(ue) custa" coloquial: sem o grupo opcional, o "q" quebrava o match
     # e a pergunta de preço real caía no ramo sem preço (QA de 24/08 à noite).
-    r"\b(?:quanto\s+(?:e\s+)?(?:q(?:ue)?\s+)?(?:custa|fica|sai|vale|seria|e\b)|"
+    r"\b(?:quanto\s+(?:e\s+)?(?:q(?:ue)?\s+)?(?:voces\s+|vcs\s+)?(?:custa|fica|sai|vale|seria|cobram?|e\b)|"
     r"qual\s+(?:o\s+)?(?:valor|preco|investimento)|"
+    r"(?:what|how\s+much)\s+do\s+you\s+charge|"
     r"valor(?:es)?|precos?|investimento|orcamento|mensalidade|implantacao|"
     # Objeção é assunto de preço. "cara" fica de fora: é vocativo em pt-BR ("e aí cara"),
     # e só conta como caro quando qualificada ("es muy cara", "tá cara").
@@ -11104,6 +11105,36 @@ _NO_PRICE_CONTINUATION_REPEAT = {
 def _asks_about_price(user_message: str) -> bool:
     """True quando o lead puxou o assunto valor — pergunta ou objeção."""
     return bool(_PRICE_QUESTION_RE.search(_normalize_text(str(user_message or ""))))
+
+
+# QA Final 4.0, ajuste 3: objeção não pode ser respondida só repetindo o preço —
+# a resposta conecta o valor ao que a implementação entrega. Texto do próprio QA.
+_PRICE_OBJECTION_RE = re.compile(
+    r"\b(?:caros?|caris+im[oa]s?|salgad[oa]|expensive|pricey|costly)\b|"
+    r"fora\s+do\s+orcamento|out\s+of\s+(?:my\s+|our\s+)?budget|muy\s+car[oa]"
+)
+_PRICE_OBJECTION_RESPONSE = {
+    "pt": "Entendo. A implementação é justamente onde a AYA é configurada para a sua "
+          "operação — serviços, área atendida, coleta de endereço e agenda — para já "
+          "entrar funcionando do seu jeito.",
+    "en": "I hear you. The implementation is exactly where AYA gets set up for your "
+          "operation — services, service area, address collection and scheduling — so "
+          "it starts working your way from day one.",
+    "es": "Te entiendo. La implementación es justamente donde configuramos la AYA para "
+          "tu operación — servicios, zona de atención, dirección y agenda — para que "
+          "arranque funcionando a tu manera.",
+}
+# QA Final 4.0, ajuste 4: preço isolado deixa a conversa morrer — condução curta,
+# sem escassez artificial.
+_PRICE_CTA = {
+    "pt": "Se fizer sentido pra você, já te explico como começamos.",
+    "en": "If that works for you, I can walk you through how we get started.",
+    "es": "Si te hace sentido, te explico cómo empezamos.",
+}
+
+
+def _is_price_objection(user_message: str) -> bool:
+    return bool(_PRICE_OBJECTION_RE.search(_normalize_text(str(user_message or ""))))
 
 
 def _no_price_continuation(language: str, chat_id: str) -> str:
@@ -11223,10 +11254,13 @@ def _payment_gate_fallback(
         # Mas só quando o lead puxou o assunto. Em 24/08 um lead abriu com "quero
         # entender como a AYA funcionaria" e recebeu um preço seco como primeira
         # resposta, porque a guarda derrubou a resposta inteira do modelo.
+        if _is_price_objection(user_message) and not _has_explicit_purchase_intent(user_message):
+            return _PRICE_OBJECTION_RESPONSE.get(language) or _PRICE_OBJECTION_RESPONSE["pt"]
         if _asks_about_price(user_message) or _has_explicit_purchase_intent(user_message):
             linha = _aya_market_price_line(market, language, rules_content)
             if linha:
-                return linha
+                cta = _PRICE_CTA.get(language) or _PRICE_CTA["pt"]
+                return f"{linha} {cta}"
         else:
             return _no_price_continuation(language, chat_id)
         # Só quando a tabela não traz os dois valores do mercado.

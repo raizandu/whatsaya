@@ -6530,6 +6530,45 @@ class TestPriceFallbacks(unittest.TestCase):
             with self.subTest(msg=msg):
                 self.assertTrue(whatsapp_manager._asks_about_price(msg))
 
+    def test_lista_de_coloquiais_da_qa_final(self):
+        """QA Final 4.0, ajuste 2: variações coloquiais que ainda escapavam."""
+        for msg in ("quanto vocês cobram?", "quanto cobram?", "what do you charge?"):
+            with self.subTest(msg=msg):
+                self.assertTrue(whatsapp_manager._asks_about_price(msg))
+        for msg in ("como eu pago?", "Como eu pago vocês?"):
+            with self.subTest(msg=msg):
+                self.assertTrue(whatsapp_manager._has_explicit_purchase_intent(msg))
+
+    def test_objecao_recebe_tratamento_nao_repeticao_de_preco(self):
+        """QA Final 4.0, ajuste 3: objeção não pode só repetir o preço — conecta o
+        valor ao que a implementação entrega. E não usa a frase de continuação."""
+        out = whatsapp_manager._payment_gate_fallback(
+            "Achei o valor de implementação um pouco caro",
+            {"market_id": "US", "language": "pt"},
+            "market_mismatch",
+            rules_content=(
+                "| Mercado | Implementação | Mensalidade |\n| --- | --- | --- |\n"
+                "| Estados Unidos | US$ 497 | US$ 99/mês |\n"
+            ),
+        )
+        self.assertNotIn("US$", out)
+        self.assertIn("implementação", out.lower())
+        self.assertNotIn("Me conta como funciona", out)
+
+    def test_preco_sai_com_conducao_de_proximo_passo(self):
+        """QA Final 4.0, ajuste 4: preço isolado deixa a conversa morrer."""
+        out = whatsapp_manager._payment_gate_fallback(
+            "Quanto custa?",
+            {"market_id": "US", "language": "pt"},
+            "market_mismatch",
+            rules_content=(
+                "| Mercado | Implementação | Mensalidade |\n| --- | --- | --- |\n"
+                "| Estados Unidos | US$ 497 | US$ 99/mês |\n"
+            ),
+        )
+        self.assertIn("US$ 497", out)
+        self.assertIn("como começamos", out)
+
     def test_objecao_de_preco_e_assunto_de_preco(self):
         """"Achei o valor caro" caía na frase neutra — objeção é assunto de preço."""
         for msg in (
