@@ -10917,7 +10917,7 @@ def _payment_gate_fallback(
             "es": "Puedo enviarte los datos de pago cuando quieras avanzar con la contratación.",
             "en": "I can send the payment details when you're ready to move forward.",
         }.get(language, "Posso enviar os dados de pagamento quando você quiser avançar com a contratação.")
-    if reason == "market_mismatch":
+    if reason in ("market_mismatch", "wrong_price"):
         # Antes esta frase era institucional ("vou usar somente os dados de pagamento
         # oficiais…") e chegava ao lead como resposta inteira, falando de pagamento sem
         # que ninguém tivesse mencionado pagamento. Corrigir o mercado e devolver a
@@ -10970,6 +10970,32 @@ def _strip_wrong_market_money(text: str, wrong_markets: set[str]) -> str:
         and not any(re.search(p, _payment_canonical_text(paragrafo)) for p in padroes)
     ]
     return "\n\n".join(paragrafo.strip() for paragrafo in mantidos).strip()
+
+
+# O prompt manda atender lead US em português/espanhol quando for o caso; o rótulo
+# que o modelo escreve acompanha o idioma ("Destinatario:", "Titular:"), mas o
+# dicionário oficial vem do support_rules.md num idioma só. Rótulos do mesmo campo
+# são equivalentes entre idiomas — o VALOR continua tendo que bater exatamente.
+_PAYMENT_LABEL_ALIAS_GROUPS = (
+    {"recipient", "destinatario", "titular", "beneficiario", "beneficiary"},
+    {"zelle email", "email zelle", "e mail zelle", "correo zelle", "zelle e mail"},
+    {"chave pix", "pix key", "clave pix"},
+    {"pix cnpj", "cnpj pix", "cnpj"},
+)
+
+
+def _payment_label_variants(label_key: str) -> set[str]:
+    for group in _PAYMENT_LABEL_ALIAS_GROUPS:
+        if label_key in group:
+            return group
+    return {label_key}
+
+
+def _official_field_for_label(official_fields: dict[str, str], label_key: str) -> str:
+    for variant in _payment_label_variants(label_key):
+        if variant in official_fields:
+            return official_fields[variant]
+    return ""
 
 
 def _payment_gate_evidence(
@@ -11057,8 +11083,16 @@ def _enforce_aya_payment_output_gate(
         normalized_visible,
         re.IGNORECASE,
     )
+    # A whitelist de dígitos vem dos campos oficiais do mercado; nos EUA ela é vazia
+    # (0 e 4 dígitos), então qualquer sequência de 8+ reprovava — inclusive uma data
+    # 08/25/2026. Data não é credencial: sai da varredura antes da contagem.
+    digit_scan_text = re.sub(
+        r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b|\b\d{4}-\d{2}-\d{2}\b",
+        " ",
+        normalized_visible,
+    )
     digit_candidates: list[str] = []
-    for candidate in re.findall(r"(?:\d[\s()./+_-]*){8,}", normalized_visible):
+    for candidate in re.findall(r"(?:\d[\s()./+_-]*){8,}", digit_scan_text):
         digits = re.sub(r"\D", "", candidate)
         if len(digits) >= 8:
             digit_candidates.append(digits)
@@ -11106,13 +11140,24 @@ def _enforce_aya_payment_output_gate(
         if len(expected_digits) >= 8:
             return expected_digits in digit_candidates
         if re.search(r"\b(?:recipient|destinatario|titular)\b", label_key):
+            label_variants = _payment_label_variants(label_key)
+            # Frase corrida ("Send it to <nome> at <e-mail>") conta, mas só quando o
+            # nome oficial vem inteiro e termina ali — "Test Recipient Silva" é outro
+            # destinatário e continua reprovando.
+            prose_pattern = re.compile(
+                rf"\b(?:to|para|a|al|de)\s+{re.escape(expected_canonical)}"
+                rf"(?=\s*(?:$|[,.;:()—-]|\bat\b|\bno\b|\bna\b|\bem\b|\bvia\b|\bpelo\b|\bpor\b|\bal\b|\ben\b))"
+            )
             for line in visible_lines:
-                if _payment_canonical_text(line) == expected_canonical:
+                line_canonical = _payment_canonical_text(line)
+                if line_canonical == expected_canonical:
+                    return True
+                if prose_pattern.search(line_canonical):
                     return True
                 if ":" in line:
                     raw_label, raw_value = (part.strip() for part in line.split(":", 1))
                     if (
-                        _payment_canonical_text(raw_label) == label_key
+                        _payment_canonical_text(raw_label) in label_variants
                         and _payment_canonical_text(raw_value) == expected_canonical
                     ):
                         return True
@@ -11332,7 +11377,7 @@ def _enforce_aya_payment_output_gate(
         ),
     }
     for label, value in labeled_values:
-        expected = official_fields.get(label)
+        expected = _official_field_for_label(official_fields, label)
         if not expected or not _official_field_present(label, expected) or (
             value and _payment_compact_text(value) != _payment_compact_text(expected)
         ):
@@ -11341,10 +11386,21 @@ def _enforce_aya_payment_output_gate(
     unofficial_destination = any(unofficial_checks.values())
     unofficial_reasons = sorted(name for name, hit in unofficial_checks.items() if hit)
 
+    # Preço errado sem nenhum conteúdo de pagamento não é vazamento de destino: é a
+    # colisão de tabela (ex.: "$497 monthly" — mensalidade BR no papel do US). O aviso
+    # genérico de "dados de pagamento" falava de um assunto que o lead nem tocou; a
+    # resposta certa é o preço certo.
+    price_only_mismatch = bool(
+        not payment_content_present
+        and unofficial_reasons
+        and set(unofficial_reasons) <= {"wrong_price_amount", "wrong_price_role"}
+    )
     if wrong_market:
         reason = "market_unknown" if not market_id else "market_mismatch"
     elif payment_content_present and not has_intent:
         reason = "intent_missing"
+    elif price_only_mismatch:
+        reason = "wrong_price"
     elif unofficial_destination:
         reason = "unofficial_details"
     else:

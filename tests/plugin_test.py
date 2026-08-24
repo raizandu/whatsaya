@@ -6871,6 +6871,72 @@ class TestTransformLlmOutput(BaseWhatsAppManagerTest):
         self.assertEqual(result, "\n")
         self.assertEqual(mock_send.call_args.args[1], response)
 
+    def test_data_americana_nao_reprova_zelle_oficial(self):
+        """Assimetria (a) do QA: a whitelist de dígitos do US é vazia, então 08/25/2026
+        virava unknown_digits e derrubava uma resposta com o conjunto oficial correto."""
+        response = "Zelle:\nTest Recipient\npay@example.com\nWe can start on 08/25/2026."
+        _result, mock_send = self._call_aya_payment_reply(
+            "I want to move forward.",
+            response,
+            {"market_id": "US", "currency": "USD", "language": "en"},
+        )
+        self.assertEqual(mock_send.call_args.args[1], response)
+
+    def test_rotulo_em_portugues_aceita_o_destinatario_oficial_us(self):
+        """Assimetria (b): o prompt manda atender lead US em pt/es quando for o caso,
+        mas "Destinatario:" reprovava mesmo com o valor oficial exato."""
+        response = "Destinatário: Test Recipient\nZelle email: pay@example.com"
+        _result, mock_send = self._call_aya_payment_reply(
+            "Quero avançar com a contratação.",
+            response,
+            {"market_id": "US", "currency": "USD", "language": "pt"},
+        )
+        self.assertEqual(mock_send.call_args.args[1], response)
+
+    def test_rotulo_alias_com_valor_errado_continua_reprovando(self):
+        response = "Destinatário: Persona Inventada\nZelle email: pay@example.com"
+        _result, mock_send = self._call_aya_payment_reply(
+            "Quero avançar com a contratação.",
+            response,
+            {"market_id": "US", "currency": "USD", "language": "pt"},
+        )
+        self.assertNotIn("Persona Inventada", mock_send.call_args.args[1])
+
+    def test_nome_oficial_em_frase_corrida_conta_como_presente(self):
+        """Assimetria (c): "Send it to <nome> at <email>" zerava field_presence
+        mesmo com nome e e-mail oficiais corretos."""
+        response = "Send it to Test Recipient at pay@example.com."
+        _result, mock_send = self._call_aya_payment_reply(
+            "I want to move forward.",
+            response,
+            {"market_id": "US", "currency": "USD", "language": "en"},
+        )
+        self.assertEqual(mock_send.call_args.args[1], response)
+
+    def test_nome_estendido_em_frase_corrida_continua_reprovando(self):
+        """Nome maior que o oficial não pode contar como destinatário (desvio de destino)."""
+        response = "Send it to Test Recipient Silva at pay@example.com."
+        _result, mock_send = self._call_aya_payment_reply(
+            "I want to move forward.",
+            response,
+            {"market_id": "US", "currency": "USD", "language": "en"},
+        )
+        self.assertNotIn("Silva", mock_send.call_args.args[1])
+
+    def test_preco_de_papel_errado_recebe_o_preco_certo_nao_aviso_de_pagamento(self):
+        """Assimetria (d), colisão do 497: "$497 monthly" (mensalidade BR no papel US)
+        respondia com aviso genérico de dados de pagamento — assunto que o lead nem tocou.
+        Preço errado sem conteúdo de pagamento vira correção de preço."""
+        _result, mock_send = self._call_aya_payment_reply(
+            "How much is it monthly?",
+            "The monthly fee is $497.",
+            {"market_id": "US", "currency": "USD", "language": "en"},
+        )
+        sent = mock_send.call_args.args[1]
+        self.assertIn("US$ 99", sent)
+        self.assertNotIn("monthly fee is $497", sent)
+        self.assertNotIn("payment details", sent)
+
     def test_log_do_gate_diz_se_digito_e_credencial_oficial_sem_expor_o_valor(self):
         """Item 1 do QA de 24/08: o modelo escreveu rótulo CNPJ com dígitos para lead US
         e o log não dizia se os dígitos eram o CNPJ real (vazamento) ou invenção.
