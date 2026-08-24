@@ -6436,6 +6436,25 @@ class TestOnboardingGate(unittest.TestCase):
         out = self._gate("Qual é a área de cobertura do seu serviço?")
         self.assertNotIn("área de cobertura", out)
 
+    def test_duracao_reformulada_tambem_e_onboarding(self):
+        """Turno real do QA de 24/08 à noite: o modelo inverteu a ordem
+        ("serviços têm duração" em vez de "duração de serviço") e escapou."""
+        out = self._gate(
+            "Para montar essa lógica, os serviços de limpeza têm duração fixa "
+            "ou variam conforme o tipo e o tamanho do imóvel?"
+        )
+        self.assertNotIn("duração fixa", out)
+        out2 = self._gate("Quanto tempo dura cada atendimento?")
+        self.assertNotIn("Quanto tempo dura", out2)
+
+    def test_duracao_em_afirmacao_ou_sem_servico_fica(self):
+        for texto in (
+            "A implantação leva poucos dias e a gente conduz junto.",
+            "Quanto tempo você perde por dia respondendo mensagens?",
+        ):
+            with self.subTest(texto=texto):
+                self.assertEqual(self._gate(texto), texto)
+
     def test_ressalva_sobre_configuracao_nao_e_pergunta(self):
         """Afirmar que a configuração vem depois é o comportamento certo — fica."""
         texto = "A configuração de agenda a gente ajusta junto depois da contratação."
@@ -6454,6 +6473,18 @@ class TestOnboardingGate(unittest.TestCase):
 
 class TestPriceFallbacks(unittest.TestCase):
     """Defeitos dos fallbacks da guarda, introduzidos em 99931f6 e medidos no QA de 24/08."""
+
+    def test_quanto_que_custa_coloquial_e_pergunta_de_preco(self):
+        """Turno real do QA de 24/08 à noite: "e quanto q custa?" caiu no ramo
+        sem preço porque o "q" quebra o `quanto\\s+custa`."""
+        for msg in (
+            "Ah que show....cara, e quanto q custa?",
+            "quanto que custa?",
+            "quanto q fica isso?",
+            "quanto vale?",
+        ):
+            with self.subTest(msg=msg):
+                self.assertTrue(whatsapp_manager._asks_about_price(msg))
 
     def test_objecao_de_preco_e_assunto_de_preco(self):
         """"Achei o valor caro" caía na frase neutra — objeção é assunto de preço."""

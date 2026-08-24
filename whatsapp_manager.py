@@ -11034,7 +11034,10 @@ def _payment_gate_language(user_message: str, contact_info: dict) -> str:
 _PRICE_QUESTION_RE = re.compile(
     # "valor(?:es)?", não "valores?": a grafia antiga só casava "valores"/"valore",
     # e "achei o valor caro" caía fora do assunto preço (QA de 24/08).
-    r"\b(?:quanto\s+(?:custa|fica|sai|e|seria)|qual\s+(?:o\s+)?(?:valor|preco|investimento)|"
+    # "quanto q(ue) custa" coloquial: sem o grupo opcional, o "q" quebrava o match
+    # e a pergunta de preço real caía no ramo sem preço (QA de 24/08 à noite).
+    r"\b(?:quanto\s+(?:e\s+)?(?:q(?:ue)?\s+)?(?:custa|fica|sai|vale|seria|e\b)|"
+    r"qual\s+(?:o\s+)?(?:valor|preco|investimento)|"
     r"valor(?:es)?|precos?|investimento|orcamento|mensalidade|implantacao|"
     # Objeção é assunto de preço. "cara" fica de fora: é vocativo em pt-BR ("e aí cara"),
     # e só conta como caro quando qualificada ("es muy cara", "tá cara").
@@ -11675,7 +11678,12 @@ _ONBOARDING_TOPIC_RE = re.compile(
     r"(?:configura(?:cao|r)\s+(?:d[ea]\s+)?agenda|"
     r"dias\s+e\s+horarios|horarios?\s+de\s+(?:funcionamento|atendimento)|"
     r"dias\s+de\s+(?:funcionamento|atendimento)|"
+    # Duração em qualquer ordem: "duração de cada serviço" e também "os serviços
+    # têm duração fixa" — o modelo reformula e a ordem literal escapava (QA 24/08).
     r"duracao\s+(?:de\s+cada|d[oe]s?)\s+(?:servicos?|atendimentos?|consultas?|sessao|sessoes)|"
+    r"(?:servicos?|atendimentos?|consultas?|sessao|sessoes|limpezas?|visitas?)\b"
+    r"(?:\W+\w+){0,4}\W+dura(?:cao|m|r)?\b|"
+    r"quanto\s+tempo\s+dura\b(?:\W+\w+){0,4}\W*(?:servico|atendimento|consulta|sessao|limpeza|visita)|"
     r"area\s+de\s+(?:cobertura|atuacao)|"
     r"numero\s+de\s+whatsapp|dados\s+cadastrais|lista\s+de\s+servicos|"
     r"cidade\s+e\s+estado)"
