@@ -7944,7 +7944,10 @@ def _build_support_prompt(
             "Se a explicação não couber em 4 frases, ela está grande demais: entregue só o próximo "
             "passo e faça UMA pergunta. Enumerar etapas ou requisitos é exatamente o que está "
             "proibido — descreva em texto corrido e curto. Única exceção: dados de pagamento, que "
-            "podem ficar em linhas separadas para o lead copiar."
+            "podem ficar em linhas separadas para o lead copiar. A ressalva obrigatória de "
+            "capacidade sob configuração (ex.: 'a gente confirma na configuração como essa conexão "
+            "vai funcionar') NÃO conta no limite de frases: quando faltar espaço, corte outra "
+            "frase e mantenha a ressalva — nunca o contrário."
         )
     }
 
