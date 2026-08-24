@@ -7592,7 +7592,10 @@ def _has_explicit_purchase_intent(text: str) -> bool:
         r"\bquero\s+(?:contratar|avancar|comecar|fechar)\b",
         r"\b(?:vamos\s+fechar|fechado)\b.{0,30}\b(?:pix|pagamento|comecar|avancar)\b",
         r"\bquero\s+pagar\b",
-        r"\bcomo\s+(?:posso\s+)?(?:pagar|fazer\s+o\s+pagamento)\b",
+        # "como faço o pagamento" coloquial: só "como fazer o pagamento" deixava
+        # o lead quente com intent=False (QA de 24/08 à noite).
+        r"\bcomo\s+(?:eu\s+)?(?:posso\s+|faco\s+(?:para\s+|pra\s+)?)?"
+        r"(?:pagar|fazer\s+o\s+pagamento|o\s+pagamento)\b",
         r"\b(?:pode|poderia)\s+me\s+(?:mandar|enviar)\b.{0,25}\b(?:pix|chave|pagamento)\b",
         r"\b(?:me\s+)?(?:manda|mande|envia|envie)\b.{0,25}\bpagamento\b",
         r"\b(?:me\s+)?(?:manda|mande|envia|envie)\b.{0,25}\bpix\b",
@@ -11102,6 +11105,42 @@ def _aya_market_price_line(market: str, language: str, rules_content: str) -> st
     return template.format(setup=setup, monthly=monthly)
 
 
+_OFFICIAL_PAYMENT_INTRO = {
+    "pt": "Perfeito! Os dados oficiais para o pagamento:",
+    "en": "Great! Here are the official payment details:",
+    "es": "¡Perfecto! Estos son los datos oficiales de pago:",
+}
+
+
+def _official_payment_block_text(market: str, language: str, rules_content: str) -> str:
+    """Bloco oficial de pagamento do mercado do lead, verbatim do support_rules.md.
+
+    Só é chamado sob as mesmas condições que liberariam o bloco no prompt
+    (intenção explícita + mercado conhecido). Existe porque no QA de 24/08 à
+    noite o modelo insistia na credencial do mercado errado (memória do lado do
+    provider) e um lead quente perguntando "como faço o pagamento?" ficava sem
+    caminho de pagamento para sempre — a guarda descartava, o fallback só tinha
+    frase neutra. Valores oficiais, nunca reformatados.
+    """
+    match = re.search(
+        rf"<!--\s*AYA_PAYMENT_DETAILS:{re.escape(str(market or ''))}:START\s*-->(.*?)"
+        rf"<!--\s*AYA_PAYMENT_DETAILS:{re.escape(str(market or ''))}:END\s*-->",
+        str(rules_content or ""),
+        re.S,
+    )
+    if not match:
+        return ""
+    linhas = [
+        line.strip().lstrip("-* ").strip().replace("**", "")
+        for line in match.group(1).splitlines()
+        if line.strip().lstrip("-* ").strip()
+    ]
+    if not linhas:
+        return ""
+    intro = _OFFICIAL_PAYMENT_INTRO.get(language) or _OFFICIAL_PAYMENT_INTRO["pt"]
+    return intro + "\n" + "\n".join(linhas)
+
+
 def _payment_gate_fallback(
     user_message: str,
     contact_info: dict,
@@ -11111,6 +11150,15 @@ def _payment_gate_fallback(
     chat_id: str = "",
 ) -> str:
     language = _payment_gate_language(user_message, contact_info)
+    # Lead com intenção explícita e mercado conhecido não pode ficar sem caminho de
+    # pagamento só porque o modelo errou: entrega-se o bloco oficial do PRÓPRIO
+    # mercado — a mesma liberação que o prompt faria, agora determinística.
+    if reason in ("market_mismatch", "unofficial_details"):
+        market = _canonical_commercial_market(contact_info)
+        if market and _has_explicit_purchase_intent(user_message):
+            bloco = _official_payment_block_text(market, language, rules_content)
+            if bloco:
+                return bloco
     if reason == "market_unknown":
         return {
             "es": "¿En qué país opera tu empresa?",

@@ -6560,6 +6560,17 @@ class TestPriceFallbacks(unittest.TestCase):
 class TestPurchaseIntentGaps(unittest.TestCase):
     """Buracos medidos no QA de 24/08 no fluxo de fechamento."""
 
+    def test_como_faco_o_pagamento_e_intencao(self):
+        """Turno real do QA de 24/08 à noite: "Como faço o pagamento?" deu intent=False
+        — o padrão só cobria "como fazer o pagamento"."""
+        for msg in (
+            "Como faço o pagamento?",
+            "como faço pra pagar",
+            "Mesmo assim quero avançar. Como faço para contratar?",
+        ):
+            with self.subTest(msg=msg):
+                self.assertTrue(whatsapp_manager._has_explicit_purchase_intent(msg))
+
     def test_como_faco_para_contratar_e_intencao(self):
         for msg in (
             "Como faço para contratar?",
@@ -7259,6 +7270,44 @@ class TestTransformLlmOutput(BaseWhatsAppManagerTest):
 
         self.assertEqual(result, "\n")
         self.assertEqual(mock_send.call_args.args[1], response)
+
+    def test_intencao_com_modelo_errando_recebe_o_zelle_oficial(self):
+        """QA de 24/08 à noite: lead US quente ("Como faço o pagamento?") ficava sem
+        caminho de pagamento porque o modelo insistia na credencial BR (memória do
+        provider) e o fallback só devolvia frase neutra. Com intenção explícita e
+        mercado conhecido, o fallback entrega o bloco oficial do PRÓPRIO mercado —
+        as mesmas condições que liberariam o bloco no prompt."""
+        _result, mock_send = self._call_aya_payment_reply(
+            "Como faço o pagamento?",
+            "Pode pagar pelo Pix: CNPJ 44.249.819/0001-62, Titular Brasil. R$ 997.",
+            {"market_id": "US", "currency": "USD", "language": "pt"},
+        )
+        sent = mock_send.call_args.args[1]
+        self.assertIn("Test Recipient", sent)
+        self.assertIn("pay@example.com", sent)
+        self.assertNotIn("44.249.819", sent)
+        self.assertNotIn("997", sent)
+
+    def test_intencao_com_credencial_inventada_recebe_a_oficial(self):
+        _result, mock_send = self._call_aya_payment_reply(
+            "Quiero avanzar y pagar.",
+            "Zelle email: attacker@example.com\nRecipient: Persona Inventada",
+            {"market_id": "US", "currency": "USD", "language": "es"},
+        )
+        sent = mock_send.call_args.args[1]
+        self.assertIn("pay@example.com", sent)
+        self.assertNotIn("attacker@example.com", sent)
+
+    def test_sem_intencao_o_fallback_nao_entrega_credencial(self):
+        _result, mock_send = self._call_aya_payment_reply(
+            "hmm entendi",
+            "Pode pagar pelo Pix: CNPJ 44.249.819/0001-62.",
+            {"market_id": "US", "currency": "USD", "language": "pt"},
+        )
+        sent = mock_send.call_args.args[1]
+        self.assertNotIn("pay@example.com", sent)
+        self.assertNotIn("Test Recipient", sent)
+        self.assertNotIn("44.249.819", sent)
 
     def test_data_americana_nao_reprova_zelle_oficial(self):
         """Assimetria (a) do QA: a whitelist de dígitos do US é vazia, então 08/25/2026
