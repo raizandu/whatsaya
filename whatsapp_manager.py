@@ -6043,6 +6043,105 @@ def _canonical_new_contact_key(chat_id: str, sender_id: str) -> str:
     return ""
 
 
+_HERMES_STATE_DB_PATH = Path("/opt/data/.hermes/state.db")
+
+
+def _reset_hermes_sessions_for_contact(gateway, identifier: str) -> int:
+    """Encerra as sessões do Hermes de um contato recém-desbloqueado.
+
+    Desbloquear não limpava a sessão: a session_key deriva do número, então a
+    conversa antiga reabria com o system_prompt e o histórico persistidos — no QA
+    de 24/08 um contato com sessão de 19/08 recebeu uma "Resposta sugerida para o
+    lead:" inteira, a persona da sessão anterior vazando para o lead. O reset usa
+    os caminhos oficiais do core: reset_session para entrada viva no store, e
+    promote_to_session_reset para linha durável do state.db que a recuperação
+    ainda ressuscitaria (o caso da sessão de 19/08, que não estava no store).
+    """
+    if gateway is None:
+        return 0
+    store = getattr(gateway, "session_store", None)
+    digits = re.sub(r"\D", "", str(identifier or "").split("@")[0])
+    if store is None or not digits:
+        return 0
+    digits_norm = _normalize_brazilian_phone(digits)
+    lids: set[str] = set()
+    if "@lid" in str(identifier or ""):
+        lids.add(str(identifier))
+    try:
+        for key, record in _load_personal_contacts().items():
+            if not isinstance(record, dict):
+                continue
+            phone = re.sub(r"\D", "", str(key).split("@")[0].split(":")[0])
+            if len(phone) >= 8 and _normalize_brazilian_phone(phone) == digits_norm:
+                if "@lid" in str(key):
+                    lids.add(str(key))
+                if record.get("lid"):
+                    lids.add(str(record["lid"]))
+    except Exception as err:
+        logger.warning("[unblock-reset] falha ao mapear LIDs do contato: %s", err)
+
+    def _matches(chat: str) -> bool:
+        chat = str(chat or "")
+        if not chat:
+            return False
+        if chat in lids:
+            return True
+        phone = re.sub(r"\D", "", chat.split("@")[0].split(":")[0])
+        return len(phone) >= 8 and (
+            digits in phone or phone in digits
+            or _normalize_brazilian_phone(phone) == digits_norm
+        )
+
+    count = 0
+    reset_ids: set[str] = set()
+    try:
+        entries = list(store.list_sessions())
+    except Exception as err:
+        logger.warning("[unblock-reset] falha ao listar sessões do store: %s", err)
+        entries = []
+    for entry in entries:
+        origin = getattr(entry, "origin", None)
+        if not _matches(getattr(origin, "chat_id", "") if origin is not None else ""):
+            continue
+        session_key = str(getattr(entry, "session_key", "") or "")
+        old_session_id = str(getattr(entry, "session_id", "") or "")
+        try:
+            if session_key and store.reset_session(session_key):
+                count += 1
+                if old_session_id:
+                    reset_ids.add(old_session_id)
+        except Exception as err:
+            logger.warning("[unblock-reset] falha ao resetar %r: %s", session_key, err)
+
+    # Sessão antiga sem entrada viva no store ainda vence a recuperação durável.
+    # A leitura é read-only direto no state.db; a escrita passa pela API do core.
+    db = getattr(store, "_db", None)
+    promote = getattr(db, "promote_to_session_reset", None) if db is not None else None
+    if callable(promote) and _HERMES_STATE_DB_PATH.exists():
+        rows: list[tuple] = []
+        try:
+            with sqlite3.connect(f"file:{_HERMES_STATE_DB_PATH}?mode=ro", uri=True) as conn:
+                rows = conn.execute(
+                    "SELECT id, chat_id FROM sessions WHERE source = 'whatsapp'"
+                ).fetchall()
+        except Exception as err:
+            logger.warning("[unblock-reset] falha ao ler state.db: %s", err)
+        for session_id, chat in rows:
+            if str(session_id) in reset_ids or not _matches(str(chat or "")):
+                continue
+            try:
+                if promote(str(session_id), "owner_unblock_reset"):
+                    count += 1
+            except Exception as err:
+                logger.warning("[unblock-reset] falha ao promover %r: %s", session_id, err)
+    if count:
+        logger.info(
+            "[unblock-reset] %d sessão(ões) encerradas para o contato ...%s",
+            count, digits[-4:],
+        )
+    return count
+
+
 def _ensure_contact_ai_access(
     chat_id: str,
     sender_id: str,
@@ -8709,8 +8808,32 @@ def pre_gateway_dispatch(*args, **kwargs):
     if _unblock_match:
         chat_id_cmd = str(event.source.chat_id) if event.source.chat_id else ""
         identifier = _unblock_match.group(1).strip()
-        result = _update_contact_fields(identifier, {"blocked": False})
-        reply = "🔓 Contato desbloqueado. O bot volta a responder normalmente." if result.startswith("✅") else result
+        # blocked=False sozinho não religava nada: o gate exige ai_enabled=True e
+        # in_flow, então um contato legado desbloqueado continuava barrado — só
+        # mudava o motivo no log para legacy-contact-disabled, sem o dono saber.
+        result = _update_contact_fields(identifier, {
+            "blocked": False,
+            "ai_enabled": True,
+            "in_flow": True,
+            "flow_origin": "owner_unblock",
+        })
+        if result.startswith("✅"):
+            # A sessão antiga do Hermes reabre com a persona/histórico anterior e
+            # vaza para o lead (QA de 24/08). Encerra antes da primeira mensagem.
+            alvo = identifier
+            alvo_match = re.search(r"\(([^()\s]+@[^()\s]+)\)", result)
+            if alvo_match:
+                alvo = alvo_match.group(1)
+            sessoes = 0
+            try:
+                sessoes = _reset_hermes_sessions_for_contact(gateway, alvo)
+            except Exception as unblock_reset_err:
+                logger.error("[unblock-reset] erro inesperado: %s", unblock_reset_err)
+            reply = "🔓 Contato desbloqueado e liberado para o bot responder."
+            if sessoes:
+                reply += " A conversa anterior da IA foi arquivada — ela começa do zero."
+        else:
+            reply = result
         if chat_id_cmd:
             _human_send(chat_id_cmd, reply)
         return {"action": "skip", "reason": "unblock-contact-command"}

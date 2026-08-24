@@ -5996,6 +5996,122 @@ class TestOwnerCommands(BaseWhatsAppManagerTest):
         mock_update.assert_called_once()
 
 
+class TestBlockUnblockCommands(BaseWhatsAppManagerTest):
+    """Itens 6 e 7 do QA de 24/08: `desbloquear` só gravava blocked=False — o gate
+    (ai_enabled/in_flow) continuava barrando como legacy-contact-disabled, e a sessão
+    antiga do Hermes reabria e vazava a persona anterior para o lead."""
+
+    def _dispatch(self, msg_text, mock_urlopen, gateway=None):
+        pre_dispatch = self.ctx.hooks.get("pre_gateway_dispatch")
+        event = MagicMock()
+        event.source.platform = "whatsapp"
+        event.source.user_id = "5511999999999@s.whatsapp.net"
+        event.source.chat_id = "5511999999999@s.whatsapp.net"
+        event.text = msg_text
+        event.has_media = False
+        if gateway is None:
+            gateway = MagicMock()
+        gateway._session_key_for_source.return_value = "sess_owner"
+        gateway._session_model_overrides = {}
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b'{"success": true, "messageId": "test-mid"}'
+        mock_urlopen.return_value.__enter__.return_value = mock_resp
+        return pre_dispatch("pre_gateway_dispatch", {"event": event, "gateway": gateway})
+
+    @patch("whatsapp_manager._reset_hermes_sessions_for_contact", return_value=0)
+    @patch("whatsapp_manager._update_contact_fields", return_value="✅ Contato *Lead* (5562999995459@s.whatsapp.net) atualizado.")
+    @patch("urllib.request.urlopen")
+    def test_desbloquear_religa_o_gate_de_ia(self, mock_urlopen, mock_update, _mock_reset):
+        result = self._dispatch("desbloquear 5562999995459", mock_urlopen)
+        self.assertEqual(result["reason"], "unblock-contact-command")
+        identifier, fields = mock_update.call_args.args
+        self.assertEqual(identifier, "5562999995459")
+        self.assertIs(fields["blocked"], False)
+        self.assertIs(fields["ai_enabled"], True)
+        self.assertIs(fields["in_flow"], True)
+        self.assertEqual(fields.get("flow_origin"), "owner_unblock")
+
+    @patch("whatsapp_manager._reset_hermes_sessions_for_contact", return_value=1)
+    @patch("whatsapp_manager._update_contact_fields", return_value="✅ Contato *Lead* (5562999995459@s.whatsapp.net) atualizado.")
+    @patch("urllib.request.urlopen")
+    def test_desbloquear_encerra_a_sessao_antiga_do_hermes(self, mock_urlopen, _mock_update, mock_reset):
+        self._dispatch("desbloquear 5562999995459", mock_urlopen)
+        mock_reset.assert_called_once()
+        self.assertEqual(mock_reset.call_args.args[1], "5562999995459@s.whatsapp.net")
+
+    @patch("whatsapp_manager._reset_hermes_sessions_for_contact", return_value=0)
+    @patch("whatsapp_manager._update_contact_fields", return_value="❌ Contato 'x' não encontrado em personal_contacts.json nem no histórico de mensagens.")
+    @patch("urllib.request.urlopen")
+    def test_desbloquear_de_contato_inexistente_nao_reseta_sessao(self, mock_urlopen, _mock_update, mock_reset):
+        self._dispatch("desbloquear x", mock_urlopen)
+        mock_reset.assert_not_called()
+
+    @patch("whatsapp_manager._update_contact_fields", return_value="✅ Contato *Lead* (5562999995459@s.whatsapp.net) atualizado.")
+    @patch("urllib.request.urlopen")
+    def test_bloquear_continua_gravando_somente_blocked(self, mock_urlopen, mock_update):
+        result = self._dispatch("bloquear 5562999995459", mock_urlopen)
+        self.assertEqual(result["reason"], "block-contact-command")
+        self.assertEqual(mock_update.call_args.args[1], {"blocked": True})
+
+    def test_reset_encerra_entrada_viva_no_store(self):
+        entry = MagicMock()
+        entry.session_key = "agent:main:whatsapp:dm:5562999995459"
+        entry.session_id = "20260819_010203_abc"
+        entry.origin.chat_id = "5562999995459@s.whatsapp.net"
+        outro = MagicMock()
+        outro.session_key = "agent:main:whatsapp:dm:5599888887777"
+        outro.session_id = "20260820_010203_def"
+        outro.origin.chat_id = "5599888887777@s.whatsapp.net"
+        store = MagicMock(spec=["list_sessions", "reset_session", "_db"])
+        store.list_sessions.return_value = [entry, outro]
+        store.reset_session.return_value = object()
+        store._db = None
+        gateway = MagicMock()
+        gateway.session_store = store
+        with patch("whatsapp_manager._load_personal_contacts", return_value={}):
+            n = whatsapp_manager._reset_hermes_sessions_for_contact(
+                gateway, "5562999995459@s.whatsapp.net"
+            )
+        store.reset_session.assert_called_once_with("agent:main:whatsapp:dm:5562999995459")
+        self.assertEqual(n, 1)
+
+    def test_reset_promove_linha_duravel_sem_entrada_no_store(self):
+        """A sessão de 19/08 do QA não estava no store — vivia só no state.db e a
+        recuperação a ressuscitava. A fronteira durável precisa ser promovida lá."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = Path(tmp.name) / "state.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(
+            "CREATE TABLE sessions (id TEXT, source TEXT, chat_id TEXT, ended_at TEXT, end_reason TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO sessions VALUES ('20260819_115109_d3f511', 'whatsapp', '5562999995459@s.whatsapp.net', NULL, NULL)"
+        )
+        conn.commit()
+        conn.close()
+        store = MagicMock(spec=["list_sessions", "reset_session", "_db"])
+        store.list_sessions.return_value = []
+        promote = MagicMock(return_value=True)
+        store._db = MagicMock(spec=["promote_to_session_reset"])
+        store._db.promote_to_session_reset = promote
+        gateway = MagicMock()
+        gateway.session_store = store
+        with patch("whatsapp_manager._load_personal_contacts", return_value={}), \
+             patch.object(whatsapp_manager, "_HERMES_STATE_DB_PATH", db_path):
+            n = whatsapp_manager._reset_hermes_sessions_for_contact(
+                gateway, "5562999995459@s.whatsapp.net"
+            )
+        promote.assert_called_once()
+        self.assertEqual(promote.call_args.args[0], "20260819_115109_d3f511")
+        self.assertEqual(n, 1)
+
+    def test_reset_sem_gateway_nao_quebra(self):
+        self.assertEqual(
+            whatsapp_manager._reset_hermes_sessions_for_contact(None, "5562999995459"), 0
+        )
+
+
 REGRAS_DOIS_MERCADOS = """# Base comercial
 
 ## Tabela comercial — fonte única de preço
