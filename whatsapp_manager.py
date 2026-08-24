@@ -11466,6 +11466,83 @@ def _enforce_aya_payment_output_gate(
     )
 
 
+# Tópicos de formulário de implantação, os mesmos que a regra "ONBOARDING SÓ DEPOIS
+# DA VENDA" nomeia — e que o QA de 24/08 mediu sendo perguntados em 6 turnos seguidos
+# antes de qualquer venda, com a regra no prompt. Instruir não funciona; a pergunta
+# é barrada na saída.
+_ONBOARDING_TOPIC_RE = re.compile(
+    r"(?:configura(?:cao|r)\s+(?:d[ea]\s+)?agenda|"
+    r"dias\s+e\s+horarios|horarios?\s+de\s+(?:funcionamento|atendimento)|"
+    r"dias\s+de\s+(?:funcionamento|atendimento)|"
+    r"duracao\s+(?:de\s+cada|d[oe]s?)\s+(?:servicos?|atendimentos?|consultas?|sessao|sessoes)|"
+    r"area\s+de\s+(?:cobertura|atuacao)|"
+    r"numero\s+de\s+whatsapp|dados\s+cadastrais|lista\s+de\s+servicos|"
+    r"cidade\s+e\s+estado)"
+)
+# Só a forma de pedido/pergunta é barrada. Afirmar que a configuração vem depois da
+# contratação é exatamente o comportamento certo e precisa continuar passando.
+_ONBOARDING_REQUEST_RE = re.compile(
+    r"\?|\b(?:me\s+(?:passa|passe|manda|mande|informa|informe|envia|envie|diz|diga)|"
+    r"pode(?:ria)?\s+me\s+(?:passar|mandar|informar|enviar|dizer)|"
+    r"preciso\s+(?:de|que|saber)|vou\s+precisar\s+de|qual(?:is)?\b|quais\b)"
+)
+_ONBOARDING_GATE_FALLBACK = {
+    "pt": "Essa parte de configuração a gente ajusta junto depois da contratação. "
+          "O que falta para você tomar a decisão?",
+    "en": "We'll sort out that configuration together after you sign up. "
+          "What else do you need to decide?",
+    "es": "Esa parte de configuración la ajustamos juntos después de la contratación. "
+          "¿Qué te falta para decidir?",
+}
+
+
+def _enforce_aya_onboarding_output_gate(
+    response_text: str,
+    *,
+    user_message: str,
+    chat_id: str,
+) -> str:
+    """Barra pergunta de configuração de implantação antes de haver venda registrada."""
+    text = str(response_text or "")
+    try:
+        sales = _load_sales()
+        if any(
+            isinstance(sale, dict) and sale.get("contact_key") == chat_id
+            for sale in sales.values()
+        ):
+            return text
+        kept_paragraphs: list[str] = []
+        removed = 0
+        for paragraph in re.split(r"\n\s*\n+", text):
+            sentences = re.split(r"(?<=[.!?…])\s+", paragraph)
+            kept_sentences = []
+            for sentence in sentences:
+                normalized = _normalize_text(sentence)
+                if _ONBOARDING_TOPIC_RE.search(normalized) and _ONBOARDING_REQUEST_RE.search(normalized):
+                    removed += 1
+                    continue
+                kept_sentences.append(sentence)
+            if any(sentence.strip() for sentence in kept_sentences):
+                kept_paragraphs.append(" ".join(kept_sentences).strip())
+        if not removed:
+            return text
+        restante = "\n\n".join(kept_paragraphs).strip()
+        logger.warning(
+            "[onboarding-gate] pergunta de implantação removida chat=%r n=%d restante=%d",
+            chat_id,
+            removed,
+            len(restante),
+        )
+        if restante:
+            return restante
+        language = _payment_gate_language(user_message, {})
+        return _ONBOARDING_GATE_FALLBACK.get(language) or _ONBOARDING_GATE_FALLBACK["pt"]
+    except Exception as err:
+        # Fail-open: perder uma pergunta indevida é aceitável; perder a resposta, não.
+        logger.error("[onboarding-gate] falha ao avaliar saída: %s", err)
+        return text
+
+
 def _prepare_contact_reply(response_text: str) -> str:
     """Filtra a resposta de contato. String vazia = suprimir o envio."""
     clean_text = _EXEC_PATTERN.sub("", response_text or "").strip()
@@ -11693,6 +11770,11 @@ def transform_llm_output(*args, **kwargs):
                 user_message=current_inbound,
                 contact_info=contact_info,
                 rules_content=payment_rules,
+                chat_id=str(chat_id or ""),
+            )
+            response_text = _enforce_aya_onboarding_output_gate(
+                str(response_text),
+                user_message=current_inbound,
                 chat_id=str(chat_id or ""),
             )
         except Exception as payment_gate_err:

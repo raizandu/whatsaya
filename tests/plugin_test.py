@@ -6160,6 +6160,56 @@ class TestGateMarketSections(unittest.TestCase):
         self.assertNotIn("44.249.819", s)
 
 
+class TestOnboardingGate(unittest.TestCase):
+    """Item 2 do QA de 24/08: 6 turnos de entrevista de implantação antes da venda.
+
+    A regra "ONBOARDING SÓ DEPOIS DA VENDA" existe no meio de CONSTRAINTS ABSOLUTAS
+    e é ignorada — instruir não funciona, filtrar funciona. A guarda barra pergunta
+    de configuração de implantação quando não há venda registrada para o contato."""
+
+    def _gate(self, texto, vendas=None, chat="12025550199@s.whatsapp.net"):
+        with patch("whatsapp_manager._load_sales", return_value=vendas or {}):
+            return whatsapp_manager._enforce_aya_onboarding_output_gate(
+                texto, user_message="oi", chat_id=chat
+            )
+
+    def test_entrevista_de_implantacao_vira_fallback(self):
+        out = self._gate(
+            "Você pode me passar os dias e horários de funcionamento? "
+            "E qual a duração de cada serviço?"
+        )
+        self.assertNotIn("dias e horários", out)
+        self.assertNotIn("duração de cada serviço", out)
+        self.assertTrue(out.strip())
+
+    def test_pergunta_de_onboarding_sai_e_o_resto_fica(self):
+        out = self._gate(
+            "A AYA atende seus clientes direto no WhatsApp. "
+            "Como você prefere a configuração de agenda?"
+        )
+        self.assertIn("atende seus clientes direto no WhatsApp", out)
+        self.assertNotIn("configuração de agenda", out)
+
+    def test_area_de_cobertura_e_pergunta_de_onboarding(self):
+        out = self._gate("Qual é a área de cobertura do seu serviço?")
+        self.assertNotIn("área de cobertura", out)
+
+    def test_ressalva_sobre_configuracao_nao_e_pergunta(self):
+        """Afirmar que a configuração vem depois é o comportamento certo — fica."""
+        texto = "A configuração de agenda a gente ajusta junto depois da contratação."
+        self.assertEqual(self._gate(texto), texto)
+
+    def test_pergunta_de_diagnostico_fica(self):
+        texto = "Como funciona seu atendimento hoje? Onde os clientes mais travam?"
+        self.assertEqual(self._gate(texto), texto)
+
+    def test_venda_registrada_libera_onboarding(self):
+        chat = "12025550199@s.whatsapp.net"
+        texto = "Me passa os dias e horários de funcionamento para configurar a agenda?"
+        out = self._gate(texto, vendas={"V1": {"contact_key": chat}}, chat=chat)
+        self.assertEqual(out, texto)
+
+
 class TestPriceFallbacks(unittest.TestCase):
     """Defeitos dos fallbacks da guarda, introduzidos em 99931f6 e medidos no QA de 24/08."""
 
@@ -6936,6 +6986,18 @@ class TestTransformLlmOutput(BaseWhatsAppManagerTest):
         self.assertIn("US$ 99", sent)
         self.assertNotIn("monthly fee is $497", sent)
         self.assertNotIn("payment details", sent)
+
+    def test_pergunta_de_onboarding_nao_chega_ao_lead(self):
+        """A guarda de onboarding roda no mesmo caminho de saída do payment-gate."""
+        with patch("whatsapp_manager._load_sales", return_value={}):
+            _result, mock_send = self._call_aya_payment_reply(
+                "ok, e como funciona?",
+                "A AYA responde seus clientes na hora. Qual a duração de cada serviço?",
+                {"market_id": "US", "currency": "USD", "language": "pt"},
+            )
+        sent = mock_send.call_args.args[1]
+        self.assertIn("responde seus clientes na hora", sent)
+        self.assertNotIn("duração de cada serviço", sent)
 
     def test_log_do_gate_diz_se_digito_e_credencial_oficial_sem_expor_o_valor(self):
         """Item 1 do QA de 24/08: o modelo escreveu rótulo CNPJ com dígitos para lead US
