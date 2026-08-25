@@ -584,6 +584,11 @@ class RedactTest(unittest.TestCase):
     def test_preco_com_milhar_e_centavos_continua_intacto(self):
         self.assertEqual(redact("são R$ 1.200,00 no total"), "são R$ 1.200,00 no total")
 
+    def test_data_nao_e_confundida_com_documento(self):
+        # "2026-08-24" tem 8 dígitos com separador: caía na mesma regra do CPF e o
+        # cabeçalho do relatório saía "# Auditoria do atendimento — [dígitos:8]".
+        self.assertEqual(redact("no dia 2026-08-24 às 19:42"), "no dia 2026-08-24 às 19:42")
+
     def test_texto_comum_passa_intacto(self):
         texto = "Me conta como funciona seu atendimento hoje."
 
@@ -811,6 +816,23 @@ class RenderTest(unittest.TestCase):
         self.assertIn("achado 1", completo)
         self.assertIn("## Números do dia", completo)
         self.assertIn("2026-08-24", completo)
+
+    def test_relatorio_completo_preserva_a_data_do_dia(self):
+        dia, turnos = self._dia()
+
+        completo = render_report(dia, "veredito", compile_material(dia, turnos))
+
+        self.assertIn("# Auditoria do atendimento — 2026-08-24", completo)
+        self.assertNotIn("[dígitos:8]", completo)
+
+    def test_veredito_do_modelo_tambem_passa_pela_redacao(self):
+        # O veredito vem de fora: se o modelo repetir um documento visto no
+        # material, ele não pode chegar ao disco nem ao dono.
+        dia, turnos = self._dia()
+
+        completo = render_report(dia, "vazou 44.249.819/0001-62 aqui", compile_material(dia, turnos))
+
+        self.assertNotIn("44.249.819", completo)
 
     def test_relatorio_completo_tambem_e_redigido(self):
         turnos = [_turn(0, False, "CNPJ 44.249.819/0001-62"), _turn(1, True, "ok")]

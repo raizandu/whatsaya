@@ -21,11 +21,23 @@ PLUGIN = Path("/opt/data/.hermes/plugins/whatsapp-manager")
 if str(PLUGIN) not in sys.path:
     sys.path.insert(0, str(PLUGIN))
 
-logging.basicConfig(
-    filename="/opt/data/.hermes/logs/whatsapp_audit_cron.log",
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s",
-)
+# `basicConfig(filename=...)` explode no import se o diretório não existir, e um
+# cron que morre com traceback some do radar. Garante o diretório e cai para
+# stderr se nem isso der.
+_LOG = Path("/opt/data/.hermes/logs/whatsapp_audit_cron.log")
+try:
+    _LOG.parent.mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(
+        filename=str(_LOG),
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+    )
+except OSError:
+    logging.basicConfig(
+        stream=sys.stderr,
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+    )
 
 
 def main(argv: list[str]) -> int:

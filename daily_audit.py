@@ -417,6 +417,9 @@ _UUID_RE = re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-
 # O valor precisa ter forma de dinheiro (milhar e centavos) e não pode ser
 # seguido de `/` ou `-` com dígito: sem isso, "R$ 44.249.819/0001-62" era lido
 # como preço e o CNPJ saía inteiro no material do auditor.
+# Data ISO e hora têm a mesma forma de um documento (8 dígitos com separador) e
+# caíam na regra do CPF: o cabeçalho do relatório saía "[dígitos:8]".
+_DATE_RE = re.compile(r"\b\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2})?)?\b")
 _MONEY_RE = re.compile(
     r"(?:R\$|US\$|\$|€)\s*\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{2})?(?![\d.,]*[/-]\d)",
     re.I,
@@ -435,6 +438,7 @@ def redact(text: str) -> str:
         reservas.append(match.group(0))
         return f"\x00{len(reservas) - 1}\x00"
 
+    texto = _DATE_RE.sub(reservar, texto)
     texto = _MONEY_RE.sub(reservar, texto)
     texto = _EMAIL_RE.sub("[email]", texto)
     texto = _UUID_RE.sub("[chave]", texto)
@@ -642,7 +646,10 @@ def render_owner_summary(day: DayAudit, verdict: str) -> str:
 
 def render_report(day: DayAudit, verdict: str, material: str) -> str:
     """Relatório completo gravado em disco, com o material que embasou o veredito."""
-    texto = str(verdict or "").strip() or "_Auditor sem veredito nesta rodada._"
+    # `material` já sai redigido de `compile_material`; redigir de novo só
+    # destruiria o que a primeira passada preservou de propósito. O veredito, sim,
+    # vem de fora e pode repetir um documento que o modelo leu.
+    texto = redact(str(verdict or "").strip()) or "_Auditor sem veredito nesta rodada._"
     return "\n".join([
         f"# Auditoria — {day.day.isoformat()}",
         "",
@@ -651,7 +658,7 @@ def render_report(day: DayAudit, verdict: str, material: str) -> str:
         "",
         "---",
         "",
-        redact(material),
+        material,
     ])
 
 
