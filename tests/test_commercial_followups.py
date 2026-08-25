@@ -16,7 +16,9 @@ from commercial_followups import (
     cadence_due_times,
     followup_policy,
     is_business_time,
+    mask_chat_tail,
     next_business_time,
+    notion_lead_payload,
     render_contextual_message,
     sanitize_followup_fact,
     validate_context,
@@ -351,6 +353,47 @@ class FollowupEngineTest(unittest.TestCase):
         self.assertEqual(payload["cadence_kind"], "silence")
         self.assertIn("next_followup_utc", payload)
         self.assertNotIn("context_fact", payload)
+
+    def test_notion_payload_masks_chat_and_omits_transcript(self):
+        snap = {
+            "chat_id": "5511999995750@s.whatsapp.net",
+            "stage": "pricing",
+            "cadence_kind": "proposal",
+            "next_followup_utc": "2026-08-26T13:00:00+00:00",
+            "next_action": "followup_step_1",
+            "context_fact": "não deveria ir ao Notion",
+        }
+        body = notion_lead_payload(snap, "db-leads")
+        self.assertIsNotNone(body)
+        assert body is not None
+        dumped = json.dumps(body, ensure_ascii=False)
+        self.assertNotIn("5511999995750", dumped)
+        self.assertNotIn("não deveria ir ao Notion", dumped)
+        titulo = body["properties"]["Lead"]["title"][0]["text"]["content"]
+        self.assertIn("5750", titulo)
+        self.assertIn("pricing", titulo)
+        self.assertNotIn("5511", titulo)
+        self.assertEqual(body["parent"], {"database_id": "db-leads"})
+        self.assertIn("Lead", body["properties"])
+        self.assertIn("Resumo", body["properties"])
+        self.assertIsNone(notion_lead_payload(snap, ""))
+
+    def test_outbox_claim_marks_leased_then_sent(self):
+        self.schedule()
+        claimed = self.engine.claim_outbox(limit=5, at=MONDAY)
+        self.assertEqual(len(claimed), 1)
+        self.engine.mark_outbox_sent(claimed[0]["id"], "https://notion.so/lead-1", at=MONDAY)
+        con = sqlite3.connect(self.db)
+        try:
+            status, err = con.execute(
+                "SELECT status, last_error FROM crm_outbox WHERE id=?",
+                (claimed[0]["id"],),
+            ).fetchone()
+        finally:
+            con.close()
+        self.assertEqual(status, "sent")
+        self.assertIn("notion.so", err)
+        self.assertEqual(self.engine.claim_outbox(at=MONDAY), [])
 
     def test_outbox_rejects_transcript_and_deduplicates_version(self):
         with self.assertRaises(ValueError):

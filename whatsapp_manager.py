@@ -28,6 +28,7 @@ from pathlib import Path
 from commercial_followups import (
     FollowupEngine,
     followup_policy,
+    notion_lead_payload,
     render_contextual_message,
     sanitize_followup_fact,
 )
@@ -936,7 +937,42 @@ def _tick_followups() -> int:
         logger.info("[followup] enviado job=%s chat=%r", job["id"], validated["chat_id"])
     if due:
         logger.info("[followup] tick leased=%s sent=%s", len(due), sent)
+    try:
+        _tick_crm_outbox(engine)
+    except Exception as err:
+        logger.warning("[followup] dreno Notion falhou: %s", type(err).__name__)
     return sent
+
+
+def _tick_crm_outbox(engine: FollowupEngine | None = None) -> int:
+    """Drena crm_outbox para a base de leads. Fail-closed sem chave/base."""
+    key = os.getenv("NOTION_API_KEY", "").strip() or os.getenv("NOTION_TOKEN", "").strip()
+    base = os.getenv("NOTION_LEADS_DB", "").strip()
+    if not key or not base:
+        return 0
+    engine = engine or _followup_engine()
+    claimed = engine.claim_outbox(limit=10)
+    posted = 0
+    for row in claimed:
+        try:
+            snapshot = json.loads(row.get("payload_json") or "{}")
+        except json.JSONDecodeError:
+            engine.mark_outbox_failed(int(row["id"]), "payload_json inválido")
+            continue
+        payload = notion_lead_payload(snapshot, base, api_version=_notion_version())
+        if not payload:
+            engine.mark_outbox_failed(int(row["id"]), "payload Notion vazio")
+            continue
+        try:
+            resposta = _notion_post(_NOTION_API, payload, key)
+        except Exception as err:
+            engine.mark_outbox_failed(int(row["id"]), type(err).__name__)
+            logger.warning("[followup] Notion lead falhou id=%s: %s", row["id"], type(err).__name__)
+            continue
+        url = (resposta or {}).get("url") or "sent"
+        engine.mark_outbox_sent(int(row["id"]), str(url))
+        posted += 1
+    return posted
 
 
 def _followup_manual_from_owner(owner_chat_id: str) -> str:

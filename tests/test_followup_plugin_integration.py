@@ -46,6 +46,9 @@ class FakeEngine:
     def mark_failed(self, job_id, error, _lease_token):
         self.failed.append((job_id, error))
 
+    def claim_outbox(self, **_kwargs):
+        return []
+
 
 class FollowupPluginIntegrationTest(unittest.TestCase):
     def setUp(self):
@@ -257,6 +260,12 @@ class FollowupPluginIntegrationTest(unittest.TestCase):
             ids = wm._followup_register_outbound(chat, "wamid-out-empty")
         self.assertEqual(ids, [])
         self.assertIsNone(engine.get_lead(chat))
+
+    def test_crm_outbox_drain_is_fail_closed_without_leads_db(self):
+        with patch.dict(wm.os.environ, {"NOTION_API_KEY": "secret_x", "NOTION_LEADS_DB": ""}, clear=False), \
+             patch.object(wm, "_notion_post") as post:
+            self.assertEqual(wm._tick_crm_outbox(), 0)
+        post.assert_not_called()
 
 
 if __name__ == "__main__":
