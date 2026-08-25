@@ -9207,5 +9207,179 @@ class TestPreLlmInjectsStateAndLanguage(BaseWhatsAppManagerTest):
         ))
 
 
+# QA Final — Fluxo Brasil (go-live). Frases literais do relatório.
+_BR_QA_RULES = (
+    "| Mercado | Implementação | Mensalidade |\n"
+    "| --- | --- | --- |\n"
+    "| Brasil | R$ 1.500 | R$ 497/mês |\n"
+    "| Estados Unidos | US$ 497 | US$ 99/mês |\n"
+    "<!-- AYA_PAYMENT_DETAILS:BR:START -->\n"
+    "- **Pix CNPJ:** 44.249.819/0001-62\n"
+    "- **Titular:** Titular Brasil\n"
+    "<!-- AYA_PAYMENT_DETAILS:BR:END -->\n"
+    "<!-- AYA_PAYMENT_DETAILS:US:START -->\n"
+    "- **Recipient:** Test Recipient\n"
+    "- **Zelle email:** pay@example.com\n"
+    "<!-- AYA_PAYMENT_DETAILS:US:END -->\n"
+)
+_BR_QA_CHAT = "5511999995750@s.whatsapp.net"
+
+
+class TestQaFinalBrasilGoLive(unittest.TestCase):
+    """Último ciclo antes da pista: mercado, intenção pendente, coloquial e pós-Pix.
+
+    Cada assert usa a frase cru do relatório. A guarda tem que pegar — instruir
+    o modelo não basta (noite de 24/08).
+    """
+
+    def _gate(self, inbound, response, contact=None, historico="", **kwargs):
+        with patch("whatsapp_manager._fetch_chat_history", return_value=historico):
+            return whatsapp_manager._enforce_aya_payment_output_gate(
+                response,
+                user_message=inbound,
+                contact_info=contact or {"market_id": "BR", "language": "pt"},
+                rules_content=_BR_QA_RULES,
+                chat_id=_BR_QA_CHAT,
+                **kwargs,
+            )
+
+    def test_coloquiais_de_preco_sao_pergunta_de_preco(self):
+        for msg in (
+            "quanto custa isso?",
+            "quanto fica?",
+            "cara, e quanto q custa?",
+            "Quanto custa?",
+        ):
+            with self.subTest(msg=msg):
+                self.assertTrue(whatsapp_manager._asks_about_price(msg), msg)
+
+    def test_coloquiais_de_compra_sao_intencao(self):
+        for msg in (
+            "quero fechar",
+            "quero avançar",
+            "como faço pra contratar?",
+        ):
+            with self.subTest(msg=msg):
+                self.assertTrue(whatsapp_manager._has_explicit_purchase_intent(msg), msg)
+
+    def test_pos_pagamento_coloquial_nao_e_pedido_de_dados(self):
+        """Teste #09: 'Fiz o Pix. E agora?' não pode liberar (nem reoferecer) Pix."""
+        for msg in (
+            "Fiz o Pix. E agora?",
+            "mandei o pix",
+            "já paguei",
+            "acabei de pagar",
+            "paguei agora",
+            "Eu já paguei. Posso te mandar o comprovante?",
+        ):
+            with self.subTest(msg=msg):
+                self.assertFalse(whatsapp_manager._has_explicit_purchase_intent(msg), msg)
+                self.assertTrue(whatsapp_manager._lead_claims_payment(msg), msg)
+
+    def test_falso_positivo_nao_e_pagamento_informado(self):
+        for msg in (
+            "vou pagar depois",
+            "como eu pago?",
+            "não paguei ainda",
+            "quero o pix",
+            "e agora?",
+            "oi, tudo bem?",
+        ):
+            with self.subTest(msg=msg):
+                self.assertFalse(whatsapp_manager._lead_claims_payment(msg), msg)
+
+    def test_resposta_oficial_sem_comprovante_ganha_o_pedido(self):
+        """Modelo mandou o Pix certo e esqueceu o comprovante — a guarda completa."""
+        out = self._gate(
+            "como faço pra contratar?",
+            "Perfeito — seguem os dados oficiais para o pagamento:\n"
+            "Pix CNPJ: 44.249.819/0001-62\n"
+            "Titular: Titular Brasil",
+        )
+        folded = whatsapp_manager._normalize_text(out)
+        self.assertIn("44.249.819", out)
+        self.assertIn("comprovante", folded)
+
+    def test_bloco_oficial_de_pagamento_pede_comprovante_na_mesma_resposta(self):
+        """Regra obrigatória: Pix/Zelle e pedido de comprovante saem juntos."""
+        for mercado, idioma in (("BR", "pt"), ("US", "en"), ("US", "es")):
+            with self.subTest(mercado=mercado, idioma=idioma):
+                bloco = whatsapp_manager._official_payment_block_text(
+                    mercado, idioma, _BR_QA_RULES
+                )
+                self.assertTrue(bloco)
+                self.assertRegex(
+                    whatsapp_manager._normalize_text(bloco),
+                    r"comprovante|receipt|comprobante",
+                )
+
+    def test_fiz_o_pix_nao_volta_para_envio_de_dados(self):
+        """Teste #09: o modelo ofereceu dados de pagamento; a guarda pede comprovante."""
+        out = self._gate(
+            "Fiz o Pix. E agora?",
+            "Posso te enviar os dados de pagamento pelo Pix.",
+        )
+        folded = whatsapp_manager._normalize_text(out)
+        self.assertIn("comprovante", folded)
+        self.assertNotIn("quando voce quiser avancar", folded)
+        self.assertNotIn("posso te enviar os dados", folded)
+        self.assertNotIn("44.249.819", out)
+
+    def test_ja_paguei_com_comprovante_nao_reenvia_pix(self):
+        """Teste #10: explícito também não pode reabrir o checkout."""
+        out = self._gate(
+            "Eu já paguei. Posso te mandar o comprovante?",
+            "Pode pagar pelo Pix: CNPJ 44.249.819/0001-62, Titular Brasil.",
+        )
+        folded = whatsapp_manager._normalize_text(out)
+        self.assertIn("comprovante", folded)
+        self.assertNotIn("44.249.819", out)
+        self.assertNotIn("quando voce quiser avancar", folded)
+
+    def test_brasil_parafraseado_grava_mercado(self):
+        """A pergunta de país do modelo quase nunca é o literal da guarda."""
+        historico = "AYA: Em que país a sua empresa atua?\nLead: Brasil"
+        with patch("whatsapp_manager._fetch_chat_history", return_value=historico):
+            up = whatsapp_manager._market_from_country_reply("Brasil", _BR_QA_CHAT)
+        self.assertEqual(up.get("market_id"), "BR")
+
+    def test_preco_com_mercado_conhecido_nao_repergunta_pais(self):
+        """Teste #04: mercado já é BR e o lead perguntou preço — responde o valor."""
+        out = self._gate(
+            "Quanto custa?",
+            "Em qual país sua empresa atua?",
+        )
+        self.assertIn("R$ 1.500", out)
+        self.assertIn("R$ 497", out)
+        self.assertNotIn("país", out.lower())
+
+    def test_brasil_depois_da_pergunta_retoma_preco_pendente(self):
+        """Teste #05: Quanto custa? → país → Brasil. Volta para o preço, não para
+        qualificação."""
+        historico = (
+            "Lead: Quanto custa?\n"
+            "AYA: Em qual país sua empresa atua?\n"
+        )
+        out = self._gate(
+            "Brasil",
+            "Que tipo de empresa você tem? Me conta como funciona o atendimento.",
+            historico=historico,
+        )
+        self.assertIn("R$ 1.500", out)
+        self.assertIn("R$ 497", out)
+        self.assertNotIn("Que tipo de empresa", out)
+
+    def test_estado_da_conversa_inclui_mercado_ja_identificado(self):
+        bloco = whatsapp_manager._conversation_state_block(
+            _BR_QA_CHAT,
+            rules_content=_BR_QA_RULES,
+            contact_info={"market_id": "BR", "language": "pt"},
+            history="Lead: oi\nAYA: Em qual país sua empresa atua?\nLead: Brasil",
+        )
+        folded = whatsapp_manager._normalize_text(bloco)
+        self.assertIn("mercado ja identificado", folded)
+        self.assertIn("brasil", folded)
+
+
 if __name__ == "__main__":
     unittest.main()

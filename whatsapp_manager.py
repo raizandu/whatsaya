@@ -8124,6 +8124,41 @@ def _has_explicit_purchase_intent(text: str) -> bool:
     return not any(re.search(pattern, tail) for pattern in cancellation_patterns)
 
 
+def _lead_claims_payment(text: str) -> bool:
+    """Lead afirma que já pagou — não é pedido de dados e não reabre o checkout.
+
+    QA Final Brasil, teste #09: "Fiz o Pix. E agora?" caía em intent_missing e a
+    guarda reoferecia os dados de pagamento. Frase no passado (fiz/mandei/paguei)
+    é comprovante em texto; "como eu pago" / "quero o pix" continuam intenção.
+    """
+    normalized = " ".join(_normalize_text(str(text or "")).split())
+    if not normalized:
+        return False
+    if re.search(
+        r"\b(?:nao|ainda\s+nao|nao\s+ainda|never|not\s+yet|todavia\s+no|aun\s+no)"
+        r"\b.{0,20}\b(?:paguei|pagar|fiz|mandei|enviei|paid|pague)\b",
+        normalized,
+    ):
+        return False
+    if re.search(
+        r"\b(?:vou|vamos|quero|quiero|want\s+to|i\s+will)\b.{0,25}"
+        r"\b(?:pagar|pix|zelle|pay|pago)\b",
+        normalized,
+    ):
+        return False
+    claim_patterns = (
+        r"\b(?:fiz|mandei|enviei|acabei\s+de\s+(?:fazer|mandar|enviar))\b.{0,25}"
+        r"\b(?:o\s+|a\s+)?(?:pix|pagamento|transferencia|zelle)\b",
+        r"\b(?:ja\s+)?(?:paguei|pagamos)\b(?:\s+agora)?\b",
+        r"\bacabei\s+de\s+pagar\b",
+        r"\bpaguei\s+agora\b",
+        r"\bi\s+(?:just\s+)?(?:paid|sent\s+(?:the\s+)?(?:payment|pix|zelle))\b",
+        r"\b(?:ya\s+(?:pague|envie|mande)|pague\s+ahora|acabo\s+de\s+pagar)\b",
+        r"\b(?:hice|mande|envie)\b.{0,20}\b(?:el\s+)?(?:pix|pago|zelle|transferencia)\b",
+    )
+    return any(re.search(pattern, normalized) for pattern in claim_patterns)
+
+
 def _gate_payment_details_for_prompt(
     rules_content: str,
     *,
@@ -8332,6 +8367,49 @@ def _turn_language_hint(
     return hint
 
 
+_COUNTRY_QUESTION_RE = re.compile(
+    r"\b(?:em\s+(?:qual|que)\s+pais|qual\s+(?:e\s+)?(?:o\s+)?pais|"
+    r"which\s+country|what\s+country|en\s+(?:que|cual)\s+pais|que\s+pais)\b"
+)
+
+
+def _country_reply_market(text: str) -> str:
+    """Mercado canônico de uma resposta curta de país, ou vazio."""
+    normalized = _normalize_text(str(text or "")).strip(" .!?,")
+    if not normalized or len(normalized) > 40:
+        return ""
+    market = _canonical_commercial_market(normalized)
+    if market:
+        return market
+    stripped = re.sub(
+        r"^(?:(?:no|na|nos|nas|em|in|the|en|los|aqui|atu(?:o|amos))\s+)+",
+        "",
+        normalized,
+    )
+    return _canonical_commercial_market(stripped) or ""
+
+
+def _history_asked_country(chat_id: str, history: str | None = None) -> bool:
+    """A AYA já perguntou o país nesta conversa — literal da guarda ou paráfrase."""
+    if history is None:
+        if not chat_id:
+            return False
+        try:
+            history = _fetch_chat_history(chat_id, limit=40)
+        except Exception:
+            return False
+    from_me, _lead_msgs = _history_from_me_and_lead(history)
+    haystack = _normalize_text(from_me) or _normalize_text(history)
+    if not haystack:
+        return False
+    if _COUNTRY_QUESTION_RE.search(haystack):
+        return True
+    return any(
+        _normalize_text(frase) in haystack
+        for frase in _PAYMENT_GATE_ASK_MARKET.values()
+    )
+
+
 def _market_from_country_reply(text: str, chat_id: str) -> dict:
     """Mercado de uma resposta direta à pergunta de país ("Brasil", "nos EUA").
 
@@ -8339,27 +8417,15 @@ def _market_from_country_reply(text: str, chat_id: str) -> dict:
     o lead respondeu "Brasil" seco, a inferência explícita não capturou (exige
     declaração sobre a operação) e o fallback perguntou o país DE NOVO. Resposta
     curta que resolve para um mercado conta — mas só quando a pergunta de país
-    (_PAYMENT_GATE_ASK_MARKET, qualquer idioma) foi feita nesta conversa; sem
-    esse contexto, "usa" é verbo e "brasil" é assunto.
+    foi feita nesta conversa (guarda canônica ou paráfrase do modelo); sem esse
+    contexto, "usa" é verbo e "brasil" é assunto.
     """
-    normalized = _normalize_text(str(text or "")).strip(" .!?,")
-    if not normalized or len(normalized) > 40:
-        return {}
-    market = _canonical_commercial_market(normalized)
-    if not market:
-        stripped = re.sub(
-            r"^(?:(?:no|na|nos|nas|em|in|the|en|los|aqui|atu(?:o|amos))\s+)+",
-            "",
-            normalized,
-        )
-        market = _canonical_commercial_market(stripped)
+    market = _country_reply_market(text)
     if not market:
         return {}
-    if not any(
-        _already_sent_to_chat(chat_id, pergunta)
-        for pergunta in _PAYMENT_GATE_ASK_MARKET.values()
-    ):
+    if not _history_asked_country(chat_id):
         return {}
+    logger.info("[country-reply] market=%s fonte=country_reply chat=%s", market, chat_id)
     return {"market_id": market, "market_source": "country_reply"}
 
 
@@ -11829,6 +11895,90 @@ def _official_payment_already_sent(from_me: str, rules_content: str, market: str
     return False
 
 
+def _pending_price_intent(
+    user_message: str,
+    chat_id: str = "",
+    history: str | None = None,
+    rules_content: str = "",
+) -> bool:
+    """Lead perguntou preço, a AYA pediu o país, e agora o lead respondeu o país.
+
+    Sem isso, o turno "Brasil" volta para qualificação (QA Final Brasil #05).
+    """
+    if not _country_reply_market(user_message):
+        return False
+    if history is None:
+        if not chat_id:
+            return False
+        try:
+            history = _fetch_chat_history(chat_id, limit=40)
+        except Exception:
+            return False
+    if not history:
+        return False
+    from_me, lead_msgs = _history_from_me_and_lead(history)
+    if rules_content and _official_price_already_sent(from_me, rules_content):
+        return False
+    return any(_asks_about_price(msg) for msg in lead_msgs)
+
+
+def _should_answer_official_price(
+    user_message: str,
+    contact_info: dict,
+    rules_content: str,
+    chat_id: str = "",
+    history: str | None = None,
+    response_text: str = "",
+) -> bool:
+    """Mercado conhecido (ou recém-respondido) e o lead ainda espera o preço."""
+    if _lead_claims_payment(user_message) or _has_explicit_purchase_intent(user_message):
+        return False
+    market = (
+        _canonical_commercial_market(contact_info)
+        or _country_reply_market(user_message)
+    )
+    if not market:
+        return False
+    language = _payment_gate_language(user_message, contact_info)
+    linha = _aya_market_price_line(market, language, rules_content)
+    if not linha:
+        return False
+    if response_text and (
+        _normalize_text(linha) in _normalize_text(response_text)
+        or _official_price_already_sent(response_text, rules_content)
+    ):
+        return False
+    if _asks_about_price(user_message):
+        # Objeção pura tem ramo próprio no fallback; interceptar aqui trocaria
+        # a defesa de valor por um preço seco. Só a pergunta direta (e o país
+        # respondido depois dela) reabre o valor oficial.
+        if (
+            _is_price_objection(user_message)
+            and not _PRICE_DIRECT_RE.search(_normalize_text(user_message))
+        ):
+            return False
+        # Se a resposta já cita valor, o gate antigo recorta mercado errado /
+        # corrige papel. Interceptar só o buraco do QA #04: resposta sem preço
+        # (reperguntar país, qualificação).
+        if response_text:
+            mentioned, _unsupported = _mentioned_price_amounts(response_text)
+            if any(mentioned.values()):
+                return False
+        return True
+    return _pending_price_intent(
+        user_message, chat_id, history=history, rules_content=rules_content
+    )
+
+
+def _ensure_payment_receipt_ask(text: str, language: str) -> str:
+    """Bloco de pagamento sem pedido de comprovante não pode chegar ao lead."""
+    folded = _normalize_text(text)
+    if re.search(r"\b(?:comprovante|receipt|comprobante)\b", folded):
+        return text
+    ask = _PAYMENT_RECEIPT_ASK.get(language) or _PAYMENT_RECEIPT_ASK["pt"]
+    return f"{str(text or '').rstrip()}\n\n{ask}"
+
+
 def _conversation_state_block(
     chat_id: str,
     rules_content: str = "",
@@ -11861,10 +12011,16 @@ def _conversation_state_block(
     )
     facts: list[str] = []
 
+    market = _canonical_commercial_market(contact_info)
+    if market and str(history or "").strip():
+        market_name = "Brasil" if market == "BR" else "Estados Unidos"
+        facts.append(f"Mercado já identificado: {market_name}")
+
     if _official_price_already_sent(from_me, rules_content):
         facts.append("Preço oficial já informado")
+    elif any(_asks_about_price(msg) for msg in lead_msgs):
+        facts.append("Lead perguntou o preço e ainda não recebeu o valor oficial")
 
-    market = _canonical_commercial_market(contact_info)
     if _official_payment_already_sent(from_me, rules_content, market):
         facts.append("Dados de pagamento já enviados")
 
@@ -11901,6 +12057,36 @@ _OFFICIAL_PAYMENT_INTRO = {
     "en": "Great — here are the official payment details:",
     "es": "Perfecto — estos son los datos oficiales de pago:",
 }
+# QA Final Brasil, bloqueio 4: Pix/Zelle e pedido de comprovante saem na mesma resposta.
+_PAYMENT_RECEIPT_ASK = {
+    "pt": (
+        "Assim que fizer o pagamento, me envie o comprovante por aqui para "
+        "seguirmos com a validação e o onboarding."
+    ),
+    "en": (
+        "As soon as you pay, send the receipt here so we can validate it "
+        "and start onboarding."
+    ),
+    "es": (
+        "En cuanto hagas el pago, envíame el comprobante por aquí para "
+        "validarlo y seguir con el onboarding."
+    ),
+}
+# QA Final Brasil, teste #09: lead afirmou que pagou — pede comprovante, não reabre checkout.
+_PAYMENT_CLAIMED_RECEIPT = {
+    "pt": (
+        "Perfeito. Me envia o comprovante por aqui. Assim que o pagamento "
+        "for validado, seguimos com o onboarding."
+    ),
+    "en": (
+        "Perfect. Send the receipt here. Once the payment is confirmed, "
+        "we continue with onboarding."
+    ),
+    "es": (
+        "Perfecto. Envíame el comprobante por aquí. Cuando el pago esté "
+        "validado, seguimos con el onboarding."
+    ),
+}
 
 
 def _official_payment_block_text(market: str, language: str, rules_content: str) -> str:
@@ -11929,7 +12115,8 @@ def _official_payment_block_text(market: str, language: str, rules_content: str)
     if not linhas:
         return ""
     intro = _OFFICIAL_PAYMENT_INTRO.get(language) or _OFFICIAL_PAYMENT_INTRO["pt"]
-    return intro + "\n" + "\n".join(linhas)
+    ask = _PAYMENT_RECEIPT_ASK.get(language) or _PAYMENT_RECEIPT_ASK["pt"]
+    return intro + "\n" + "\n".join(linhas) + "\n" + ask
 
 
 # Frases da guarda com nome porque o auditor diário precisa reconhecê-las na saída
@@ -11971,6 +12158,8 @@ def _payment_gate_fallback(
             bloco = _official_payment_block_text(market, language, rules_content)
             if bloco:
                 return bloco
+    if reason == "payment_claimed":
+        return _PAYMENT_CLAIMED_RECEIPT.get(language) or _PAYMENT_CLAIMED_RECEIPT["pt"]
     if reason == "market_unknown":
         return _PAYMENT_GATE_ASK_MARKET.get(language) or _PAYMENT_GATE_ASK_MARKET["pt"]
     # Objeção vem antes dos ramos por reason (review de 24/08): "tá caro" com o modelo
@@ -12012,7 +12201,11 @@ def _payment_gate_fallback(
         # Mas só quando o lead puxou o assunto. Em 24/08 um lead abriu com "quero
         # entender como a AYA funcionaria" e recebeu um preço seco como primeira
         # resposta, porque a guarda derrubou a resposta inteira do modelo.
-        if _asks_about_price(user_message) or _has_explicit_purchase_intent(user_message):
+        if (
+            _asks_about_price(user_message)
+            or _pending_price_intent(user_message, chat_id, rules_content=rules_content)
+            or _has_explicit_purchase_intent(user_message)
+        ):
             linha = _aya_market_price_line(market, language, rules_content)
             if linha:
                 cta = _PRICE_CTA.get(language) or _PRICE_CTA["pt"]
@@ -12125,6 +12318,53 @@ def _enforce_aya_payment_output_gate(
 ) -> str:
     """Bloqueia pagamento precoce, mercado errado e qualquer destino não cadastrado."""
     text = str(response_text or "")
+    turn_contact = dict(contact_info or {})
+    if not _canonical_commercial_market(turn_contact):
+        guessed = _country_reply_market(user_message)
+        if guessed:
+            turn_contact["market_id"] = guessed
+            turn_contact = _cohere_commercial_market_metadata(turn_contact)
+
+    if _lead_claims_payment(user_message):
+        logger.warning(
+            "[payment-gate] resposta comercial substituída chat=%r reason=payment_claimed "
+            "market=%r intent=%s markets=[] prices={} price_roles={} digits=[] emails=[] "
+            "restante=0 payment_content=False unofficial=False",
+            chat_id,
+            _canonical_commercial_market(turn_contact),
+            False,
+        )
+        return _payment_gate_fallback(
+            user_message,
+            turn_contact,
+            "payment_claimed",
+            rules_content=rules_content,
+            chat_id=chat_id,
+        )
+
+    if _should_answer_official_price(
+        user_message,
+        turn_contact,
+        rules_content,
+        chat_id=chat_id,
+        response_text=text,
+    ):
+        logger.warning(
+            "[payment-gate] resposta comercial substituída chat=%r reason=pending_price "
+            "market=%r intent=%s markets=[] prices={} price_roles={} digits=[] emails=[] "
+            "restante=0 payment_content=False unofficial=False",
+            chat_id,
+            _canonical_commercial_market(turn_contact),
+            False,
+        )
+        return _payment_gate_fallback(
+            user_message,
+            turn_contact,
+            "market_mismatch",
+            rules_content=rules_content,
+            chat_id=chat_id,
+        )
+
     normalized_visible = _payment_rendered_text(text)
     canonical = _payment_canonical_text(text)
     detail_fields = _aya_payment_detail_fields(rules_content)
@@ -12487,6 +12727,9 @@ def _enforce_aya_payment_output_gate(
     elif unofficial_destination:
         reason = "unofficial_details"
     else:
+        if payment_content_present:
+            language = _payment_gate_language(user_message, contact_info)
+            return _ensure_payment_receipt_ask(text, language)
         return text
 
     # Citar moeda do mercado errado não é vazar dado de pagamento. Descartar a resposta

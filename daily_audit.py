@@ -355,6 +355,20 @@ FALLBACK_PHRASES: tuple[str, ...] = (
     "Vou usar somente os dados de pagamento oficiais do mercado da sua empresa.",
     "I'll only use the official payment details for your company's market.",
     "Solo voy a usar los datos de pago oficiales correspondientes al mercado de tu empresa.",
+    # _PAYMENT_RECEIPT_ASK
+    "Assim que fizer o pagamento, me envie o comprovante por aqui para "
+    "seguirmos com a validação e o onboarding.",
+    "As soon as you pay, send the receipt here so we can validate it "
+    "and start onboarding.",
+    "En cuanto hagas el pago, envíame el comprobante por aquí para "
+    "validarlo y seguir con el onboarding.",
+    # _PAYMENT_CLAIMED_RECEIPT
+    "Perfeito. Me envia o comprovante por aqui. Assim que o pagamento "
+    "for validado, seguimos com o onboarding.",
+    "Perfect. Send the receipt here. Once the payment is confirmed, "
+    "we continue with onboarding.",
+    "Perfecto. Envíame el comprobante por aquí. Cuando el pago esté "
+    "validado, seguimos con el onboarding.",
     # _MARKET_CORRECTION_LINE
     "Como sua empresa opera nos Estados Unidos, os valores são em dólar. "
     "Quer que eu te passe a condição certa?",
