@@ -343,10 +343,13 @@ FALLBACK_PHRASES: tuple[str, ...] = (
     "What else do you need to decide?",
     "Esa parte de configuración la ajustamos juntos después de la contratación. "
     "¿Qué te falta para decidir?",
-    # _PAYMENT_GATE_ASK_MARKET
+    # _PAYMENT_GATE_ASK_MARKET (frase antiga fica para o log dos dias anteriores)
     "Em qual país sua empresa atua?",
     "Which country does your company operate in?",
     "¿En qué país opera tu empresa?",
+    "Vocês atendem de onde hoje?",
+    "Where are you based?",
+    "¿De dónde atienden hoy?",
     # _PAYMENT_GATE_INTENT_MISSING
     "Posso enviar os dados de pagamento quando você quiser avançar com a contratação.",
     "I can send the payment details when you're ready to move forward.",

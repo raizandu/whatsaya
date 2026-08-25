@@ -6760,6 +6760,27 @@ class TestCountryReplyCapture(unittest.TestCase):
             with self.subTest(msg=msg):
                 self.assertEqual(self._capture(msg), {})
 
+    def test_cidade_depois_da_pergunta_organica_grava_mercado(self):
+        """Pergunta de lugar, não de país: Goiânia/Miami resolvem o mercado."""
+        for hist, msg, esperado in (
+            ("AYA: Vocês atendem de onde hoje?\nLead: Goiânia", "Goiânia", "BR"),
+            ("AYA: Where are you based?\nLead: Miami", "Miami", "US"),
+            ("AYA: Vocês atendem de onde hoje?\nLead: em SP", "em SP", "BR"),
+        ):
+            with self.subTest(msg=msg):
+                up = self._capture(msg, historico=hist)
+                self.assertEqual(up.get("market_id"), esperado)
+
+    def test_cidade_solta_organica_grava_sem_pergunta_previa(self):
+        """Cidade não é tópico ambíguo como 'Brasil' — dá para extrair no fluxo."""
+        with patch("whatsapp_manager._fetch_chat_history", return_value=""):
+            self.assertEqual(
+                whatsapp_manager._market_from_country_reply(
+                    "Goiânia", "12025550199@s.whatsapp.net"
+                ).get("market_id"),
+                "BR",
+            )
+
 
 class TestPurchaseIntentGaps(unittest.TestCase):
     """Buracos medidos no QA de 24/08 no fluxo de fechamento."""
@@ -9242,6 +9263,35 @@ class TestQaFinalBrasilGoLive(unittest.TestCase):
                 chat_id=_BR_QA_CHAT,
                 **kwargs,
             )
+
+    def test_abertura_com_preco_inventado_nao_vira_interrogatorio_de_pais(self):
+        """Lead pediu para entender a AYA — a guarda tira o número velho e deixa
+        a conversa, sem 'em qual país sua empresa atua?'."""
+        out = self._gate(
+            "Oi! Queria entender como a AYA funciona",
+            "A AYA atende seus clientes no WhatsApp.\n\n"
+            "A implementação fica em R$ 997 e a mensalidade R$ 397.\n\n"
+            "Que tipo de empresa você tem?",
+            contact={"language": "pt"},
+        )
+        folded = whatsapp_manager._normalize_text(out)
+        self.assertIn("atende seus clientes", folded)
+        self.assertNotIn("997", out)
+        self.assertNotIn("397", out)
+        self.assertNotIn("pais", folded)
+        self.assertNotIn("em qual pais", folded)
+
+    def test_preco_sem_mercado_pergunta_lugar_nao_pais(self):
+        """Quando o valor depende do lugar, pergunta orgânica — não Brasil vs EUA."""
+        out = self._gate(
+            "Quanto custa isso?",
+            "A implementação é R$ 1.500.",
+            contact={"language": "pt"},
+        )
+        folded = whatsapp_manager._normalize_text(out)
+        self.assertIn("de onde", folded)
+        self.assertNotIn("pais", folded)
+        self.assertNotIn("estados unidos", folded)
 
     def test_coloquiais_de_preco_sao_pergunta_de_preco(self):
         for msg in (
