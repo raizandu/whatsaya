@@ -2993,13 +2993,49 @@ def _audit_llm_call(material: str, timeout: int = 120) -> str | None:
             {"role": "user", "content": material},
         ],
     }
-    return _call_llm_api(
-        url,
-        {"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
-        payload,
-        lambda r: r["choices"][0]["message"]["content"],
-        timeout=timeout,
+    # Chamada própria, sem `_call_llm_api`: aquele helper loga em DEBUG e engole
+    # status e corpo, e foi exatamente isso que produziu "Auditor sem veredito"
+    # em produção sem nenhuma pista. Erro de auditoria precisa dizer o motivo —
+    # chave, modelo, cota e payload falham de formas diferentes e se corrigem de
+    # formas diferentes. A chave nunca entra em mensagem de log.
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {key}",
+        # O OpenRouter pede atribuição; parte dos deployments recusa sem isso.
+        "HTTP-Referer": "https://github.com/raizandu/whatsaya",
+        "X-Title": "WhatsAYA Daily Audit",
+    }
+    req = urllib.request.Request(
+        url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST"
     )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            dados = json.loads(resp.read().decode("utf-8") or "{}")
+    except urllib.error.HTTPError as err:
+        try:
+            corpo = err.read().decode("utf-8", "replace")[:400]
+        except Exception:
+            corpo = "(sem corpo)"
+        logger.warning(
+            "[daily-audit] auditor recusado pelo provider %s: HTTP %s %s",
+            provider, err.code, corpo,
+        )
+        return None
+    except (urllib.error.URLError, TimeoutError, OSError) as err:
+        logger.warning("[daily-audit] auditor inacessível (%s): %s",
+                       provider, type(err).__name__)
+        return None
+    except json.JSONDecodeError:
+        logger.warning("[daily-audit] resposta do auditor não era JSON")
+        return None
+    try:
+        return dados["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError):
+        logger.warning(
+            "[daily-audit] resposta do auditor em formato inesperado: chaves=%s",
+            sorted(dados)[:8] if isinstance(dados, dict) else type(dados).__name__,
+        )
+        return None
 
 
 _AUDIT_SYSTEM_PROMPT = (

@@ -125,16 +125,23 @@ class AuditModelResolutionTest(unittest.TestCase):
         mock_call.assert_not_called()
 
     def test_chama_o_openrouter_com_o_modelo_do_auditor(self):
+        import io
+        import json as _json
+
+        corpo = io.BytesIO(b'{"choices":[{"message":{"content":"veredito"}}]}')
+        corpo.__enter__ = lambda s=corpo: s
+        corpo.__exit__ = lambda *a: None
+
         with patch.dict(os.environ, {
             "OPENROUTER_API_KEY": "sk-teste",
             "WHATSAPP_AUDIT_MODEL": "gpt-5.6-sol",
-        }), patch("whatsapp_manager._call_llm_api", return_value="veredito") as mock_call:
+        }), patch("urllib.request.urlopen", return_value=corpo) as urlopen:
             resultado = wm._audit_llm_call("material do dia")
 
         self.assertEqual(resultado, "veredito")
-        url = mock_call.call_args.args[0]
-        payload = mock_call.call_args.args[2]
-        self.assertIn("openrouter.ai", url)
+        req = urlopen.call_args.args[0]
+        payload = _json.loads(req.data.decode("utf-8"))
+        self.assertIn("openrouter.ai", req.full_url)
         self.assertEqual(payload["model"], "gpt-5.6-sol")
         self.assertIn("material do dia", str(payload["messages"]))
 
@@ -511,6 +518,89 @@ class NotionTicketTest(unittest.TestCase):
             wm._create_notion_ticket(self._proposta(), date(2026, 8, 24))
 
         self.assertNotIn("secret_supersecreto", "\n".join(logs.output))
+
+
+class AuditCallDiagnosticsTest(unittest.TestCase):
+    """O auditor voltou None em produção sem deixar rastro: `_call_llm_api` loga
+    em DEBUG e engole status e corpo. "Auditor sem veredito" não diz se foi
+    chave, modelo, cota ou payload — e sem isso ninguém corrige."""
+
+    def _http_error(self, code, body):
+        import urllib.error
+        import io
+
+        return urllib.error.HTTPError(
+            "https://openrouter.ai/api/v1/chat/completions", code, "err", {},
+            io.BytesIO(body.encode("utf-8")),
+        )
+
+    def test_erro_http_vira_log_com_status_e_motivo(self):
+        import logging
+
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-x"}), \
+             patch("urllib.request.urlopen",
+                   side_effect=self._http_error(400, '{"error":{"message":"model not found"}}')), \
+             self.assertLogs("whatsapp_manager", level=logging.WARNING) as logs:
+            resultado = wm._audit_llm_call("material")
+
+        self.assertIsNone(resultado)
+        juntos = "\n".join(logs.output)
+        self.assertIn("400", juntos)
+        self.assertIn("model not found", juntos)
+
+    def test_a_chave_nunca_aparece_no_log_do_erro(self):
+        import logging
+
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-supersecreta"}), \
+             patch("urllib.request.urlopen", side_effect=self._http_error(401, "nope")), \
+             self.assertLogs("whatsapp_manager", level=logging.WARNING) as logs:
+            wm._audit_llm_call("material")
+
+        self.assertNotIn("sk-supersecreta", "\n".join(logs.output))
+
+    def test_resposta_em_formato_inesperado_tambem_e_reportada(self):
+        import io
+        import logging
+
+        resposta = io.BytesIO(b'{"nao":"esperado"}')
+        resposta.__enter__ = lambda s=resposta: s
+        resposta.__exit__ = lambda *a: None
+
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-x"}), \
+             patch("urllib.request.urlopen", return_value=resposta), \
+             self.assertLogs("whatsapp_manager", level=logging.WARNING) as logs:
+            resultado = wm._audit_llm_call("material")
+
+        self.assertIsNone(resultado)
+        self.assertIn("inesperad", "\n".join(logs.output).lower())
+
+    def test_sucesso_devolve_o_conteudo(self):
+        import io
+
+        corpo = b'{"choices":[{"message":{"content":"veredito"}}]}'
+        resposta = io.BytesIO(corpo)
+        resposta.__enter__ = lambda s=resposta: s
+        resposta.__exit__ = lambda *a: None
+
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-x"}), \
+             patch("urllib.request.urlopen", return_value=resposta):
+            self.assertEqual(wm._audit_llm_call("material"), "veredito")
+
+    def test_manda_os_headers_que_o_openrouter_espera(self):
+        import io
+
+        corpo = b'{"choices":[{"message":{"content":"ok"}}]}'
+        resposta = io.BytesIO(corpo)
+        resposta.__enter__ = lambda s=resposta: s
+        resposta.__exit__ = lambda *a: None
+
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-x"}), \
+             patch("urllib.request.urlopen", return_value=resposta) as urlopen:
+            wm._audit_llm_call("material")
+
+        req = urlopen.call_args.args[0]
+        self.assertTrue(req.has_header("Http-referer") or req.has_header("HTTP-Referer"))
+        self.assertTrue(req.has_header("X-title") or req.has_header("X-Title"))
 
 
 if __name__ == "__main__":
