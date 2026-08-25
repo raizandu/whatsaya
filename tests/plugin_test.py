@@ -9290,8 +9290,24 @@ class TestQaFinalBrasilGoLive(unittest.TestCase):
         )
         folded = whatsapp_manager._normalize_text(out)
         self.assertIn("de onde", folded)
+        self.assertIn("moeda", folded)
         self.assertNotIn("pais", folded)
         self.assertNotIn("estados unidos", folded)
+        self.assertNotIn("mais caro", folded)
+
+    def test_preco_sem_mercado_nao_deixa_gancho_o_investimento_e(self):
+        """QA ao vivo: 'Tony, o investimento é:' + pergunta de lugar soa como preço
+        regional. Sem lugar, só a pergunta — sem fragmento de valor."""
+        out = self._gate(
+            "e quanto custa isso?",
+            "Tony, o investimento é:\n\nR$ 997 de implantação.\n\nSem desconto, salvo autorização específica.",
+            contact={"language": "pt"},
+        )
+        folded = whatsapp_manager._normalize_text(out)
+        self.assertIn("de onde", folded)
+        self.assertNotIn("investimento e", folded)
+        self.assertNotIn("tony", folded)
+        self.assertNotIn("997", out)
 
     def test_coloquiais_de_preco_sao_pergunta_de_preco(self):
         for msg in (
@@ -9402,6 +9418,42 @@ class TestQaFinalBrasilGoLive(unittest.TestCase):
         self.assertIn("R$ 1.500", out)
         self.assertIn("R$ 497", out)
         self.assertNotIn("país", out.lower())
+
+    def test_cidade_pendente_retoma_preco_com_maravilha(self):
+        historico = (
+            "Lead: Quanto custa isso?\n"
+            "AYA: Pra te passar o valor na moeda certa — de onde vocês atendem?\n"
+        )
+        out = self._gate(
+            "Goiânia",
+            "Que tipo de empresa você tem?",
+            historico=historico,
+        )
+        folded = whatsapp_manager._normalize_text(out)
+        self.assertIn("maravilha", folded)
+        self.assertIn("r$ 1.500", folded)
+        self.assertIn("r$ 497", folded)
+        self.assertNotIn("tambem e de goiania", folded)
+
+    def test_horario_de_goiania_nao_chega_ao_lead_sem_pedido(self):
+        out = whatsapp_manager._enforce_unsolicited_hours_gate(
+            "A AYA responde no WhatsApp.\n\n"
+            "O horário de atendimento humano é de segunda a sexta, das 08h às 18h, "
+            "no horário de Goiânia.",
+            user_message="Oi! Queria entender como a AYA funciona",
+        )
+        folded = whatsapp_manager._normalize_text(out)
+        self.assertIn("whatsapp", folded)
+        self.assertNotIn("goiania", folded)
+        self.assertNotIn("08h", folded)
+        self.assertNotIn("18h", folded)
+
+    def test_horario_fica_se_o_lead_perguntou(self):
+        texto = "Atendemos de segunda a sexta, das 08h às 18h, no horário de Goiânia."
+        out = whatsapp_manager._enforce_unsolicited_hours_gate(
+            texto, user_message="qual o horário de vocês?"
+        )
+        self.assertIn("08h", out)
 
     def test_brasil_depois_da_pergunta_retoma_preco_pendente(self):
         """Teste #05: Quanto custa? → país → Brasil. Volta para o preço, não para

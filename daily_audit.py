@@ -350,6 +350,9 @@ FALLBACK_PHRASES: tuple[str, ...] = (
     "Vocês atendem de onde hoje?",
     "Where are you based?",
     "¿De dónde atienden hoy?",
+    "Pra te passar o valor na moeda certa — de onde vocês atendem?",
+    "So I can quote in the right currency — where are you based?",
+    "Para pasarte el valor en la moneda correcta, ¿de dónde atienden?",
     # _PAYMENT_GATE_INTENT_MISSING
     "Posso enviar os dados de pagamento quando você quiser avançar com a contratação.",
     "I can send the payment details when you're ready to move forward.",
