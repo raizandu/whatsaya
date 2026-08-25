@@ -9884,6 +9884,17 @@ class TestQaFinalBrasilGoLive(unittest.TestCase):
         self.assertNotIn("area atendida", folded)
         self.assertEqual(folded.count("?"), 0)
 
+    def test_maravilha_nao_vira_bolha_orfa(self):
+        """Ack de cidade + frase longa: ponto em Maravilha. não cola (soma ≥ 110)."""
+        ack = whatsapp_manager._LOCATION_ACK["pt"]
+        obj = whatsapp_manager._CONSULTING_OBJECTION["pt"]
+        bolhas = whatsapp_manager._split_human_bubbles(f"{ack} {obj}")
+        self.assertFalse(
+            any(b.strip() in {"Maravilha.", "Maravilha"} for b in bolhas),
+            bolhas,
+        )
+        self.assertTrue(any("maravilha" in b.lower() for b in bolhas), bolhas)
+
     def test_hours_fallback_nao_cataloga_o_que_a_ia_faz(self):
         folded = whatsapp_manager._normalize_text(
             whatsapp_manager._HOURS_GATE_FALLBACK["pt"]

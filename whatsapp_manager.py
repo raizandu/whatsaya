@@ -12361,9 +12361,9 @@ _PAYMENT_GATE_ASK_MARKET = {
     "es": "Para pasarte el valor en la moneda correcta, \u00bfde d\u00f3nde atienden?",
 }
 _LOCATION_ACK = {
-    "pt": "Maravilha.",
-    "en": "Great.",
-    "es": "Perfecto.",
+    "pt": "Maravilha —",
+    "en": "Great —",
+    "es": "Perfecto —",
 }
 _CONSULTING_TRIAGE = {
     "pt": (
