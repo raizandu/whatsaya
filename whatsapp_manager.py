@@ -2865,7 +2865,7 @@ def _audit_day_material(day=None):
     """Coleta do dia: log do plugin, turnos do banco e latência do gateway."""
     import daily_audit as da
 
-    dia = day or (datetime.now(da.business_tz()).date())
+    dia = day or (datetime.datetime.now(da.business_tz()).date())
     linhas = da.read_day_log_lines(_plugin_log_path(), dia)
     turnos = da.read_day_turns(_MSG_DB_PATH, dia)
     # Latência do modelo e `api_calls` só existem no gateway.log, que é do core
