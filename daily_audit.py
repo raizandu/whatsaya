@@ -55,12 +55,17 @@ LOG_FIELDS: dict[str, tuple[str, ...]] = {
     "inbound-watchdog": ("chat", "message_id", "esperando", "preview"),
     "onboarding-gate": ("chat", "n", "restante"),
     "contact-reply": ("chat",),
+    # Emitida em toda montagem de prompt de cliente: diz se a dica determinística
+    # de idioma foi para o prompt daquele turno, e de onde veio o sinal.
+    "language-hint": ("chat", "lead", "hint", "fonte"),
 }
 
 _TAG_RE = re.compile(r"\[([a-z][a-z-]*)\]")
 # O JID aparece ora em campo nomeado (`chat=...`), ora solto no meio da frase
 # (`[handoff] dono avisado sobre '55...@s.whatsapp.net'`).
 _JID_RE = re.compile(r"(\d{6,}(?:[:-]\d+)?@[a-z.]+)")
+# Hora que o handler de arquivo do plugin escreve no começo da linha.
+_LINE_AT_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})")
 
 
 @dataclass
@@ -69,6 +74,7 @@ class AuditEvent:
     fields: dict[str, str] = field(default_factory=dict)
     raw: str = ""
     chat_id: str = ""
+    at: datetime | None = None
 
 
 def _parse_fields(tail: str, keys: tuple[str, ...]) -> dict[str, str]:
@@ -100,11 +106,19 @@ def parse_log_lines(lines) -> list[AuditEvent]:
         tag = match.group(1)
         tail = line[match.end():]
         jid = _JID_RE.search(tail)
+        quando = _LINE_AT_RE.match(line)
+        at = None
+        if quando:
+            try:
+                at = datetime.fromisoformat(quando.group(1)).replace(tzinfo=business_tz())
+            except ValueError:
+                at = None
         eventos.append(AuditEvent(
             tag=tag,
             fields=_parse_fields(tail, LOG_FIELDS[tag]),
             raw=line,
             chat_id=jid.group(1) if jid else "",
+            at=at,
         ))
     return eventos
 
@@ -544,6 +558,7 @@ class DayAudit:
     # Mensagens que o dono digitou na conversa do lead (takeover). Ficam fora do
     # placar da AYA, mas contam como sinal do dia.
     owner_manual: int = 0
+    language_hints: list[AuditEvent] = field(default_factory=list)
 
 
 def build_day_audit(day: date, events, turns, infer_language) -> DayAudit:
@@ -566,6 +581,10 @@ def build_day_audit(day: date, events, turns, infer_language) -> DayAudit:
         handoffs=placar.handoffs,
         replies=respostas,
         gate_evidence=_gate_evidence(events),
+        language_hints=[
+            e for e in events
+            if e.tag == "language-hint" and e.at is not None and e.chat_id
+        ],
     )
     for resposta in respostas:
         if classify_reply(resposta) == "guarda":
@@ -647,6 +666,19 @@ def compile_material(day: DayAudit, turns) -> str:
 
     if day.gate_evidence:
         linhas += ["", "## Evidência parseada do payment-gate", *day.gate_evidence]
+
+    idioma = language_hint_scoreboard(day)
+    if idioma["dica_ignorada"] or idioma["sem_dica"]:
+        linhas += ["", "## Dica determinística de idioma"]
+        if idioma["dica_ignorada"]:
+            linhas.append(
+                f"- dica de idioma estava no prompt e foi ignorada: {idioma['dica_ignorada']}"
+            )
+        if idioma["sem_dica"]:
+            fontes = ", ".join(f"{k}={v}" for k, v in sorted(idioma["fontes_sem_dica"].items()))
+            linhas.append(f"- troca de idioma sem dica emitida: {idioma['sem_dica']} ({fontes})")
+        if idioma["dica_funcionou"]:
+            linhas.append(f"- turnos com dica e idioma certo: {idioma['dica_funcionou']}")
 
     if day.format_violations:
         linhas += ["", "## Violações de formato"]
@@ -807,3 +839,48 @@ def split_owner_manual(turns, events) -> tuple[list[Turn], list[Turn]]:
         else:
             do_dono.append(turn)
     return do_bot, do_dono
+
+
+def language_hint_scoreboard(day: DayAudit) -> dict:
+    """Mede se a dica determinística de idioma funciona, em três baldes.
+
+    A regra medida nesta base é "instruir não funciona, filtrar funciona", e esta
+    é a medição que decide o caso da dica de idioma:
+
+    - `dica_ignorada`: houve troca de idioma E a dica estava no prompt. Instrução
+      emitida e desobedecida — o caso é de filtro de saída, não de mais texto.
+    - `sem_dica`: houve troca e a dica não foi emitida. Falta sinal, e
+      `fontes_sem_dica` diz se o limite foi o detector ("nenhuma") ou o cadastro.
+    - `dica_funcionou`: a dica foi emitida e o turno saiu no idioma certo.
+
+    A correlação é pela dica mais recente da MESMA conversa emitida ATÉ a hora do
+    turno: uma dica posterior não pode explicar uma resposta anterior.
+    """
+    def dica_ate(chat_id: str, quando: datetime) -> AuditEvent | None:
+        anteriores = [
+            e for e in day.language_hints
+            if e.chat_id == chat_id and e.at <= quando
+        ]
+        return max(anteriores, key=lambda e: e.at) if anteriores else None
+
+    placar = {
+        "dica_ignorada": 0,
+        "sem_dica": 0,
+        "dica_funcionou": 0,
+        "fontes_sem_dica": {},
+    }
+
+    trocas = {(m.chat_id, m.at) for m in day.language_mismatches}
+    for resposta in day.replies:
+        dica = dica_ate(resposta.chat_id, resposta.at)
+        tem_dica = bool(dica and dica.fields.get("hint") == "True")
+        trocou = (resposta.chat_id, resposta.at) in trocas
+        if trocou and tem_dica:
+            placar["dica_ignorada"] += 1
+        elif trocou:
+            fonte = (dica.fields.get("fonte") if dica else None) or "sem registro"
+            placar["sem_dica"] += 1
+            placar["fontes_sem_dica"][fonte] = placar["fontes_sem_dica"].get(fonte, 0) + 1
+        elif tem_dica:
+            placar["dica_funcionou"] += 1
+    return placar

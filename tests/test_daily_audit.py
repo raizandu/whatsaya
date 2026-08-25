@@ -17,6 +17,7 @@ from daily_audit import (
     BUSINESS_TZ,
     build_day_audit,
     compile_material,
+    language_hint_scoreboard,
     render_owner_summary,
     render_report,
     Turn,
@@ -105,7 +106,34 @@ RUIDO = (
 )
 
 
+LANGUAGE_HINT = (
+    "2026-08-24T19:44:00 [whatsapp-manager] [language-hint] "
+    f"chat='{CHAT_A}' lead=pt hint=True fonte=mensagem"
+)
+LANGUAGE_HINT_SEM_SINAL = (
+    "2026-08-24T19:50:00 [whatsapp-manager] [language-hint] "
+    f"chat='{CHAT_B}' lead=? hint=False fonte=nenhuma"
+)
+
+
 class ParseLogLinesTest(unittest.TestCase):
+    def test_guarda_a_hora_da_linha_para_correlacionar_com_o_turno(self):
+        (evento,) = parse_log_lines([LANGUAGE_HINT])
+
+        self.assertEqual(evento.at.strftime("%Y-%m-%dT%H:%M:%S"), "2026-08-24T19:44:00")
+
+    def test_linha_sem_hora_fica_sem_hora(self):
+        (evento,) = parse_log_lines([HUMAN_SEND])
+
+        self.assertIsNone(evento.at)
+
+    def test_le_a_dica_de_idioma(self):
+        a, b = parse_log_lines([LANGUAGE_HINT, LANGUAGE_HINT_SEM_SINAL])
+
+        self.assertEqual((a.fields["lead"], a.fields["hint"], a.fields["fonte"]),
+                         ("pt", "True", "mensagem"))
+        self.assertEqual((b.fields["lead"], b.fields["fonte"]), ("?", "nenhuma"))
+
     def test_le_a_tag_no_segundo_colchete(self):
         (evento,) = parse_log_lines([GATE_P4])
 
@@ -798,6 +826,27 @@ class CompileMaterialTest(unittest.TestCase):
 
         self.assertIn("dono assumiu", material)
 
+    def test_material_diz_se_a_dica_de_idioma_foi_ignorada(self):
+        turnos = [
+            _turn(0, False, "quanto custa?"),
+            _turn(1, True, "Hello, ready to move forward with the payment?"),
+        ]
+        linhas = [
+            f"2026-08-24T10:00:00 [whatsapp-manager] [language-hint] chat='{CHAT_A}' "
+            "lead=pt hint=True fonte=mensagem"
+        ]
+
+        material = compile_material(self._dia(turnos, parse_log_lines(linhas)), turnos)
+
+        self.assertIn("dica de idioma estava no prompt e foi ignorada: 1", material)
+
+    def test_material_omite_o_placar_de_idioma_quando_nao_ha_o_que_dizer(self):
+        turnos = [_turn(0, False, "oi"), _turn(1, True, "oi!")]
+
+        material = compile_material(self._dia(turnos), turnos)
+
+        self.assertNotIn("dica de idioma", material)
+
     def test_traz_o_placar_de_guarda_e_modelo(self):
         turnos = [
             _turn(0, False, "quanto custa?"),
@@ -1115,3 +1164,98 @@ class SplitOwnerManualTest(unittest.TestCase):
 
         self.assertEqual([t.body for t in auditaveis], ["abc", "sem log no B"])
         self.assertEqual([t.body for t in dono], ["manual do dono no A"])
+
+
+class LanguageHintScoreboardTest(unittest.TestCase):
+    """Mede se a dica determinística de idioma funciona.
+
+    A regra da sessão é "instruir não funciona, filtrar funciona". Esta é a
+    medição que decide: se o balde "dica presente + idioma trocado" dominar, a
+    dica é instrução ignorada e o caso vira filtro de saída.
+    """
+
+    def _dia(self, turnos, linhas):
+        return build_day_audit(date(2026, 8, 24), parse_log_lines(linhas), turnos, _pt)
+
+    def _turnos_com_troca(self, hora):
+        # Lead escreve em pt, AYA responde em en.
+        lead = _turn(0, False, "quanto custa?")
+        resposta = _turn(hora, True, "Hello, ready to move forward with the payment?")
+        return [lead, resposta]
+
+    def test_troca_com_dica_presente_conta_como_dica_ignorada(self):
+        linhas = [
+            f"2026-08-24T10:00:00 [whatsapp-manager] [language-hint] chat='{CHAT_A}' "
+            "lead=pt hint=True fonte=mensagem"
+        ]
+
+        placar = language_hint_scoreboard(self._dia(self._turnos_com_troca(1), linhas))
+
+        self.assertEqual(placar["dica_ignorada"], 1)
+        self.assertEqual(placar["sem_dica"], 0)
+
+    def test_troca_sem_dica_conta_como_falta_de_sinal(self):
+        linhas = [
+            f"2026-08-24T10:00:00 [whatsapp-manager] [language-hint] chat='{CHAT_A}' "
+            "lead=? hint=False fonte=nenhuma"
+        ]
+
+        placar = language_hint_scoreboard(self._dia(self._turnos_com_troca(1), linhas))
+
+        self.assertEqual(placar["dica_ignorada"], 0)
+        self.assertEqual(placar["sem_dica"], 1)
+        self.assertEqual(placar["fontes_sem_dica"]["nenhuma"], 1)
+
+    def test_dica_presente_sem_troca_conta_como_dica_funcionou(self):
+        linhas = [
+            f"2026-08-24T10:00:00 [whatsapp-manager] [language-hint] chat='{CHAT_A}' "
+            "lead=pt hint=True fonte=cadastro"
+        ]
+        turnos = [_turn(0, False, "quanto custa?"), _turn(1, True, "Te explico o atendimento.")]
+
+        placar = language_hint_scoreboard(self._dia(turnos, linhas))
+
+        self.assertEqual(placar["dica_funcionou"], 1)
+        self.assertEqual(placar["dica_ignorada"], 0)
+
+    def test_usa_a_dica_mais_recente_antes_do_turno(self):
+        # Duas montagens de prompt no mesmo chat: vale a que precedeu a resposta.
+        linhas = [
+            f"2026-08-24T10:00:00 [whatsapp-manager] [language-hint] chat='{CHAT_A}' "
+            "lead=pt hint=False fonte=nenhuma",
+            f"2026-08-24T10:00:30 [whatsapp-manager] [language-hint] chat='{CHAT_A}' "
+            "lead=pt hint=True fonte=mensagem",
+        ]
+
+        placar = language_hint_scoreboard(self._dia(self._turnos_com_troca(1), linhas))
+
+        self.assertEqual(placar["dica_ignorada"], 1)
+
+    def test_dica_posterior_ao_turno_nao_conta(self):
+        # Uma dica emitida DEPOIS da resposta não pode explicá-la.
+        linhas = [
+            f"2026-08-24T11:00:00 [whatsapp-manager] [language-hint] chat='{CHAT_A}' "
+            "lead=pt hint=True fonte=mensagem"
+        ]
+
+        placar = language_hint_scoreboard(self._dia(self._turnos_com_troca(1), linhas))
+
+        self.assertEqual(placar["dica_ignorada"], 0)
+        self.assertEqual(placar["sem_dica"], 1)
+
+    def test_dica_de_outra_conversa_nao_e_usada(self):
+        linhas = [
+            f"2026-08-24T10:00:00 [whatsapp-manager] [language-hint] chat='{CHAT_B}' "
+            "lead=pt hint=True fonte=mensagem"
+        ]
+
+        placar = language_hint_scoreboard(self._dia(self._turnos_com_troca(1), linhas))
+
+        self.assertEqual(placar["dica_ignorada"], 0)
+        self.assertEqual(placar["sem_dica"], 1)
+
+    def test_dia_sem_troca_de_idioma_devolve_placar_zerado(self):
+        placar = language_hint_scoreboard(self._dia([], []))
+
+        self.assertEqual(placar["dica_ignorada"], 0)
+        self.assertEqual(placar["sem_dica"], 0)
