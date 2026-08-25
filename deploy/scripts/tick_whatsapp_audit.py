@@ -9,6 +9,19 @@ por dentro, no provider limpo configurado em WHATSAPP_AUDIT_*):
 
 Sem argumento audita o dia corrente (rode no fim do expediente). Com uma data
 `YYYY-MM-DD` audita aquele dia — útil para reprocessar.
+
+Modo agente (`--material`): não chama LLM nenhuma. Coleta, grava o relatório sem
+veredito e imprime instruções + material no stdout, para o agente do Hermes
+produzir o parecer. É assim que o auditor herda a cadeia Codex→OpenRouter da
+assinatura, sem auth nova — o plugin não tem credencial do backend Codex, que é
+config do gateway. Registre SEM `--no-agent`:
+
+    hermes cron create "0 20 * * *" --name wa-auditoria-diaria \
+      --script /opt/data/.hermes/scripts/tick_whatsapp_audit.py
+
+Nesse modo o portão sim/não da fase 2 não arma: o veredito não volta ao processo
+do plugin. O parse é fail-safe, então proposta sem estrutura vira nota — o dono
+lê e aplica à mão. Foi uma troca aceita de propósito.
 """
 from __future__ import annotations
 
@@ -47,24 +60,48 @@ def main(argv: list[str]) -> int:
         logging.error("import plugin: %s", err)
         return 1
 
-    # O logger do plugin imprime em stdout; o cron --no-agent entrega stdout no
-    # home do dono, e um relatório não pode virar mensagem solta lá.
+    # O logger do plugin imprime em stdout, e o cron --no-agent entrega stdout no
+    # home do dono — um relatório não pode virar mensagem solta lá. Mas anular
+    # tudo com NullHandler matava junto o diagnóstico do próprio auditor: o 402
+    # do provider na primeira rodada não apareceu em lugar nenhum. Em vez de
+    # silenciar, redireciona para o log deste cron: stdout continua protegido e
+    # o motivo da falha sobrevive.
     plugin_log = logging.getLogger("whatsapp_manager")
-    plugin_log.handlers = []
-    plugin_log.addHandler(logging.NullHandler())
+    for handler in list(plugin_log.handlers):
+        plugin_log.removeHandler(handler)
     plugin_log.propagate = False
+    for handler in logging.getLogger().handlers:
+        plugin_log.addHandler(handler)
+    if not plugin_log.handlers:
+        plugin_log.addHandler(logging.NullHandler())
+    plugin_log.setLevel(logging.INFO)
 
     if not wm.config.whatsapp_audit_enabled:
         logging.info("auditoria desligada (WHATSAPP_AUDIT_ENABLED)")
         return 0
 
+    apenas_material = "--material" in argv
+    datas = [a for a in argv if not a.startswith("-")]
     dia = None
-    if argv:
+    if datas:
         try:
-            dia = date.fromisoformat(argv[0])
+            dia = date.fromisoformat(datas[0])
         except ValueError:
-            logging.error("data inválida: %r (esperado YYYY-MM-DD)", argv[0])
+            logging.error("data inválida: %r (esperado YYYY-MM-DD)", datas[0])
             return 2
+
+    if apenas_material:
+        try:
+            material, caminho = wm._collect_audit_material(dia)
+        except Exception as err:
+            logging.exception("coleta: %s", err)
+            return 1
+        logging.info("material pronto; relatório sem veredito em %s", caminho)
+        # Única coisa no stdout: o que o agente precisa ler.
+        print(wm._AUDIT_SYSTEM_PROMPT)
+        print()
+        print(material)
+        return 0
 
     try:
         caminho = wm._run_daily_audit(dia)

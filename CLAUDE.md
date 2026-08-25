@@ -97,6 +97,20 @@ hermes cron create "0 20 * * *" --name wa-auditoria-diaria \
 `register()` copia o tick para `/opt/data/.hermes/scripts/` no boot. Rodar
 `tick_whatsapp_audit.py 2026-08-24` reprocessa um dia específico.
 
+**Dois modos, e a escolha é sobre qual provider paga a conta.** No modo script
+(`--no-agent`) o plugin chama o modelo direto por chave — só sabe Google/OpenAI/
+OpenRouter, porque credencial do backend Codex é config do *gateway*, não do
+plugin. No modo agente (`--material`, cron registrado **sem** `--no-agent`) o
+tick não chama LLM nenhuma: imprime instruções + material no stdout e o agente
+do Hermes produz o parecer, herdando a cadeia Codex→OpenRouter da assinatura.
+A diretiva do dono é Codex primeiro, OpenRouter só em erro — logo, modo agente.
+O custo aceito: o veredito não volta ao processo, então o portão sim/não da fase
+2 não arma e a proposta vira nota para aplicar à mão.
+
+Atenção ao `max_tokens`: sem teto explícito o OpenRouter **reserva** o máximo de
+saída do modelo e cobra a reserva, não o uso — a primeira auditoria morreu com
+`402 requested up to 65536 tokens, but can only afford 19788`.
+
 **Propostas com portão (fase 2).** O auditor responde em JSON e cada achado vem
 tipado; o tipo decide quem aplica, e os limites são de segurança, não de gosto:
 

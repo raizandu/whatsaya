@@ -311,6 +311,31 @@ class RunDailyAuditTest(unittest.TestCase):
         self.assertTrue(Path(caminho).is_file())
         self.assertIn("Falta guarda", send.call_args.args[1])
 
+    def test_modo_material_nao_chama_llm_nem_avisa_o_dono(self):
+        # No modo agente quem fala com o dono é o agente do Hermes; o plugin
+        # mandar também daria duas mensagens do mesmo relatório.
+        from datetime import date
+
+        with patch("whatsapp_manager._MSG_DB_PATH", self.db), \
+             patch("whatsapp_manager._audit_llm_call") as llm, \
+             patch("whatsapp_manager._human_send") as send:
+            material, caminho = wm._collect_audit_material(date(2026, 8, 24))
+
+        llm.assert_not_called()
+        send.assert_not_called()
+        self.assertIn("Auditoria do atendimento", material)
+        self.assertTrue(Path(caminho).is_file())
+
+    def test_modo_material_grava_relatorio_sem_veredito(self):
+        from datetime import date
+
+        with patch("whatsapp_manager._MSG_DB_PATH", self.db), \
+             patch("whatsapp_manager._human_send"):
+            _material, caminho = wm._collect_audit_material(date(2026, 8, 24))
+
+        texto = Path(caminho).read_text(encoding="utf-8")
+        self.assertIn("sem veredito", texto.lower())
+
     def test_avisa_o_dono_no_self_chat(self):
         _, send = self._run()
 
@@ -518,6 +543,44 @@ class NotionTicketTest(unittest.TestCase):
             wm._create_notion_ticket(self._proposta(), date(2026, 8, 24))
 
         self.assertNotIn("secret_supersecreto", "\n".join(logs.output))
+
+
+class AuditMaxTokensTest(unittest.TestCase):
+    """402 real do OpenRouter: "You requested up to 65536 tokens, but can only
+    afford 19788". O payload não pedia `max_tokens`, então o provider RESERVA o
+    teto de saída do modelo e cobra a reserva — não o uso. Um parecer de 3
+    achados não precisa de 64k."""
+
+    def _resposta(self):
+        import io
+
+        corpo = io.BytesIO(b'{"choices":[{"message":{"content":"ok"}}]}')
+        corpo.__enter__ = lambda s=corpo: s
+        corpo.__exit__ = lambda *a: None
+        return corpo
+
+    def test_pede_um_teto_de_saida_realista(self):
+        import json as _json
+
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-x"}), \
+             patch("urllib.request.urlopen", return_value=self._resposta()) as urlopen:
+            wm._audit_llm_call("material")
+
+        payload = _json.loads(urlopen.call_args.args[0].data.decode("utf-8"))
+        self.assertIn("max_tokens", payload)
+        self.assertLessEqual(payload["max_tokens"], 8000)
+        self.assertGreaterEqual(payload["max_tokens"], 2000)
+
+    def test_teto_e_configuravel(self):
+        import json as _json
+
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-x",
+                                     "WHATSAPP_AUDIT_MAX_TOKENS": "3000"}), \
+             patch("urllib.request.urlopen", return_value=self._resposta()) as urlopen:
+            wm._audit_llm_call("material")
+
+        payload = _json.loads(urlopen.call_args.args[0].data.decode("utf-8"))
+        self.assertEqual(payload["max_tokens"], 3000)
 
 
 class AuditCallDiagnosticsTest(unittest.TestCase):

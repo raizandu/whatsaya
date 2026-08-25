@@ -156,6 +156,13 @@ class PluginConfig:
         return os.getenv("WHATSAPP_AUDIT_MODEL", "deepseek/deepseek-v4-flash").strip()
 
     @property
+    def whatsapp_audit_max_tokens(self) -> int:
+        try:
+            return max(500, min(16000, int(os.getenv("WHATSAPP_AUDIT_MAX_TOKENS", "4000").strip())))
+        except ValueError:
+            return 4000
+
+    @property
     def whatsapp_audit_provider(self) -> str:
         return os.getenv("WHATSAPP_AUDIT_PROVIDER", "openrouter").strip().lower()
 
@@ -2854,16 +2861,11 @@ def _audit_report_dir() -> Path:
     return Path(os.getenv("WHATSAPP_AUDIT_REPORT_DIR", "/opt/data/reports"))
 
 
-def _run_daily_audit(day=None) -> str | None:
-    """Auditoria de um dia: coleta, compila, consulta o auditor e entrega ao dono.
-
-    Devolve o caminho do relatório gravado, ou None se nem isso foi possível. O
-    veredito do modelo é opcional de propósito — o placar determinístico é a parte
-    que não pode faltar, e ele sai mesmo sem provider configurado.
-    """
+def _audit_day_material(day=None):
+    """Coleta do dia: log do plugin, turnos do banco e latência do gateway."""
     import daily_audit as da
 
-    dia = day or (datetime.now(da.BUSINESS_TZ).date())
+    dia = day or (datetime.now(da.business_tz()).date())
     linhas = da.read_day_log_lines(_plugin_log_path(), dia)
     turnos = da.read_day_turns(_MSG_DB_PATH, dia)
     # Latência do modelo e `api_calls` só existem no gateway.log, que é do core
@@ -2873,7 +2875,53 @@ def _run_daily_audit(day=None) -> str | None:
         dia, da.parse_log_lines(linhas), turnos, _infer_message_language,
         gateway_turns=gateway,
     )
-    material = da.compile_material(auditoria, turnos)
+    return dia, auditoria, da.compile_material(auditoria, turnos)
+
+
+def _write_audit_report(dia, auditoria, veredito, material, propostas) -> str | None:
+    """Grava o relatório do dia. Devolve o caminho só se o arquivo existir mesmo."""
+    import daily_audit as da
+
+    try:
+        destino = _audit_report_dir()
+        destino.mkdir(parents=True, exist_ok=True)
+        alvo = destino / f"audit-{dia.strftime('%Y%m%d')}.md"
+        alvo.write_text(
+            da.render_report(auditoria, veredito, material, propostas), encoding="utf-8"
+        )
+        # Só vira caminho DEPOIS de gravar: atribuir antes fazia a falha de
+        # escrita ser reportada como sucesso pelo tick.
+        return str(alvo)
+    except OSError as err:
+        logger.error("[daily-audit] não consegui gravar o relatório: %s", err)
+        return None
+
+
+def _collect_audit_material(day=None) -> tuple[str, str | None]:
+    """Coleta e compila o material do dia, sem chamar LLM nem avisar o dono.
+
+    É o modo agente: quem produz o parecer é o agente do Hermes, que roda na
+    assinatura Codex com fallback do próprio core. O plugin não tem credencial do
+    backend Codex — isso é config do gateway —, então em vez de reimplementar
+    auth, entrega o material e sai do caminho.
+    """
+    import daily_audit as da
+
+    dia, auditoria, material = _audit_day_material(day)
+    caminho = _write_audit_report(dia, auditoria, "", material, [])
+    return material, caminho
+
+
+def _run_daily_audit(day=None) -> str | None:
+    """Auditoria de um dia: coleta, compila, consulta o auditor e entrega ao dono.
+
+    Devolve o caminho do relatório gravado, ou None se nem isso foi possível. O
+    veredito do modelo é opcional de propósito — o placar determinístico é a parte
+    que não pode faltar, e ele sai mesmo sem provider configurado.
+    """
+    import daily_audit as da
+
+    dia, auditoria, material = _audit_day_material(day)
 
     try:
         veredito = _audit_llm_call(material) or ""
@@ -2903,20 +2951,7 @@ def _run_daily_audit(day=None) -> str | None:
         if url:
             tickets.append(url)
 
-    caminho = None
-    try:
-        destino = _audit_report_dir()
-        destino.mkdir(parents=True, exist_ok=True)
-        alvo = destino / f"audit-{dia.strftime('%Y%m%d')}.md"
-        alvo.write_text(
-            da.render_report(auditoria, veredito, material, propostas), encoding="utf-8"
-        )
-        # Só vira caminho DEPOIS de gravar: atribuir antes fazia a falha de
-        # escrita ser reportada como sucesso pelo tick, apontando para um
-        # arquivo que não existe.
-        caminho = alvo
-    except OSError as err:
-        logger.error("[daily-audit] não consegui gravar o relatório: %s", err)
+    caminho = _write_audit_report(dia, auditoria, veredito, material, propostas)
 
     logger.info(
         "[daily-audit] dia=%s conversas=%d guarda=%d modelo=%d disparos=%d achados=%d veredito=%s",
@@ -2952,7 +2987,7 @@ def _run_daily_audit(day=None) -> str | None:
     else:
         logger.warning("[daily-audit] WHATSAPP_OWNER_NUMBER vazio — relatório só em disco")
 
-    return str(caminho) if caminho else None
+    return caminho
 
 
 _AUDIT_PROVIDERS = {
@@ -2992,6 +3027,11 @@ def _audit_llm_call(material: str, timeout: int = 120) -> str | None:
             {"role": "system", "content": _AUDIT_SYSTEM_PROMPT},
             {"role": "user", "content": material},
         ],
+        # Sem teto explícito o OpenRouter RESERVA o máximo de saída do modelo e
+        # cobra a reserva, não o uso: a primeira auditoria morreu com
+        # "requested up to 65536 tokens, but can only afford 19788". Um parecer
+        # de 3 achados não chega perto disso.
+        "max_tokens": config.whatsapp_audit_max_tokens,
     }
     # Chamada própria, sem `_call_llm_api`: aquele helper loga em DEBUG e engole
     # status e corpo, e foi exatamente isso que produziu "Auditor sem veredito"
