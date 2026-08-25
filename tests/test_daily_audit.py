@@ -18,6 +18,8 @@ from daily_audit import (
     build_day_audit,
     compile_material,
     language_hint_scoreboard,
+    parse_gateway_lines,
+    reply_latencies,
     render_owner_summary,
     render_report,
     Turn,
@@ -775,6 +777,22 @@ class BuildDayAuditTest(unittest.TestCase):
         self.assertEqual(dia.format_violations, [])
         self.assertEqual(dia.owner_manual, 1)
 
+    def test_reune_latencia_do_lead_e_do_modelo(self):
+        from datetime import timedelta
+
+        lead = _turn(0, False, "quanto custa?")
+        resposta = _turn(0, True, "te explico")
+        resposta.at = lead.at + timedelta(seconds=30)
+
+        dia = build_day_audit(
+            date(2026, 8, 24), [], [lead, resposta], _pt,
+            gateway_turns=parse_gateway_lines([GATEWAY_READY, GATEWAY_LENTO]),
+        )
+
+        self.assertEqual(dia.lead_latencies, [30.0])
+        self.assertEqual(dia.model_seconds, [7.7, 15.3])
+        self.assertEqual(dia.api_calls, 4)
+
     def test_dia_sem_movimento_nao_explode(self):
         dia = build_day_audit(date(2026, 8, 24), [], [], _pt)
 
@@ -846,6 +864,23 @@ class CompileMaterialTest(unittest.TestCase):
         material = compile_material(self._dia(turnos), turnos)
 
         self.assertNotIn("dica de idioma", material)
+
+    def test_material_traz_a_latencia_pior_e_a_mediana(self):
+        from datetime import timedelta
+
+        lead = _turn(0, False, "quanto custa?")
+        resposta = _turn(0, True, "te explico")
+        resposta.at = lead.at + timedelta(seconds=95)
+        dia = build_day_audit(
+            date(2026, 8, 24), [], [lead, resposta], _pt,
+            gateway_turns=parse_gateway_lines([GATEWAY_LENTO]),
+        )
+
+        material = compile_material(dia, [lead, resposta])
+
+        self.assertIn("95", material)
+        self.assertIn("15.3", material)
+        self.assertIn("api_calls", material)
 
     def test_traz_o_placar_de_guarda_e_modelo(self):
         turnos = [
@@ -1259,3 +1294,73 @@ class LanguageHintScoreboardTest(unittest.TestCase):
 
         self.assertEqual(placar["dica_ignorada"], 0)
         self.assertEqual(placar["sem_dica"], 0)
+
+
+# Formato verbatim do gateway.log (hora LOCAL, diferente do log do plugin).
+GATEWAY_READY = (
+    "2026-08-24 19:29:00,171 INFO gateway.run: response ready: platform=whatsapp "
+    f"chat={CHAT_A} time=7.7s api_calls=1 response=1 chars"
+)
+GATEWAY_LENTO = (
+    "2026-08-24 19:34:59,057 INFO gateway.run: response ready: platform=whatsapp "
+    f"chat={CHAT_A} time=15.3s api_calls=3 response=1 chars"
+)
+GATEWAY_OUTRA_PLATAFORMA = (
+    "2026-08-24 19:35:10,000 INFO gateway.run: response ready: platform=email "
+    "chat=alguem@example.com time=2.0s api_calls=1 response=1 chars"
+)
+
+
+class ParseGatewayLinesTest(unittest.TestCase):
+    """O gateway.log é a única fonte de latência do modelo e de `api_calls`.
+
+    Ele NÃO tem o prefixo do plugin, usa hora local (o log do plugin também, mas
+    `docker logs -t` é UTC) e o `chat=` vem sem aspas.
+    """
+
+    def test_le_latencia_e_chamadas_de_api(self):
+        (turno,) = parse_gateway_lines([GATEWAY_READY])
+
+        self.assertEqual(turno.chat_id, CHAT_A)
+        self.assertEqual(turno.seconds, 7.7)
+        self.assertEqual(turno.api_calls, 1)
+        self.assertEqual(turno.at.strftime("%H:%M:%S"), "19:29:00")
+
+    def test_ignora_plataforma_que_nao_e_whatsapp(self):
+        self.assertEqual(parse_gateway_lines([GATEWAY_OUTRA_PLATAFORMA]), [])
+
+    def test_ignora_o_resto_do_gateway_log(self):
+        ruido = "2026-08-24 19:29:00,171 INFO gateway.run: something else entirely"
+
+        self.assertEqual(parse_gateway_lines([ruido]), [])
+
+    def test_le_varias_linhas(self):
+        turnos = parse_gateway_lines([GATEWAY_READY, GATEWAY_LENTO])
+
+        self.assertEqual([t.seconds for t in turnos], [7.7, 15.3])
+        self.assertEqual([t.api_calls for t in turnos], [1, 3])
+
+
+class ReplyLatenciesTest(unittest.TestCase):
+    """Latência ponta a ponta: da mensagem do lead até a primeira bolha da AYA.
+
+    Diferente do `time=` do gateway, que mede só o modelo — esta inclui debounce
+    e a espera humanizada do `_human_send`, que é o que o lead sente.
+    """
+
+    def test_mede_do_lead_ate_a_primeira_bolha(self):
+        from datetime import timedelta
+
+        lead = _turn(0, False, "quanto custa?")
+        resposta = _turn(0, True, "te explico")
+        resposta.at = lead.at + timedelta(seconds=42)
+
+        (segundos,) = reply_latencies(group_replies([lead, resposta]))
+
+        self.assertEqual(segundos, 42.0)
+
+    def test_turno_sem_mensagem_do_lead_nao_tem_latencia(self):
+        # Follow-up parte da AYA: não há pergunta cujo tempo medir.
+        (resposta,) = group_replies([_turn(0, True, "passou por aqui?")])
+
+        self.assertEqual(reply_latencies([resposta]), [])

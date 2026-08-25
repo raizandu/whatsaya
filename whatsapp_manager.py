@@ -2738,6 +2738,9 @@ def _call_llm_api(url: str, headers: dict, payload: dict, extract_fn, timeout: i
         return None
 
 
+_GATEWAY_LOG_PATH = Path("/opt/data/.hermes/logs/gateway.log")
+
+
 def _audit_report_dir() -> Path:
     return Path(os.getenv("WHATSAPP_AUDIT_REPORT_DIR", "/opt/data/reports"))
 
@@ -2754,8 +2757,12 @@ def _run_daily_audit(day=None) -> str | None:
     dia = day or (datetime.now(da.BUSINESS_TZ).date())
     linhas = da.read_day_log_lines(_plugin_log_path(), dia)
     turnos = da.read_day_turns(_MSG_DB_PATH, dia)
+    # Latência do modelo e `api_calls` só existem no gateway.log, que é do core
+    # e tem formato próprio (hora local, sem o prefixo do plugin).
+    gateway = da.parse_gateway_lines(da.read_gateway_day_lines(_GATEWAY_LOG_PATH, dia))
     auditoria = da.build_day_audit(
-        dia, da.parse_log_lines(linhas), turnos, _infer_message_language
+        dia, da.parse_log_lines(linhas), turnos, _infer_message_language,
+        gateway_turns=gateway,
     )
     material = da.compile_material(auditoria, turnos)
 

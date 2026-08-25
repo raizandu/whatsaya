@@ -209,6 +209,26 @@ class RunDailyAuditTest(unittest.TestCase):
         self.assertEqual(Path(caminho).name, "audit-20260824.md")
         self.assertIn("Preço errado", Path(caminho).read_text(encoding="utf-8"))
 
+    def test_latencia_do_gateway_entra_no_relatorio(self):
+        from datetime import date
+
+        gateway = Path(self.tmp.name) / "gateway.log"
+        gateway.write_text(
+            "2026-08-24 19:29:00,171 INFO gateway.run: response ready: platform=whatsapp "
+            "chat=556299990000@s.whatsapp.net time=15.3s api_calls=2 response=1 chars\n",
+            encoding="utf-8",
+        )
+
+        with patch("whatsapp_manager._MSG_DB_PATH", self.db), \
+             patch("whatsapp_manager._GATEWAY_LOG_PATH", gateway), \
+             patch("whatsapp_manager._audit_llm_call", return_value="v"), \
+             patch("whatsapp_manager._human_send", return_value="mid"):
+            caminho = wm._run_daily_audit(date(2026, 8, 24))
+
+        texto = Path(caminho).read_text(encoding="utf-8")
+        self.assertIn("15.3", texto)
+        self.assertIn("api_calls no dia: 2", texto)
+
     def test_avisa_o_dono_no_self_chat(self):
         _, send = self._run()
 

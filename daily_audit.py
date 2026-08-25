@@ -270,6 +270,7 @@ class Reply:
     at: datetime
     bubbles: list[str] = field(default_factory=list)
     lead_message: str = ""
+    lead_at: datetime | None = None
     # Hora da última bolha, para saber onde o turno termina.
     bubbles_last_at: datetime | None = None
 
@@ -290,21 +291,23 @@ def group_replies(turns) -> list[Reply]:
     formato inventada, com o trecho apontando para a parte errada da conversa.
     """
     abertas: dict[str, Reply] = {}
-    ultima_do_lead: dict[str, str] = {}
+    ultima_do_lead: dict[str, tuple[str, datetime]] = {}
     respostas: list[Reply] = []
     for turn in sorted(turns, key=lambda t: t.at):
         if not turn.from_me:
             abertas.pop(turn.chat_id, None)
-            ultima_do_lead[turn.chat_id] = turn.body
+            ultima_do_lead[turn.chat_id] = (turn.body, turn.at)
             continue
         aberta = abertas.get(turn.chat_id)
         if aberta is not None and (turn.at - aberta.bubbles_last_at).total_seconds() > REPLY_GAP_S:
             aberta = None
         if aberta is None:
+            pergunta = ultima_do_lead.get(turn.chat_id)
             aberta = Reply(
                 chat_id=turn.chat_id,
                 at=turn.at,
-                lead_message=ultima_do_lead.get(turn.chat_id, ""),
+                lead_message=pergunta[0] if pergunta else "",
+                lead_at=pergunta[1] if pergunta else None,
             )
             aberta.bubbles_last_at = turn.at
             abertas[turn.chat_id] = aberta
@@ -559,9 +562,12 @@ class DayAudit:
     # placar da AYA, mas contam como sinal do dia.
     owner_manual: int = 0
     language_hints: list[AuditEvent] = field(default_factory=list)
+    lead_latencies: list[float] = field(default_factory=list)
+    model_seconds: list[float] = field(default_factory=list)
+    api_calls: int = 0
 
 
-def build_day_audit(day: date, events, turns, infer_language) -> DayAudit:
+def build_day_audit(day: date, events, turns, infer_language, *, gateway_turns=()) -> DayAudit:
     """Junta o que o log provou e o que a conversa mostra num retrato do dia."""
     placar = aggregate_events(events)
     # O dono digitando na conversa do lead também é `from_me=1` no banco; sem
@@ -586,6 +592,9 @@ def build_day_audit(day: date, events, turns, infer_language) -> DayAudit:
             if e.tag == "language-hint" and e.at is not None and e.chat_id
         ],
     )
+    dia.lead_latencies = reply_latencies(respostas)
+    dia.model_seconds = [t.seconds for t in gateway_turns]
+    dia.api_calls = sum(t.api_calls for t in gateway_turns)
     for resposta in respostas:
         if classify_reply(resposta) == "guarda":
             dia.replies_guard += 1
@@ -596,6 +605,16 @@ def build_day_audit(day: date, events, turns, infer_language) -> DayAudit:
         if achado:
             dia.language_mismatches.append(achado)
     return dia
+
+
+def _median(valores) -> float:
+    ordenados = sorted(valores)
+    meio = len(ordenados) // 2
+    if not ordenados:
+        return 0.0
+    if len(ordenados) % 2:
+        return ordenados[meio]
+    return (ordenados[meio - 1] + ordenados[meio]) / 2
 
 
 WINDOW = 3  # mensagens antes e depois do achado, como pedido no desenho
@@ -666,6 +685,19 @@ def compile_material(day: DayAudit, turns) -> str:
 
     if day.gate_evidence:
         linhas += ["", "## Evidência parseada do payment-gate", *day.gate_evidence]
+
+    if day.lead_latencies or day.model_seconds:
+        linhas += ["", "## Tempo de resposta"]
+        if day.lead_latencies:
+            linhas.append(
+                f"- lead esperou (s): mediana {_median(day.lead_latencies):.0f}, "
+                f"pior {max(day.lead_latencies):.0f}"
+            )
+        if day.model_seconds:
+            linhas.append(
+                f"- modelo (s): mediana {_median(day.model_seconds):.1f}, "
+                f"pior {max(day.model_seconds):.1f} · api_calls no dia: {day.api_calls}"
+            )
 
     idioma = language_hint_scoreboard(day)
     if idioma["dica_ignorada"] or idioma["sem_dica"]:
@@ -884,3 +916,67 @@ def language_hint_scoreboard(day: DayAudit) -> dict:
         elif tem_dica:
             placar["dica_funcionou"] += 1
     return placar
+
+
+# `gateway.log` é a única fonte de latência do modelo e de `api_calls`. Não tem o
+# prefixo `[whatsapp-manager]`, usa hora local e o `chat=` vem sem aspas.
+_GATEWAY_READY_RE = re.compile(
+    r"^(?P<at>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}),\d+\s+\w+\s+"
+    r"gateway\.run: response ready: platform=(?P<platform>\S+)\s+"
+    r"chat=(?P<chat>\S+)\s+time=(?P<time>[\d.]+)s\s+api_calls=(?P<calls>\d+)"
+)
+
+
+@dataclass
+class GatewayTurn:
+    chat_id: str
+    at: datetime
+    seconds: float
+    api_calls: int
+
+
+def parse_gateway_lines(lines) -> list[GatewayTurn]:
+    """Turnos do gateway com latência do modelo e número de chamadas de API."""
+    turnos: list[GatewayTurn] = []
+    for line in lines:
+        match = _GATEWAY_READY_RE.match(str(line or "").strip())
+        if not match or match.group("platform") != "whatsapp":
+            continue
+        try:
+            quando = datetime.fromisoformat(match.group("at")).replace(tzinfo=business_tz())
+        except ValueError:
+            continue
+        turnos.append(GatewayTurn(
+            chat_id=match.group("chat"),
+            at=quando,
+            seconds=float(match.group("time")),
+            api_calls=int(match.group("calls")),
+        ))
+    return turnos
+
+
+def read_gateway_day_lines(log_path, day: date) -> list[str]:
+    """Linhas do gateway.log do dia. Formato de data diferente do log do plugin."""
+    caminho = Path(log_path)
+    if not caminho.is_file():
+        return []
+    alvo = day.isoformat()
+    try:
+        conteudo = caminho.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    return [l for l in conteudo.splitlines() if l.startswith(alvo)]
+
+
+def reply_latencies(replies) -> list[float]:
+    """Segundos entre a pergunta do lead e a primeira bolha da resposta.
+
+    Diferente do `time=` do gateway, que mede só o modelo: esta inclui debounce e
+    a espera humanizada do `_human_send` — é o tempo que o lead sente. Turno sem
+    pergunta antes (follow-up) não entra: não há o que medir.
+    """
+    return [
+        (r.at - r.lead_at).total_seconds()
+        for r in replies
+        if r.lead_at is not None and r.at >= r.lead_at
+    ]
