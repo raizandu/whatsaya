@@ -1,0 +1,227 @@
+"""Wiring do auditor diário dentro do plugin.
+
+Fica separado de `plugin_test.py` porque só cobre o encanamento do auditor:
+o log em arquivo que o cron consegue ler de dentro do container, a resolução do
+modelo auditor e o agendamento.
+"""
+from __future__ import annotations
+
+import logging
+import os
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+sys.path.append(str(Path(__file__).parent.parent))
+
+import whatsapp_manager as wm
+
+
+class PluginFileLogTest(unittest.TestCase):
+    """O plugin loga só em stdout do container, e `docker logs` não existe de
+    dentro do container — que é justamente de onde o cron do auditor roda.
+    Sem um arquivo, o coletor não tem o que ler."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="whatsaya-log-test-")
+        self.path = Path(self.tmp.name) / "whatsapp_plugin.log"
+
+    def tearDown(self):
+        for handler in list(wm.logger.handlers):
+            if isinstance(handler, logging.FileHandler):
+                handler.close()
+                wm.logger.removeHandler(handler)
+        self.tmp.cleanup()
+
+    def test_linha_do_plugin_fica_legivel_em_arquivo(self):
+        wm._attach_plugin_file_log(self.path)
+
+        wm.logger.warning("[payment-gate] resposta comercial substituída reason=teste")
+
+        conteudo = self.path.read_text(encoding="utf-8")
+        self.assertIn("[payment-gate] resposta comercial substituída reason=teste", conteudo)
+
+    def test_o_arquivo_carrega_a_hora_para_o_recorte_por_dia(self):
+        wm._attach_plugin_file_log(self.path)
+
+        wm.logger.info("[human-send] chat='x@s.whatsapp.net' bubbles=1 sizes=[9]")
+
+        primeira = self.path.read_text(encoding="utf-8").splitlines()[0]
+        self.assertRegex(primeira, r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
+
+    def test_chamar_duas_vezes_nao_duplica_a_linha(self):
+        wm._attach_plugin_file_log(self.path)
+        wm._attach_plugin_file_log(self.path)
+
+        wm.logger.warning("[handoff] dono avisado sobre 'x@s.whatsapp.net' motivo='y' message_id='z'")
+
+        linhas = [l for l in self.path.read_text(encoding="utf-8").splitlines() if "[handoff]" in l]
+        self.assertEqual(len(linhas), 1)
+
+    def test_caminho_impossivel_nao_derruba_o_plugin(self):
+        # Fail-open: perder o log do auditor é aceitável; derrubar o atendimento não.
+        wm._attach_plugin_file_log(Path("/nao/existe/de/jeito/nenhum/x.log"))
+
+        wm.logger.info("[contact-reply] segue funcionando")
+
+
+class AuditModelResolutionTest(unittest.TestCase):
+    """Decisão de segurança fixada no handoff: o auditor roda em provider limpo.
+
+    O `WHATSAPP_CLIENT_MODEL` roda no backend da conta ChatGPT do dono e em 24/08
+    reproduziu credencial e preço que NÃO estavam no prompt (memória do lado do
+    provider). Reusar aquele provider aqui faria o auditor aprender da
+    contaminação que ele existe para detectar."""
+
+    def test_o_auditor_tem_env_propria(self):
+        with patch.dict(os.environ, {"WHATSAPP_AUDIT_MODEL": "gpt-5.6-sol"}):
+            self.assertEqual(wm.config.whatsapp_audit_model, "gpt-5.6-sol")
+
+    def test_o_auditor_nunca_herda_o_modelo_do_cliente(self):
+        with patch.dict(os.environ, {"WHATSAPP_CLIENT_MODEL": "gpt-5.6-luna"}, clear=False):
+            os.environ.pop("WHATSAPP_AUDIT_MODEL", None)
+            self.assertNotEqual(wm.config.whatsapp_audit_model, "gpt-5.6-luna")
+
+    def test_provider_padrao_do_auditor_e_openrouter(self):
+        os.environ.pop("WHATSAPP_AUDIT_PROVIDER", None)
+        self.assertEqual(wm.config.whatsapp_audit_provider, "openrouter")
+
+    def test_sem_chave_do_provider_limpo_o_auditor_nao_chama_ninguem(self):
+        # Cair no ladder Google→OpenAI→OpenRouter levaria a chamada para a conta
+        # contaminada. Sem chave do provider escolhido, não há chamada.
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": ""}), \
+             patch("whatsapp_manager._call_llm_api") as mock_call:
+            resultado = wm._audit_llm_call("material do dia")
+
+        self.assertIsNone(resultado)
+        mock_call.assert_not_called()
+
+    def test_chama_o_openrouter_com_o_modelo_do_auditor(self):
+        with patch.dict(os.environ, {
+            "OPENROUTER_API_KEY": "sk-teste",
+            "WHATSAPP_AUDIT_MODEL": "gpt-5.6-sol",
+        }), patch("whatsapp_manager._call_llm_api", return_value="veredito") as mock_call:
+            resultado = wm._audit_llm_call("material do dia")
+
+        self.assertEqual(resultado, "veredito")
+        url = mock_call.call_args.args[0]
+        payload = mock_call.call_args.args[2]
+        self.assertIn("openrouter.ai", url)
+        self.assertEqual(payload["model"], "gpt-5.6-sol")
+        self.assertIn("material do dia", str(payload["messages"]))
+
+
+class RunDailyAuditTest(unittest.TestCase):
+    """Ponta a ponta do auditor, sem rede: log em arquivo + banco → relatório."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="whatsaya-audit-run-")
+        raiz = Path(self.tmp.name)
+        self.log = raiz / "whatsapp_plugin.log"
+        self.reports = raiz / "reports"
+        self.db = raiz / "whatsapp_messages.db"
+        self.log.write_text(
+            "2026-08-24T19:42:11 [whatsapp-manager] [payment-gate] resposta comercial "
+            "substituída chat='556299990000@s.whatsapp.net' reason=unofficial_details "
+            "market='BR' intent=True digits=['official:BR:pix cnpj'] unofficial=['unknown_digits']\n",
+            encoding="utf-8",
+        )
+        self._seed_db()
+        self.env = patch.dict(os.environ, {
+            "WHATSAPP_PLUGIN_LOG": str(self.log),
+            "WHATSAPP_AUDIT_REPORT_DIR": str(self.reports),
+            "WHATSAPP_OWNER_NUMBER": "5511999999999",
+        })
+        self.env.start()
+
+    def tearDown(self):
+        self.env.stop()
+        self.tmp.cleanup()
+
+    def _seed_db(self):
+        import sqlite3
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        conn = sqlite3.connect(self.db)
+        conn.executescript(
+            "CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT NOT NULL,"
+            " sender_id TEXT, sender_name TEXT, message_id TEXT NOT NULL, message_type TEXT,"
+            " body TEXT, timestamp REAL, from_me INTEGER NOT NULL DEFAULT 0,"
+            " is_historical INTEGER NOT NULL DEFAULT 0, has_media INTEGER NOT NULL DEFAULT 0,"
+            " media_type TEXT, sync_type TEXT, inserted_at REAL NOT NULL DEFAULT 0);"
+        )
+        tz = ZoneInfo("America/Sao_Paulo")
+        base = datetime(2026, 8, 24, 19, 40, tzinfo=tz).timestamp()
+        for i, (corpo, from_me) in enumerate([
+            ("quero contratar, como pago?", 0),
+            ("Perfeito — seguem os dados oficiais para o pagamento:", 1),
+        ]):
+            conn.execute(
+                "INSERT INTO messages (chat_id, message_id, body, timestamp, from_me)"
+                " VALUES (?,?,?,?,?)",
+                ("556299990000@s.whatsapp.net", f"m{i}", corpo, base + i * 60, from_me),
+            )
+        conn.commit()
+        conn.close()
+
+    def _run(self, veredito="1. Preço errado. Tipo: CODIGO."):
+        from datetime import date
+
+        with patch("whatsapp_manager._MSG_DB_PATH", self.db), \
+             patch("whatsapp_manager._audit_llm_call", return_value=veredito), \
+             patch("whatsapp_manager._human_send", return_value="mid") as send:
+            caminho = wm._run_daily_audit(date(2026, 8, 24))
+        return caminho, send
+
+    def test_grava_o_relatorio_do_dia_em_disco(self):
+        caminho, _ = self._run()
+
+        self.assertTrue(Path(caminho).is_file())
+        self.assertEqual(Path(caminho).name, "audit-20260824.md")
+        self.assertIn("Preço errado", Path(caminho).read_text(encoding="utf-8"))
+
+    def test_avisa_o_dono_no_self_chat(self):
+        _, send = self._run()
+
+        destino = send.call_args.args[0]
+        self.assertEqual(destino, "5511999999999@s.whatsapp.net")
+        self.assertIn("Auditoria do dia", send.call_args.args[1])
+
+    def test_o_placar_do_codigo_chega_ao_dono(self):
+        _, send = self._run()
+
+        self.assertIn("guarda salvou", send.call_args.args[1])
+
+    def test_credencial_do_log_nao_vaza_no_aviso_ao_dono(self):
+        _, send = self._run()
+
+        self.assertNotIn("556299990000", send.call_args.args[1])
+
+    def test_sem_veredito_do_modelo_o_relatorio_ainda_sai(self):
+        caminho, send = self._run(veredito=None)
+
+        self.assertTrue(Path(caminho).is_file())
+        self.assertIn("guarda salvou", send.call_args.args[1])
+
+    def test_o_disparo_de_guarda_do_log_chega_ao_relatorio(self):
+        # Sem isto o auditor passava sem ler o log e ninguém notava: o relatório
+        # saía "sem disparo de guarda" num dia em que a guarda disparou.
+        caminho, _ = self._run()
+
+        texto = Path(caminho).read_text(encoding="utf-8")
+        self.assertIn("payment-gate:unofficial_details", texto)
+        self.assertIn("official:BR:pix cnpj", texto)
+
+    def test_sem_dono_configurado_grava_mas_nao_envia(self):
+        with patch.dict(os.environ, {"WHATSAPP_OWNER_NUMBER": ""}):
+            caminho, send = self._run()
+
+        self.assertTrue(Path(caminho).is_file())
+        send.assert_not_called()
+
+
+if __name__ == "__main__":
+    unittest.main()

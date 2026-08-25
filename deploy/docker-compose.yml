@@ -99,6 +99,10 @@
 #                                 para cá devolve 404 e a mensagem chega ao agente como
 #                                 "[audio received]" cru.
 #   WHATSAPP_CONTACT_CLASSIFIER_MODEL  Classificar novos contatos
+#   WHATSAPP_AUDIT_ENABLED    Auditoria diária do atendimento (padrão: false)
+#   WHATSAPP_AUDIT_MODEL      Modelo do auditor — env própria, nunca o do cliente
+#   WHATSAPP_AUDIT_PROVIDER   openrouter | openai (padrão: openrouter, provider limpo)
+#   WHATSAPP_AUDIT_HOUR       Hora local do relatório (padrão: 20)
 #
 # 💳 VENDA DIRETA
 #   WHATSAPP_PIX_KEY       Chave Pix usada quando o item do catálogo não define a sua.
@@ -568,6 +572,23 @@ services:
       - WHATSAPP_CLIENT_REASONING_EFFORT=${WHATSAPP_CLIENT_REASONING_EFFORT:-medium}
       - WHATSAPP_CLIENT_MEDIA_MODEL=${WHATSAPP_CLIENT_MEDIA_MODEL:-google/gemini-3.1-flash-lite}
       - WHATSAPP_CONTACT_CLASSIFIER_MODEL=${WHATSAPP_CONTACT_CLASSIFIER_MODEL:-deepseek/deepseek-v4-flash}
+
+      # Auditoria diária do atendimento (deploy/scripts/tick_whatsapp_audit.py).
+      # Desligada por padrão: ligar significa mandar um resumo do dia ao dono e
+      # (se houver chave) enviar material do dia a um provider externo.
+      #
+      # O modelo do auditor tem env PRÓPRIA e NUNCA reusa WHATSAPP_CLIENT_*: o
+      # provider do cliente roda no backend da conta ChatGPT do dono e já
+      # reproduziu credencial e preço que não estavam no prompt (memória do lado
+      # do provider). Auditor naquela conta aprenderia da contaminação que ele
+      # existe para detectar. Sem a chave do provider escolhido não há chamada —
+      # o relatório sai só com o placar determinístico, que é o que importa.
+      - WHATSAPP_AUDIT_ENABLED=${WHATSAPP_AUDIT_ENABLED:-false}
+      - WHATSAPP_AUDIT_MODEL=${WHATSAPP_AUDIT_MODEL:-deepseek/deepseek-v4-flash}
+      - WHATSAPP_AUDIT_PROVIDER=${WHATSAPP_AUDIT_PROVIDER:-openrouter}
+      - WHATSAPP_AUDIT_HOUR=${WHATSAPP_AUDIT_HOUR:-20}
+      - WHATSAPP_AUDIT_REPORT_DIR=${WHATSAPP_AUDIT_REPORT_DIR:-/opt/data/reports}
+      - WHATSAPP_PLUGIN_LOG=${WHATSAPP_PLUGIN_LOG:-/opt/data/.hermes/logs/whatsapp_plugin.log}
 
       # Chave Pix do dono, usada quando o item do catálogo não define a sua.
       # Sem default de propósito: uma chave errada aqui manda o pagamento do cliente

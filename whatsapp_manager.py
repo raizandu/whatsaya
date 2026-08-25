@@ -11586,15 +11586,9 @@ def _payment_gate_fallback(
             if bloco:
                 return bloco
     if reason == "market_unknown":
-        return {
-            "es": "¿En qué país opera tu empresa?",
-            "en": "Which country does your company operate in?",
-        }.get(language, "Em qual país sua empresa atua?")
+        return _PAYMENT_GATE_ASK_MARKET.get(language) or _PAYMENT_GATE_ASK_MARKET["pt"]
     if reason == "intent_missing":
-        return {
-            "es": "Puedo enviarte los datos de pago cuando quieras avanzar con la contratación.",
-            "en": "I can send the payment details when you're ready to move forward.",
-        }.get(language, "Posso enviar os dados de pagamento quando você quiser avançar com a contratação.")
+        return _PAYMENT_GATE_INTENT_MISSING.get(language) or _PAYMENT_GATE_INTENT_MISSING["pt"]
     if reason in ("market_mismatch", "wrong_price"):
         # Antes esta frase era institucional ("vou usar somente os dados de pagamento
         # oficiais…") e chegava ao lead como resposta inteira, falando de pagamento sem

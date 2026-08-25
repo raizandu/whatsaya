@@ -61,6 +61,42 @@ Duas coisas que a IA **não** consegue fazer por conta própria, e que o plugin 
 - **Handoff.** A persona termina a resposta com `[[HANDOFF: motivo]]`. `transform_llm_output` tira o marcador antes de a mensagem sair, e `_notify_owner_handoff` manda para o self-chat do dono um card com nome, número, motivo e as últimas 8 mensagens. Há cooldown de 15 min por chat, e o cooldown é revertido se o envio falhar — melhor repetir o aviso do que engolir. Só depois de escrever o marcador a IA pode dizer que avisou; sem ele, "já encaminhei" é alucinação e o prompt proíbe.
 - **Watchdog de recepção.** Toda mensagem de lead que chega ao fim de `pre_gateway_dispatch` entra em `_pending_inbound`; a entrega confirmada em `_deliver_contact_reply` remove. O que passar de `WHATSAPP_UNANSWERED_ALERT_S` (padrão 180s) vira `logger.error` e aviso ao dono. Existe porque no QA de 21/08 uma mensagem morreu em silêncio: o Codex estourou a cota (`429`) e o fallback OpenRouter estava sem crédito.
 
+### Auditoria diária (`daily_audit.py` + `deploy/scripts/tick_whatsapp_audit.py`)
+
+Módulo **puro**, no mesmo molde de `commercial_followups.py`: não envia mensagem, não
+chama LLM e não importa o plugin. Lê linhas de log e linhas de banco, agrega o dia e
+devolve texto. Quem agenda, chama o modelo e entrega ao dono é o `whatsapp_manager`.
+
+Três coisas contraintuitivas:
+
+- **A fonte do log é um arquivo, não `docker logs`.** O plugin escrevia só no stdout do
+  container, e o cron do auditor roda *dentro* dele, onde `docker` não existe. Por isso
+  `_attach_plugin_file_log()` espelha o logger em `logs/whatsapp_plugin.log` (rotativo).
+  Isso também tira a retenção do log das mãos do daemon do Docker.
+- **O placar "guarda salvou × modelo acertou" é calculado por código, nunca pelo modelo.**
+  É a distinção que o relatório existe para mostrar: um dia em que a guarda determinística
+  segurou cada turno não é um dia bom, e um auditor livre para resumir diria que foi.
+  `classify_reply` marca o turno pela presença de uma frase conhecida da guarda —
+  `FallbackCatalogDriftTest` é o que impede o catálogo de divergir das constantes do
+  plugin em silêncio.
+- **Nada de valor de credencial sai da máquina.** `redact()` corta documento, telefone,
+  e-mail e chave, e preserva preço (que é a evidência do achado); `mask_chat()` deixa só
+  os 4 últimos dígitos. A prova de que a credencial reproduzida era a real vai pela
+  classificação do log (`digits=official:…` × `unknown:…`), não pelo valor.
+
+O parser do log lê as gerações antigas do `[payment-gate]` (`methods=` antes de
+`markets=`/`prices=`) de propósito: no dia de um deploy as duas convivem no mesmo arquivo.
+
+Agendamento é o cron do próprio Hermes, como no follow-up:
+
+```bash
+hermes cron create "0 20 * * *" --name wa-auditoria-diaria \
+  --script /opt/data/.hermes/scripts/tick_whatsapp_audit.py --no-agent
+```
+
+`register()` copia o tick para `/opt/data/.hermes/scripts/` no boot. Rodar
+`tick_whatsapp_audit.py 2026-08-24` reprocessa um dia específico.
+
 ### Dois perfis de isolamento
 
 - **`default`** — dono, no SelfChat. Persona `SOUL.md`, histórico completo, todas as ferramentas.
@@ -118,6 +154,7 @@ Tudo o que muda por cliente é **variável de ambiente** + os templates em `depl
 | `WHATSAPP_PIX_KEY` | Chave Pix quando o item do catálogo não define a sua. **Sem default de propósito** — errar aqui manda o pagamento do cliente para a conta errada |
 | `OPENROUTER_API_KEY` | Provider padrão. Deixe `GOOGLE_API_KEY` e `OPENAI_API_KEY` **vazias**: a cadeia é Google → OpenAI → OpenRouter e para na primeira chave preenchida |
 | `WHATSAPP_*_MODEL` / `*_PROVIDER` | Slugs do OpenRouter (`vendor/modelo`). Texto usa `deepseek/deepseek-v4-flash`; `WHATSAPP_CLIENT_MEDIA_MODEL` é **só imagem** e precisa aceitar imagem (o DeepSeek é só texto). **Áudio não é modelo de LLM**: transcrição é do Fish ASR (`FISH_API_KEY`). Nenhum slug de texto/visão do OpenRouter aceita entrada de áudio — apontar áudio para lá devolve `404 No endpoints found that support input audio` e a mensagem chega ao agente como `[audio received]` cru |
+| `WHATSAPP_AUDIT_*` | Auditoria diária do atendimento. `WHATSAPP_AUDIT_ENABLED` vem **desligada**; ligar manda o resumo do dia ao dono e envia o material a um provider externo. `WHATSAPP_AUDIT_MODEL`/`_PROVIDER` são **env próprias e nunca herdam `WHATSAPP_CLIENT_*`** — o provider do cliente roda no backend da conta ChatGPT do dono e já reproduziu credencial e preço que não estavam no prompt; auditor ali aprenderia da contaminação que existe para detectar. Sem a chave do provider escolhido não há chamada, e o relatório sai só com o placar determinístico |
 | `CONFIG_REPO` + `CONFIG_GITHUB_TOKEN` | **Vazios por padrão.** Opt-in para versionar contatos e personas num repo privado. Preencher só um dos dois faz o dono receber "não consegui sincronizar" no WhatsApp a cada contato e venda — preencha os dois ou nenhum. Sem `user/repo`, o dono cai em `config.github_user` (`HERMES_SETUP_GITHUB_USER` → `DEV_GITHUB_USER` → `raizandu`). Para backup sem GitHub: `deploy/backup-whatsaya.sh` |
 | `HERMES_SETUP_GITHUB_USER` / `HERMES_SETUP_GITHUB_REPO` | De onde o plugin se clona e se atualiza. Padrão: `raizandu` / `whatsaya` |
 | `KEEP_LOCAL_PLUGIN` | `true` — o boot e o `_self_update_plugin_code` não fazem fetch/reset no volume |
