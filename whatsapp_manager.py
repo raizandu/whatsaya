@@ -2757,7 +2757,10 @@ _PENDING_AUDIT_TTL_S: int = 900  # 15 minutos
 # as duas envs não há chamada, e o corpo do ticket continua saindo no relatório
 # para copiar à mão. Escrita em serviço externo não acontece por acidente.
 _NOTION_API = "https://api.notion.com/v1/pages"
-_NOTION_VERSION = "2022-06-28"
+# Configurável porque a base do cliente pode ter múltiplas data sources, e aí a
+# versão antiga recusa com 400 antes mesmo de olhar permissão.
+def _notion_version() -> str:
+    return os.getenv("NOTION_VERSION", "2022-06-28").strip() or "2022-06-28"
 
 
 def _notion_post(url: str, payload: dict, key: str) -> dict | None:
@@ -2766,7 +2769,7 @@ def _notion_post(url: str, payload: dict, key: str) -> dict | None:
         headers={
             "Content-Type": "application/json",
             "Authorization": f"Bearer {key}",
-            "Notion-Version": _NOTION_VERSION,
+            "Notion-Version": _notion_version(),
         },
     )
     with urllib.request.urlopen(req, timeout=20) as resp:
@@ -2782,7 +2785,7 @@ def _create_notion_ticket(proposal, day) -> str | None:
     if not key or not base:
         logger.info("[daily-audit] Notion sem chave/base — ticket só no relatório")
         return None
-    payload = da.notion_ticket_payload(proposal, day, base)
+    payload = da.notion_ticket_payload(proposal, day, base, api_version=_notion_version())
     if not payload:
         return None
     try:

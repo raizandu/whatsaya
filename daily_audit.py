@@ -1208,7 +1208,16 @@ def _notion_blocks(corpo: str) -> list[dict]:
     return blocos
 
 
-def notion_ticket_payload(proposal, day: date, database_id: str) -> dict | None:
+# A partir desta versão o Notion suporta base com múltiplas data sources, e o
+# pai da página passa a ser `data_source_id`. Numa base assim, a API antiga
+# devolve 400 validation_error — que NÃO é 404 e por isso não se confunde com
+# "não compartilhada".
+NOTION_DATA_SOURCE_VERSION = "2025-09-03"
+
+
+def notion_ticket_payload(
+    proposal, day: date, database_id: str, *, api_version: str = "2022-06-28"
+) -> dict | None:
     """Corpo pronto para `POST /v1/pages` na base de tickets.
 
     Puro de propósito: montar o payload é o que erra na prática (opção de select
@@ -1225,8 +1234,14 @@ def notion_ticket_payload(proposal, day: date, database_id: str) -> dict | None:
     descricao = redact(
         f"Auditoria de {day.isoformat()}: {proposal.proposal or proposal.title}"
     )[:_NOTION_TEXT_CAP]
+    alvo = str(database_id).strip()
+    pai = (
+        {"data_source_id": alvo}
+        if str(api_version) >= NOTION_DATA_SOURCE_VERSION
+        else {"database_id": alvo}
+    )
     return {
-        "parent": {"database_id": str(database_id).strip()},
+        "parent": pai,
         "properties": {
             "Ticket": {"title": [{"type": "text", "text": {"content": titulo[:_NOTION_TEXT_CAP]}}]},
             "Descrição": {"rich_text": _rich_text(descricao)},

@@ -608,6 +608,11 @@ services:
       # página do banco), senão a API devolve 404 mesmo com a chave certa.
       - NOTION_API_KEY=${NOTION_API_KEY:-}
       - NOTION_TICKETS_DB=${NOTION_TICKETS_DB:-}
+      # Base com MÚLTIPLAS data sources exige 2025-09-03 ou mais novo, e aí o pai
+      # da página é `data_source_id` em vez de `database_id`. Na versão antiga a
+      # API recusa com 400 validation_error — que não é 404 e, portanto, não é
+      # problema de compartilhamento.
+      - NOTION_VERSION=${NOTION_VERSION:-2022-06-28}
 
       # Chave Pix do dono, usada quando o item do catálogo não define a sua.
       # Sem default de propósito: uma chave errada aqui manda o pagamento do cliente

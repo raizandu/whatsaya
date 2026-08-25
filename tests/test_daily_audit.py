@@ -1588,6 +1588,22 @@ class NotionTicketPayloadTest(unittest.TestCase):
 
         self.assertEqual(payload["parent"], {"database_id": "db-123"})
 
+    def test_versao_nova_da_api_usa_data_source_id(self):
+        # A partir de 2025-09-03 o Notion tem base com múltiplas data sources, e
+        # `database_id` deixa de bastar: a própria API responde
+        # "Databases with multiple data sources are not supported in this API
+        # version" — 400, não 404, e por isso não se confunde com permissão.
+        payload = notion_ticket_payload(
+            self._codigo(), date(2026, 8, 24), "ds-9", api_version="2025-09-03")
+
+        self.assertEqual(payload["parent"], {"data_source_id": "ds-9"})
+
+    def test_versao_antiga_continua_com_database_id(self):
+        payload = notion_ticket_payload(
+            self._codigo(), date(2026, 8, 24), "db-1", api_version="2022-06-28")
+
+        self.assertEqual(payload["parent"], {"database_id": "db-1"})
+
     def test_titulo_vai_na_propriedade_title(self):
         payload = notion_ticket_payload(self._codigo(), date(2026, 8, 24), "db")
 
