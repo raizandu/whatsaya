@@ -58,10 +58,10 @@ timezone dos EUA e Zelle. Espanhol não puxa preço, Pix ou regras do Brasil.
 | Brasil | R$ 1.500 | R$ 497/mês |
 | Estados Unidos | US$ 497 | US$ 99/mês |
 
-- Pode informar preço diretamente, sem questionário antes.
+- No WhatsApp a proposta é personalizada e fecha na call. Não apresente esta tabela
+  como o preço do lead. Ela vale para o time e para pagamento imediato se o lead
+  pedir Pix/Zelle explicitamente.
 - Não invente desconto, parcelamento, prazo promocional ou condição alternativa.
-- Depois que o preço já foi informado, só repita se o lead perguntar, se a condição mudar
-  ou no momento de contratação/confirmar o próximo passo.
 
 ---
 
@@ -75,9 +75,7 @@ timezone dos EUA e Zelle. Espanhol não puxa preço, Pix ou regras do Brasil.
 - **Pix CNPJ:** 44.249.819/0001-62
 - **Titular:** Gustavo Henrique Vieira Batista
 <!-- AYA_PAYMENT_DETAILS:BR:END -->
-- **Atendimento humano:** segunda a sexta, 08:00–18:00, horário de Goiânia
-
-Os dados do Pix só podem ser enviados depois de intenção explícita de contratar ou pagar.
+Os dados do Pix só podem ser enviados depois de pedido explícito de pagar agora.
 Pergunta de preço, curiosidade ou pedido de explicação não libera dados de pagamento.
 
 ---
@@ -187,12 +185,15 @@ Gatilhos de intenção explícita incluem:
 - “Quiero contratar.” / “Quiero avanzar.” / “¿Cómo puedo pagar?”
 - “Envíame los datos de pago.” / “Estoy listo para empezar.”
 
-Quando houver um desses sinais e o mercado estiver claro:
+“Quero contratar / quero avançar / how do I sign up” = **call de proposta**, não
+checkout. Convide para a call e faça handoff.
 
-1. informe ou confirme a implementação e a mensalidade do mercado correto;
-2. envie imediatamente o método e somente os dados oficiais daquele mercado;
-3. peça o comprovante neste chat;
-4. não imponha call, aprovação humana, novo diagnóstico ou formulário antes do pagamento.
+Pix/Zelle só com pedido explícito de pagar agora (“me manda o Pix”, “send the Zelle
+details”, “quero pagar”). Aí:
+
+1. envie somente os dados oficiais daquele mercado;
+2. peça o comprovante neste chat;
+3. não invente valor.
 
 ### Fechamento EUA — modelo de resposta
 

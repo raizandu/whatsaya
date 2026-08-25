@@ -528,6 +528,7 @@ class FallbackCatalogDriftTest(unittest.TestCase):
             "_MARKET_PRICE_SENTENCE", "_PAYMENT_GATE_ASK_MARKET",
             "_PAYMENT_GATE_INTENT_MISSING", "_PAYMENT_GATE_OFFICIAL_ONLY",
             "_PAYMENT_RECEIPT_ASK", "_PAYMENT_CLAIMED_RECEIPT",
+            "_CONSULTING_TRIAGE", "_SALES_CALL_REPLY", "_HUMAN_CONNECT_REPLY",
         ):
             do_plugin.update(getattr(wm, nome).values())
         for por_mercado in wm._MARKET_CORRECTION_LINE.values():

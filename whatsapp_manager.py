@@ -8168,6 +8168,32 @@ def _lead_claims_payment(text: str) -> bool:
     return any(re.search(pattern, normalized) for pattern in claim_patterns)
 
 
+def _wants_payment_details(text: str) -> bool:
+    """Pedido explícito de Pix/Zelle/pagar agora — único caminho de checkout neste chat."""
+    if not _has_explicit_purchase_intent(text):
+        return False
+    normalized = " ".join(_normalize_text(str(text or "")).split())
+    return bool(re.search(
+        r"\b(?:pix|zelle|pagar|pago|pagamento|chave|payment|pay)\b",
+        normalized,
+    ))
+
+
+def _wants_sales_call(text: str) -> bool:
+    """'Quero avançar/contratar' e pedido de humano descem para call, não para Pix."""
+    if _wants_payment_details(text) or _lead_claims_payment(text):
+        return False
+    if _lead_requests_human(text):
+        return True
+    normalized = " ".join(_normalize_text(str(text or "")).split())
+    return bool(re.search(
+        r"\b(?:quero\s+(?:avancar|contratar|fechar)|como\s+(?:eu\s+)?(?:faco|fazer|posso)"
+        r".{0,25}contratar|vamos\s+fechar|agendar|call|reuniao|"
+        r"sign\s+up|move\s+forward|get\s+started|book\s+a\s+(?:call|meeting))\b",
+        normalized,
+    ))
+
+
 def _gate_payment_details_for_prompt(
     rules_content: str,
     *,
@@ -8665,17 +8691,17 @@ def _build_support_prompt(
             "CONSTRAINTS ABSOLUTAS — NUNCA VIOLE:\n"
             "- Você é a IA comercial (identidade definida na persona acima). NÃO se apresente como "
             "'assistente virtual' ou 'atendente' do dono.\n"
-            "- Pode informar o preço oficial, conduzir contratação direta pelo método cadastrado para "
-            "o mercado do lead quando houver intenção clara, e oferecer uma conversa curta com a equipe.\n"
-            "- PREÇO E MOEDA: só o valor da base acima, na moeda do lugar da empresa — nunca do "
-            "idioma, DDD, nacionalidade ou histórico. Sem lugar, NÃO cite preço. A AYA atende no "
-            "Brasil e nos EUA; fale no singular, como a operação do lead. Se precisar do lugar "
-            "para passar valor, pergunte de onde eles atendem e deixe claro que é para falar na "
-            "moeda certa — nunca que a região deixa o serviço mais caro, nunca Brasil vs EUA, "
-            "nunca 'em qual país sua empresa atua?'.\n"
+            "- PAPEL: você é SDR/consultoria de triagem. No máximo DUAS perguntas na conversa. "
+            "O desfecho padrão é uma call de proposta personalizada, não um preço de tabela. "
+            "A AYA atua no Brasil e nos EUA, em português, inglês e espanhol. O ticket fecha "
+            "pelo tamanho do caso — um cliente complexo no preço de entrada fica errado. "
+            "Não apresente R$ 1.500 / US$ 497 como a proposta. Diga que pode dar um norte "
+            "rápido com base na operação e que o ideal é uma call para a proposta de fato.\n"
+            "- PREÇO NESTE CHAT: se perguntarem quanto custa, NÃO jogue a tabela. Convide à "
+            "call. Não pergunte o lugar como se isso fosse mudar o valor. Extraia volume e "
+            "de onde no fio de no máximo duas perguntas. Pix/Zelle só se pedirem pagar agora.\n"
             "- LUGAR DO LEAD: quando ele disser a cidade, receba com naturalidade (maravilha) e "
-            "siga na operação dele. Não diga que a sede é Goiânia nem que 'nós também somos daqui' "
-            "só porque o lead falou Goiânia.\n"
+            "siga na operação dele. Não diga que a sede é Goiânia.\n"
             "- HORÁRIO HUMANO: não informe expediente, 08h–18h, fuso nem horário de Goiânia, a "
             "menos que o lead pergunte. No WhatsApp a AYA atende o tempo todo.\n"
             "- UM SÓ LUGAR: depois de saber de onde o lead atende, use só oferta, moeda e "
@@ -11018,7 +11044,7 @@ def pre_llm_call(*args, **kwargs):
 
     payment_market_id = _canonical_commercial_market(contact_info)
     allow_payment_details = bool(
-        payment_market_id and _has_explicit_purchase_intent(str(user_msg_now))
+        payment_market_id and _wants_payment_details(str(user_msg_now))
     )
     # Estado e idioma são variáveis por turno: entram no final do contexto, depois
     # do prefixo estável (persona + regras recortadas). Dado vivo (agenda, etc.)
@@ -11980,7 +12006,9 @@ def _should_answer_official_price(
     response_text: str = "",
 ) -> bool:
     """Mercado conhecido (ou recém-respondido) e o lead ainda espera o preço."""
-    if _lead_claims_payment(user_message) or _has_explicit_purchase_intent(user_message):
+    if _lead_claims_payment(user_message) or _wants_payment_details(user_message):
+        return False
+    if _asks_about_price(user_message) or _wants_sales_call(user_message):
         return False
     market = (
         _canonical_commercial_market(contact_info)
@@ -12179,6 +12207,57 @@ _LOCATION_ACK = {
     "pt": "Maravilha.",
     "en": "Great.",
     "es": "Perfecto.",
+}
+_CONSULTING_TRIAGE = {
+    "pt": (
+        "A proposta é personalizada pelo tamanho da operação — a AYA atende no Brasil "
+        "e nos EUA, em português, inglês e espanhol. Me fala em uma frase como vocês "
+        "atendem hoje (volume e de onde) que eu te digo se faz sentido a gente agendar "
+        "uma call pra fechar a proposta."
+    ),
+    "en": (
+        "The proposal is tailored to the size of the operation — AYA runs in Brazil "
+        "and the US, in English, Portuguese and Spanish. Tell me in one line how you "
+        "handle inbound today (volume and where you're based) and I'll say if a short "
+        "call to shape the proposal makes sense."
+    ),
+    "es": (
+        "La propuesta se arma según el tamaño de la operación — la AYA atiende en "
+        "Brasil y EE.UU., en español, portugués e inglés. Cuéntame en una frase cómo "
+        "atienden hoy (volumen y de dónde) y te digo si vale agendar una call para "
+        "cerrar la propuesta."
+    ),
+}
+_SALES_CALL_REPLY = {
+    "pt": (
+        "Perfeito. A proposta fecha numa call curta, personalizada pelo tamanho da "
+        "operação. Me fala um período que o time te encaixa.\n\n"
+        "[[HANDOFF: lead quer avançar — proposta na call]]"
+    ),
+    "en": (
+        "Perfect. We close the proposal on a short call, sized to the operation. "
+        "Tell me a time window and the team will take it from there.\n\n"
+        "[[HANDOFF: lead wants to move forward — proposal on a call]]"
+    ),
+    "es": (
+        "Perfecto. La propuesta se cierra en una call corta, según el tamaño de la "
+        "operación. Dime un horario y el equipo te encaja.\n\n"
+        "[[HANDOFF: lead quiere avanzar — propuesta en call]]"
+    ),
+}
+_HUMAN_CONNECT_REPLY = {
+    "pt": (
+        "Vou te conectar com o time agora. Eles já entram com o que conversamos.\n\n"
+        "[[HANDOFF: lead pediu atendimento humano]]"
+    ),
+    "en": (
+        "I'll connect you with the team now. They already have this conversation.\n\n"
+        "[[HANDOFF: lead asked for a human]]"
+    ),
+    "es": (
+        "Te conecto con el equipo ahora. Ya entran con lo que hablamos.\n\n"
+        "[[HANDOFF: lead pidió humano]]"
+    ),
 }
 _PAYMENT_GATE_INTENT_MISSING = {
     "pt": "Posso enviar os dados de pagamento quando você quiser avançar com a contratação.",
@@ -12401,6 +12480,44 @@ def _enforce_aya_payment_output_gate(
             rules_content=rules_content,
             chat_id=chat_id,
         )
+
+    language = _payment_gate_language(user_message, turn_contact)
+    if _lead_requests_human(user_message):
+        logger.warning(
+            "[payment-gate] resposta comercial substituída chat=%r reason=human_connect "
+            "market=%r intent=%s markets=[] prices={} price_roles={} digits=[] emails=[] "
+            "restante=0 payment_content=False unofficial=False",
+            chat_id,
+            _canonical_commercial_market(turn_contact),
+            False,
+        )
+        return _HUMAN_CONNECT_REPLY.get(language) or _HUMAN_CONNECT_REPLY["pt"]
+    if _wants_sales_call(user_message) and not _wants_payment_details(user_message):
+        logger.warning(
+            "[payment-gate] resposta comercial substituída chat=%r reason=sales_call "
+            "market=%r intent=%s markets=[] prices={} price_roles={} digits=[] emails=[] "
+            "restante=0 payment_content=False unofficial=False",
+            chat_id,
+            _canonical_commercial_market(turn_contact),
+            False,
+        )
+        return _SALES_CALL_REPLY.get(language) or _SALES_CALL_REPLY["pt"]
+    if not _wants_payment_details(user_message) and (
+        _asks_about_price(user_message)
+        or _pending_price_intent(user_message, chat_id, rules_content=rules_content)
+    ):
+        logger.warning(
+            "[payment-gate] resposta comercial substituída chat=%r reason=consulting_triage "
+            "market=%r intent=%s markets=[] prices={} price_roles={} digits=[] emails=[] "
+            "restante=0 payment_content=False unofficial=False",
+            chat_id,
+            _canonical_commercial_market(turn_contact),
+            False,
+        )
+        ack = ""
+        if _pending_price_intent(user_message, chat_id, rules_content=rules_content):
+            ack = (_LOCATION_ACK.get(language) or _LOCATION_ACK["pt"]) + " "
+        return ack + (_CONSULTING_TRIAGE.get(language) or _CONSULTING_TRIAGE["pt"])
 
     if _should_answer_official_price(
         user_message,

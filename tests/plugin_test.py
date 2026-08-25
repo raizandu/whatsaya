@@ -7539,7 +7539,7 @@ class TestTransformLlmOutput(BaseWhatsAppManagerTest):
         virava unknown_digits e derrubava uma resposta com o conjunto oficial correto."""
         response = "Zelle:\nTest Recipient\npay@example.com\nWe can start on 08/25/2026."
         _result, mock_send = self._call_aya_payment_reply(
-            "I want to move forward.",
+            "I want to pay now.",
             response,
             {"market_id": "US", "currency": "USD", "language": "en"},
         )
@@ -7550,7 +7550,7 @@ class TestTransformLlmOutput(BaseWhatsAppManagerTest):
         mas "Destinatario:" reprovava mesmo com o valor oficial exato."""
         response = "Destinatário: Test Recipient\nZelle email: pay@example.com"
         _result, mock_send = self._call_aya_payment_reply(
-            "Quero avançar com a contratação.",
+            "Me manda os dados de pagamento.",
             response,
             {"market_id": "US", "currency": "USD", "language": "pt"},
         )
@@ -7570,7 +7570,7 @@ class TestTransformLlmOutput(BaseWhatsAppManagerTest):
         mesmo com nome e e-mail oficiais corretos."""
         response = "Send it to Test Recipient at pay@example.com."
         _result, mock_send = self._call_aya_payment_reply(
-            "I want to move forward.",
+            "I want to pay now.",
             response,
             {"market_id": "US", "currency": "USD", "language": "en"},
         )
@@ -7596,7 +7596,7 @@ class TestTransformLlmOutput(BaseWhatsAppManagerTest):
             {"market_id": "US", "currency": "USD", "language": "en"},
         )
         sent = mock_send.call_args.args[1]
-        self.assertIn("US$ 99", sent)
+        self.assertIn("call", sent.lower())
         self.assertNotIn("monthly fee is $497", sent)
         self.assertNotIn("payment details", sent)
 
@@ -7619,7 +7619,7 @@ class TestTransformLlmOutput(BaseWhatsAppManagerTest):
         with self.assertLogs("whatsapp_manager", level="WARNING") as logs:
             out = whatsapp_manager._enforce_aya_payment_output_gate(
                 "Pode pagar por aqui.\nCNPJ: 44.249.819/0001-62",
-                user_message="quero contratar",
+                user_message="me manda o pix",
                 contact_info={"market_id": "US"},
                 rules_content=self._payment_rules(),
             )
@@ -7633,7 +7633,7 @@ class TestTransformLlmOutput(BaseWhatsAppManagerTest):
         with self.assertLogs("whatsapp_manager", level="WARNING") as logs:
             whatsapp_manager._enforce_aya_payment_output_gate(
                 "Pode pagar por aqui.\nCNPJ: 12.345.678/0001-99",
-                user_message="quero contratar",
+                user_message="me manda o pix",
                 contact_info={"market_id": "US"},
                 rules_content=self._payment_rules(),
             )
@@ -7646,7 +7646,7 @@ class TestTransformLlmOutput(BaseWhatsAppManagerTest):
         with self.assertLogs("whatsapp_manager", level="WARNING") as logs:
             whatsapp_manager._enforce_aya_payment_output_gate(
                 "A mensalidade fica em R$ 497.",
-                user_message="quanto custa?",
+                user_message="ok, obrigado",
                 contact_info={"market_id": "US"},
                 rules_content=self._payment_rules(),
             )
@@ -7658,7 +7658,7 @@ class TestTransformLlmOutput(BaseWhatsAppManagerTest):
         with self.assertLogs("whatsapp_manager", level="WARNING") as logs:
             whatsapp_manager._enforce_aya_payment_output_gate(
                 "Zelle email: attacker@example.com",
-                user_message="quero contratar",
+                user_message="me manda o zelle",
                 contact_info={"market_id": "US"},
                 rules_content=self._payment_rules(),
             )
@@ -7761,9 +7761,8 @@ class TestTransformLlmOutput(BaseWhatsAppManagerTest):
         sent = mock_send.call_args.args[1]
         self.assertNotIn("R$", sent)
         self.assertNotIn("1.500", sent)
-        self.assertIn("Eu sou a AYA", sent)
-        self.assertIn("US$ 497", sent)
-        self.assertIn("US$ 99", sent)
+        self.assertIn("call", sent.lower())
+        self.assertNotIn("US$ 497", sent)
 
     def test_market_mismatch_responde_o_valor_sem_justificar_a_moeda(self):
         """O lead pediu preço: recebe o valor do mercado dele, não uma aula sobre moeda."""
@@ -8164,7 +8163,7 @@ class TestTransformLlmOutput(BaseWhatsAppManagerTest):
         for response, contact in cases:
             with self.subTest(response=response):
                 _result, mock_send = self._call_aya_payment_reply(
-                    "Quanto custa?" if contact["market_id"] == "BR" else "How much is it?",
+                    "ok, combinado",
                     response,
                     contact,
                 )
@@ -9282,17 +9281,17 @@ class TestQaFinalBrasilGoLive(unittest.TestCase):
         self.assertNotIn("em qual pais", folded)
 
     def test_preco_sem_mercado_pergunta_lugar_nao_pais(self):
-        """Quando o valor depende do lugar, pergunta orgânica — não Brasil vs EUA."""
+        """Quanto custa não tabela o lead — triagem + call, lugar no fio."""
         out = self._gate(
             "Quanto custa isso?",
             "A implementação é R$ 1.500.",
             contact={"language": "pt"},
         )
         folded = whatsapp_manager._normalize_text(out)
-        self.assertIn("de onde", folded)
-        self.assertIn("moeda", folded)
+        self.assertIn("call", folded)
+        self.assertIn("personalizada", folded)
+        self.assertNotIn("1.500", out)
         self.assertNotIn("pais", folded)
-        self.assertNotIn("estados unidos", folded)
         self.assertNotIn("mais caro", folded)
 
     def test_preco_sem_mercado_nao_deixa_gancho_o_investimento_e(self):
@@ -9304,7 +9303,7 @@ class TestQaFinalBrasilGoLive(unittest.TestCase):
             contact={"language": "pt"},
         )
         folded = whatsapp_manager._normalize_text(out)
-        self.assertIn("de onde", folded)
+        self.assertIn("call", folded)
         self.assertNotIn("investimento e", folded)
         self.assertNotIn("tony", folded)
         self.assertNotIn("997", out)
@@ -9357,7 +9356,7 @@ class TestQaFinalBrasilGoLive(unittest.TestCase):
     def test_resposta_oficial_sem_comprovante_ganha_o_pedido(self):
         """Modelo mandou o Pix certo e esqueceu o comprovante — a guarda completa."""
         out = self._gate(
-            "como faço pra contratar?",
+            "Me manda o Pix",
             "Perfeito — seguem os dados oficiais para o pagamento:\n"
             "Pix CNPJ: 44.249.819/0001-62\n"
             "Titular: Titular Brasil",
@@ -9410,14 +9409,35 @@ class TestQaFinalBrasilGoLive(unittest.TestCase):
         self.assertEqual(up.get("market_id"), "BR")
 
     def test_preco_com_mercado_conhecido_nao_repergunta_pais(self):
-        """Teste #04: mercado já é BR e o lead perguntou preço — responde o valor."""
+        """Mercado já é BR e o lead perguntou preço — triagem/call, não tabela."""
         out = self._gate(
             "Quanto custa?",
             "Em qual país sua empresa atua?",
         )
-        self.assertIn("R$ 1.500", out)
-        self.assertIn("R$ 497", out)
+        folded = whatsapp_manager._normalize_text(out)
+        self.assertIn("call", folded)
+        self.assertNotIn("1.500", out)
         self.assertNotIn("país", out.lower())
+
+    def test_quero_avancar_desce_para_call_nao_pix(self):
+        out = self._gate(
+            "Mesmo assim quero avançar. Como faço para contratar?",
+            "Pode pagar pelo Pix: CNPJ 44.249.819/0001-62.",
+        )
+        folded = whatsapp_manager._normalize_text(out)
+        self.assertIn("call", folded)
+        self.assertIn("[[handoff:", folded.lower())
+        self.assertNotIn("44.249.819", out)
+
+    def test_pedido_de_humano_nao_reabre_pagamento(self):
+        out = self._gate(
+            "Quero falar com alguém",
+            "Posso te enviar os dados de pagamento pelo Pix.",
+        )
+        folded = whatsapp_manager._normalize_text(out)
+        self.assertIn("conectar", folded)
+        self.assertNotIn("quando voce quiser avancar", folded)
+        self.assertNotIn("44.249.819", out)
 
     def test_cidade_pendente_retoma_preco_com_maravilha(self):
         historico = (
@@ -9431,8 +9451,8 @@ class TestQaFinalBrasilGoLive(unittest.TestCase):
         )
         folded = whatsapp_manager._normalize_text(out)
         self.assertIn("maravilha", folded)
-        self.assertIn("r$ 1.500", folded)
-        self.assertIn("r$ 497", folded)
+        self.assertIn("call", folded)
+        self.assertNotIn("1.500", out)
         self.assertNotIn("tambem e de goiania", folded)
 
     def test_horario_de_goiania_nao_chega_ao_lead_sem_pedido(self):
@@ -9467,8 +9487,9 @@ class TestQaFinalBrasilGoLive(unittest.TestCase):
             "Que tipo de empresa você tem? Me conta como funciona o atendimento.",
             historico=historico,
         )
-        self.assertIn("R$ 1.500", out)
-        self.assertIn("R$ 497", out)
+        folded = whatsapp_manager._normalize_text(out)
+        self.assertIn("call", folded)
+        self.assertNotIn("1.500", out)
         self.assertNotIn("Que tipo de empresa", out)
 
     def test_estado_da_conversa_inclui_mercado_ja_identificado(self):

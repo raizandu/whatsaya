@@ -353,6 +353,36 @@ FALLBACK_PHRASES: tuple[str, ...] = (
     "Pra te passar o valor na moeda certa — de onde vocês atendem?",
     "So I can quote in the right currency — where are you based?",
     "Para pasarte el valor en la moneda correcta, ¿de dónde atienden?",
+    # _CONSULTING_TRIAGE
+    "A proposta é personalizada pelo tamanho da operação — a AYA atende no Brasil "
+    "e nos EUA, em português, inglês e espanhol. Me fala em uma frase como vocês "
+    "atendem hoje (volume e de onde) que eu te digo se faz sentido a gente agendar "
+    "uma call pra fechar a proposta.",
+    "The proposal is tailored to the size of the operation — AYA runs in Brazil "
+    "and the US, in English, Portuguese and Spanish. Tell me in one line how you "
+    "handle inbound today (volume and where you're based) and I'll say if a short "
+    "call to shape the proposal makes sense.",
+    "La propuesta se arma según el tamaño de la operación — la AYA atiende en "
+    "Brasil y EE.UU., en español, portugués e inglés. Cuéntame en una frase cómo "
+    "atienden hoy (volumen y de dónde) y te digo si vale agendar una call para "
+    "cerrar la propuesta.",
+    # _SALES_CALL_REPLY
+    "Perfeito. A proposta fecha numa call curta, personalizada pelo tamanho da "
+    "operação. Me fala um período que o time te encaixa.\n\n"
+    "[[HANDOFF: lead quer avançar — proposta na call]]",
+    "Perfect. We close the proposal on a short call, sized to the operation. "
+    "Tell me a time window and the team will take it from there.\n\n"
+    "[[HANDOFF: lead wants to move forward — proposal on a call]]",
+    "Perfecto. La propuesta se cierra en una call corta, según el tamaño de la "
+    "operación. Dime un horario y el equipo te encaja.\n\n"
+    "[[HANDOFF: lead quiere avanzar — propuesta en call]]",
+    # _HUMAN_CONNECT_REPLY
+    "Vou te conectar com o time agora. Eles já entram com o que conversamos.\n\n"
+    "[[HANDOFF: lead pediu atendimento humano]]",
+    "I'll connect you with the team now. They already have this conversation.\n\n"
+    "[[HANDOFF: lead asked for a human]]",
+    "Te conecto con el equipo ahora. Ya entran con lo que hablamos.\n\n"
+    "[[HANDOFF: lead pidió humano]]",
     # _PAYMENT_GATE_INTENT_MISSING
     "Posso enviar os dados de pagamento quando você quiser avançar com a contratação.",
     "I can send the payment details when you're ready to move forward.",
