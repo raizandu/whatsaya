@@ -409,6 +409,15 @@ FALLBACK_PHRASES: tuple[str, ...] = (
     "El valor depende del tamaño de la atención y de lo que hay que integrar. "
     "Para no venderte más de lo que necesitan: ¿más o menos cuántos contactos "
     "reciben al día?",
+    "O valor depende do tamanho do atendimento. "
+    "Pra eu te direcionar sem te vender algo maior do que precisa: hoje vocês "
+    "recebem mais ou menos quantos contatos por dia?",
+    "Pricing depends on the size of your inbound. "
+    "So I don't sell you more than you need: roughly how many contacts a day "
+    "do you get?",
+    "El valor depende del tamaño de la atención. "
+    "Para no venderte más de lo que necesitan: ¿más o menos cuántos contactos "
+    "reciben al día?",
     # _CONSULTING_TRIAGE_REPEAT (frases antigas ficam para o log)
     "O valor sai na proposta, conforme o tamanho do caso. Se fizer sentido, "
     "a gente agenda uma call curta pra fechar isso.",
@@ -422,6 +431,12 @@ FALLBACK_PHRASES: tuple[str, ...] = (
     "makes sense, we book a short call to close the proposal.",
     "Entiendo. Ajustamos el proyecto a lo que realmente necesitan. Si te "
     "hace sentido, agendamos una call corta para cerrar la propuesta.",
+    "Entendo — a gente ajusta o projeto ao que vocês realmente precisam. "
+    "Se fizer sentido, agenda uma call curta pra fechar a proposta.",
+    "Got it — we size the project to what you actually need. If it still "
+    "makes sense, we book a short call to close the proposal.",
+    "Entiendo — ajustamos el proyecto a lo que realmente necesitan. Si te "
+    "hace sentido, agendamos una call corta para cerrar la propuesta.",
     # _CONSULTING_OBJECTION
     "Entendo. A ideia é justamente ajustar o projeto ao que vocês realmente "
     "precisam, sem colocar complexidade à toa. Hoje vocês recebem mais ou "
@@ -429,6 +444,14 @@ FALLBACK_PHRASES: tuple[str, ...] = (
     "I hear you. The point is to fit the project to what you actually need, "
     "not pile on extras. Roughly how many contacts a day do you get?",
     "Te entiendo. La idea es ajustar el proyecto a lo que realmente "
+    "necesitan, sin meter complejidad de más. ¿Más o menos cuántos "
+    "contactos reciben al día?",
+    "Entendo — a ideia é justamente ajustar o projeto ao que vocês realmente "
+    "precisam, sem colocar complexidade à toa. Hoje vocês recebem mais ou "
+    "menos quantos contatos por dia?",
+    "I hear you — the point is to fit the project to what you actually need, "
+    "not pile on extras. Roughly how many contacts a day do you get?",
+    "Te entiendo — la idea es ajustar el proyecto a lo que realmente "
     "necesitan, sin meter complejidad de más. ¿Más o menos cuántos "
     "contactos reciben al día?",
     # _SALES_CALL_REPLY (frase antiga fica para o log)
@@ -448,6 +471,15 @@ FALLBACK_PHRASES: tuple[str, ...] = (
     "What time of day usually works better: morning or afternoon?\n\n"
     "[[HANDOFF: lead wants to move forward — proposal on a call]]",
     "Perfecto. Puedo pasarlo al equipo para seguir contigo. "
+    "¿Qué horario te viene mejor: mañana o tarde?\n\n"
+    "[[HANDOFF: lead quiere avanzar — propuesta en call]]",
+    "Perfeito — posso encaminhar isso para a equipe continuar com você. "
+    "Qual período costuma ser melhor: manhã ou tarde?\n\n"
+    "[[HANDOFF: lead quer avançar — proposta na call]]",
+    "Perfect — I can pass this to the team to continue with you. "
+    "What time of day usually works better: morning or afternoon?\n\n"
+    "[[HANDOFF: lead wants to move forward — proposal on a call]]",
+    "Perfecto — puedo pasarlo al equipo para seguir contigo. "
     "¿Qué horario te viene mejor: mañana o tarde?\n\n"
     "[[HANDOFF: lead quiere avanzar — propuesta en call]]",
     # _HUMAN_CONNECT_REPLY
@@ -472,6 +504,9 @@ FALLBACK_PHRASES: tuple[str, ...] = (
     "and start onboarding.",
     "En cuanto hagas el pago, envíame el comprobante por aquí para "
     "validarlo y seguir con el onboarding.",
+    "Assim que fizer o pagamento, me envie o comprovante por aqui.",
+    "As soon as you pay, send the receipt here.",
+    "En cuanto hagas el pago, envíame el comprobante por aquí.",
     # _PAYMENT_CLAIMED_RECEIPT
     "Perfeito. Me envia o comprovante por aqui. Assim que o pagamento "
     "for validado, seguimos com o onboarding.",
@@ -479,6 +514,12 @@ FALLBACK_PHRASES: tuple[str, ...] = (
     "we continue with onboarding.",
     "Perfecto. Envíame el comprobante por aquí. Cuando el pago esté "
     "validado, seguimos con el onboarding.",
+    "Perfeito — me envia o comprovante por aqui. Assim que o pagamento "
+    "cair, a gente segue.",
+    "Perfect — send the receipt here. Once the payment goes through, "
+    "we continue.",
+    "Perfecto — envíame el comprobante por aquí. Cuando el pago entre, "
+    "seguimos.",
     # _MARKET_CORRECTION_LINE
     "Como sua empresa opera nos Estados Unidos, os valores são em dólar. "
     "Quer que eu te passe a condição certa?",

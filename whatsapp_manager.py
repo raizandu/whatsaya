@@ -11939,15 +11939,12 @@ _PRICE_OBJECTION_NEGATED_RE = re.compile(
 # Sem ponto final na primeira palavra: o separador de bolhas quebra em fim de
 # frase, e "Entendo." saiu como bolha sozinha no QA (mesma armadilha do "Perfeito!").
 _PRICE_OBJECTION_RESPONSE = {
-    "pt": "Entendo — a implementação é justamente onde a AYA é configurada para a sua "
-          "operação, com serviços, área atendida, coleta de endereço e agenda, para já "
-          "entrar funcionando do seu jeito.",
-    "en": "I hear you — the implementation is exactly where AYA gets set up for your "
-          "operation, covering services, service area, address collection and "
-          "scheduling, so it starts working your way from day one.",
-    "es": "Te entiendo — la implementación es justamente donde configuramos la AYA "
-          "para tu operación, con servicios, zona de atención, dirección y agenda, "
-          "para que arranque funcionando a tu manera.",
+    "pt": "Entendo — a gente ajusta o projeto ao que vocês realmente precisam, "
+          "sem colocar complexidade à toa.",
+    "en": "I hear you — we size the project to what you actually need, "
+          "without extra complexity.",
+    "es": "Te entiendo — ajustamos el proyecto a lo que realmente necesitan, "
+          "sin meter complejidad de más.",
 }
 # QA Final 4.0, ajuste 4: preço isolado deixa a conversa morrer — condução curta,
 # sem escassez artificial.
@@ -12305,32 +12302,23 @@ _OFFICIAL_PAYMENT_INTRO = {
 }
 # QA Final Brasil, bloqueio 4: Pix/Zelle e pedido de comprovante saem na mesma resposta.
 _PAYMENT_RECEIPT_ASK = {
-    "pt": (
-        "Assim que fizer o pagamento, me envie o comprovante por aqui para "
-        "seguirmos com a validação e o onboarding."
-    ),
-    "en": (
-        "As soon as you pay, send the receipt here so we can validate it "
-        "and start onboarding."
-    ),
-    "es": (
-        "En cuanto hagas el pago, envíame el comprobante por aquí para "
-        "validarlo y seguir con el onboarding."
-    ),
+    "pt": "Assim que fizer o pagamento, me envie o comprovante por aqui.",
+    "en": "As soon as you pay, send the receipt here.",
+    "es": "En cuanto hagas el pago, envíame el comprobante por aquí.",
 }
 # QA Final Brasil, teste #09: lead afirmou que pagou — pede comprovante, não reabre checkout.
 _PAYMENT_CLAIMED_RECEIPT = {
     "pt": (
-        "Perfeito. Me envia o comprovante por aqui. Assim que o pagamento "
-        "for validado, seguimos com o onboarding."
+        "Perfeito — me envia o comprovante por aqui. Assim que o pagamento "
+        "cair, a gente segue."
     ),
     "en": (
-        "Perfect. Send the receipt here. Once the payment is confirmed, "
-        "we continue with onboarding."
+        "Perfect — send the receipt here. Once the payment goes through, "
+        "we continue."
     ),
     "es": (
-        "Perfecto. Envíame el comprobante por aquí. Cuando el pago esté "
-        "validado, seguimos con el onboarding."
+        "Perfecto — envíame el comprobante por aquí. Cuando el pago entre, "
+        "seguimos."
     ),
 }
 
@@ -12379,66 +12367,66 @@ _LOCATION_ACK = {
 }
 _CONSULTING_TRIAGE = {
     "pt": (
-        "O valor depende do tamanho do atendimento e do que precisa ser integrado. "
+        "O valor depende do tamanho do atendimento. "
         "Pra eu te direcionar sem te vender algo maior do que precisa: hoje vocês "
         "recebem mais ou menos quantos contatos por dia?"
     ),
     "en": (
-        "Pricing depends on the size of your inbound and what needs to be wired in. "
+        "Pricing depends on the size of your inbound. "
         "So I don't sell you more than you need: roughly how many contacts a day "
         "do you get?"
     ),
     "es": (
-        "El valor depende del tamaño de la atención y de lo que hay que integrar. "
+        "El valor depende del tamaño de la atención. "
         "Para no venderte más de lo que necesitan: ¿más o menos cuántos contactos "
         "reciben al día?"
     ),
 }
 # QA 25/08: o lead insistiu no valor e recebeu o mesmo parágrafo. Fallback não
-# pode soar de script.
+# pode soar de script. Sem ponto em "Entendo." — vira bolha órfã (soma ≥ 110).
 _CONSULTING_TRIAGE_REPEAT = {
     "pt": (
-        "Entendo. A gente ajusta o projeto ao que vocês realmente precisam. "
+        "Entendo — a gente ajusta o projeto ao que vocês realmente precisam. "
         "Se fizer sentido, agenda uma call curta pra fechar a proposta."
     ),
     "en": (
-        "Got it. We size the project to what you actually need. If it still "
+        "Got it — we size the project to what you actually need. If it still "
         "makes sense, we book a short call to close the proposal."
     ),
     "es": (
-        "Entiendo. Ajustamos el proyecto a lo que realmente necesitan. Si te "
+        "Entiendo — ajustamos el proyecto a lo que realmente necesitan. Si te "
         "hace sentido, agendamos una call corta para cerrar la propuesta."
     ),
 }
 _CONSULTING_OBJECTION = {
     "pt": (
-        "Entendo. A ideia é justamente ajustar o projeto ao que vocês realmente "
+        "Entendo — a ideia é justamente ajustar o projeto ao que vocês realmente "
         "precisam, sem colocar complexidade à toa. Hoje vocês recebem mais ou "
         "menos quantos contatos por dia?"
     ),
     "en": (
-        "I hear you. The point is to fit the project to what you actually need, "
+        "I hear you — the point is to fit the project to what you actually need, "
         "not pile on extras. Roughly how many contacts a day do you get?"
     ),
     "es": (
-        "Te entiendo. La idea es ajustar el proyecto a lo que realmente "
+        "Te entiendo — la idea es ajustar el proyecto a lo que realmente "
         "necesitan, sin meter complejidad de más. ¿Más o menos cuántos "
         "contactos reciben al día?"
     ),
 }
 _SALES_CALL_REPLY = {
     "pt": (
-        "Perfeito. Posso encaminhar isso para a equipe continuar com você. "
+        "Perfeito — posso encaminhar isso para a equipe continuar com você. "
         "Qual período costuma ser melhor: manhã ou tarde?\n\n"
         "[[HANDOFF: lead quer avançar — proposta na call]]"
     ),
     "en": (
-        "Perfect. I can pass this to the team to continue with you. "
+        "Perfect — I can pass this to the team to continue with you. "
         "What time of day usually works better: morning or afternoon?\n\n"
         "[[HANDOFF: lead wants to move forward — proposal on a call]]"
     ),
     "es": (
-        "Perfecto. Puedo pasarlo al equipo para seguir contigo. "
+        "Perfecto — puedo pasarlo al equipo para seguir contigo. "
         "¿Qué horario te viene mejor: mañana o tarde?\n\n"
         "[[HANDOFF: lead quiere avanzar — propuesta en call]]"
     ),
@@ -13508,6 +13496,8 @@ _SDR_REWRITE = (
      "commercial AI assistant"),
     (re.compile(r"SDR\s+de\s+WhatsAYA", re.IGNORECASE),
      "atendente comercial con IA"),
+    (re.compile(r"\ban?\s+SDR\b", re.IGNORECASE), "a commercial AI assistant"),
+    (re.compile(r"\bun[ae]?\s+SDR\b", re.IGNORECASE), "una atendente comercial con IA"),
     (re.compile(r"\bSDR\b", re.IGNORECASE), "atendente comercial com IA"),
 )
 _SPANISH_OFFER_RES = (
@@ -13518,17 +13508,11 @@ _SPANISH_OFFER_RES = (
     re.compile(r"\bSpanish\b", re.IGNORECASE),
     re.compile(r"\bespa[nñ]ol\b", re.IGNORECASE),
 )
-_BULLET_LINE_RE = re.compile(r"(?m)^\s*[-*•]\s+\S")
+_BULLET_LINE_RE = re.compile(r"(?m)^\s*(?:[-*•·–—]|\d+[.)])\s+\S")
 _PAYMENT_LIST_KEEP_RE = re.compile(
     r"\b(?:pix|zelle|cnpj|recipient|titular|chave)\b", re.IGNORECASE
 )
-_COMMERCIAL_CHAT_FALLBACK = {
-    "pt": (
-        "A AYA é uma atendente comercial com IA no WhatsApp. Ela responde quem "
-        "chama, entende o que a pessoa precisa e conduz para o próximo passo. "
-        "Como funciona seu atendimento hoje?"
-    ),
-}
+_COMMERCIAL_CHAT_FALLBACK = dict(_HOURS_GATE_FALLBACK)
 _UX_JARGON_REWRITE = (
     (re.compile(
         r"qualifica(?:\s+leads?)?,?\s+registra\s+contexto,?\s+faz\s+handoff"
@@ -13615,6 +13599,30 @@ def _collapse_commercial_lists(text: str) -> str:
     return _COMMERCIAL_CHAT_FALLBACK["pt"]
 
 
+def _shape_whatsapp_reply(text: str) -> str:
+    """Camada de conversa: 2–4 frases, uma pergunta. Bloco de pagamento fica."""
+    value = str(text or "").strip()
+    if not value or _PAYMENT_LIST_KEEP_RE.search(value):
+        return value
+    shaped = value
+    if shaped.count("?") > 1:
+        shaped = shaped[: shaped.find("?") + 1].strip()
+        logger.warning("[contact-reply] perguntas extras removidas")
+    sentences = [
+        part.strip()
+        for part in re.split(r"(?<=[.!?…])\s+", shaped)
+        if part.strip()
+    ]
+    if len(sentences) <= 4:
+        return shaped
+    body = [part for part in sentences if not part.endswith("?")][:3]
+    questions = [part for part in sentences if part.endswith("?")]
+    if questions:
+        body.append(questions[0])
+    logger.warning("[contact-reply] resposta enxugada n=%d→%d", len(sentences), len(body))
+    return " ".join(body)
+
+
 def _prepare_contact_reply(response_text: str) -> str:
     """Filtra a resposta de contato. String vazia = suprimir o envio."""
     clean_text = _EXEC_PATTERN.sub("", response_text or "").strip()
@@ -13642,6 +13650,9 @@ def _prepare_contact_reply(response_text: str) -> str:
     clean_text = _rewrite_sdr_self_presentation(clean_text).strip()
     clean_text = _strip_spanish_offer_mentions(clean_text).strip()
     clean_text = _collapse_commercial_lists(clean_text).strip()
+    if not clean_text:
+        return ""
+    clean_text = _shape_whatsapp_reply(clean_text).strip()
     if not clean_text:
         return ""
 

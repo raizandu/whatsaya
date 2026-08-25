@@ -6616,7 +6616,8 @@ class TestPriceFallbacks(unittest.TestCase):
 
     def test_objecao_em_intent_missing_recebe_tratamento_nao_oferta_de_pagamento(self):
         out = self._fallback("tá muito caro pra mim", reason="intent_missing")
-        self.assertIn("implementação", out.lower())
+        self.assertTrue(whatsapp_manager._normalize_text(out).startswith("entendo"))
+        self.assertNotIn("coleta de endereco", whatsapp_manager._normalize_text(out))
         self.assertNotIn("dados de pagamento", out)
 
     def test_objecao_repetida_nao_reenvia_o_mesmo_paragrafo(self):
@@ -6661,7 +6662,8 @@ class TestPriceFallbacks(unittest.TestCase):
         lead acabou de ver um número errado — a correção oficial vem junto, senão o
         valor errado fica de pé. Sem CTA e sem frase de continuação."""
         out = self._fallback("Achei o valor de implementação um pouco caro")
-        self.assertIn("implementação", out.lower())
+        self.assertTrue(whatsapp_manager._normalize_text(out).startswith("entendo"))
+        self.assertNotIn("coleta de endereco", whatsapp_manager._normalize_text(out))
         self.assertIn("US$ 497", out)
         self.assertNotIn("como começamos", out)
         self.assertNotIn("Me conta como funciona", out)
@@ -7319,6 +7321,40 @@ class TestPrepareContactReply(BaseWhatsAppManagerTest):
         self.assertNotIn("handoff:", folded)
         self.assertIn("equipe", folded)
         self.assertIn("manha ou tarde", folded)
+
+    def test_lista_numerada_nao_chega_como_documentacao(self):
+        import whatsapp_manager
+        out = whatsapp_manager._prepare_contact_reply(
+            "A AYA pode:\n"
+            "1. qualificar o lead;\n"
+            "2. registrar contexto;\n"
+            "3. fazer handoff;\n"
+            "4. montar follow-up."
+        )
+        folded = whatsapp_manager._normalize_text(out)
+        self.assertNotRegex(out, r"(?m)^\s*\d+[.)]\s+")
+        self.assertNotIn("registrar contexto", folded)
+        self.assertTrue(out.strip())
+        self.assertLessEqual(out.count("?"), 1)
+
+    def test_uma_pergunta_principal_por_turno(self):
+        import whatsapp_manager
+        out = whatsapp_manager._prepare_contact_reply(
+            "Sim, atende clínica. Qual o volume? De onde atendem? Qual o CRM?"
+        )
+        self.assertEqual(out.count("?"), 1)
+        self.assertIn("volume", out.lower())
+        self.assertNotIn("CRM", out)
+
+    def test_sdr_em_ingles_nao_vira_portugues(self):
+        import whatsapp_manager
+        out = whatsapp_manager._prepare_contact_reply(
+            "AYA is an SDR on WhatsApp."
+        )
+        folded = whatsapp_manager._normalize_text(out)
+        self.assertNotIn("sdr", folded)
+        self.assertNotIn("atendente comercial", folded)
+        self.assertIn("commercial ai assistant", folded)
 
 
 class TestTransformLlmOutput(BaseWhatsAppManagerTest):
@@ -9766,6 +9802,8 @@ class TestQaFinalBrasilGoLive(unittest.TestCase):
         self.assertTrue(folded.startswith("entendo"))
         self.assertIn("contatos por dia", folded)
         self.assertNotIn("valor unico de tabela", folded)
+        bolhas = whatsapp_manager._split_human_bubbles(out)
+        self.assertFalse(any(b.strip() in {"Entendo.", "Entendo"} for b in bolhas), bolhas)
 
     def test_anti_repeticao_pega_bolha_fatiada(self):
         """A guarda sai em 2 bolhas; o bloco inteiro não fica contínuo no sqlite."""
@@ -9825,6 +9863,26 @@ class TestQaFinalBrasilGoLive(unittest.TestCase):
         self.assertTrue(folded.startswith("entendo"))
         self.assertIn("contatos por dia", folded)
         self.assertNotIn("agenda uma call curta", folded)
+
+    def test_comprovante_nao_fala_onboarding_nem_validacao(self):
+        for idioma in ("pt", "en", "es"):
+            with self.subTest(idioma=idioma):
+                ask = whatsapp_manager._PAYMENT_RECEIPT_ASK[idioma]
+                claimed = whatsapp_manager._PAYMENT_CLAIMED_RECEIPT[idioma]
+                folded = whatsapp_manager._normalize_text(ask + " " + claimed)
+                self.assertNotIn("onboarding", folded)
+                self.assertNotIn("validacao", folded)
+                self.assertNotIn("validate", folded)
+                self.assertRegex(folded, r"comprovante|receipt|comprobante")
+
+    def test_objecao_us_nao_explica_implantacao(self):
+        folded = whatsapp_manager._normalize_text(
+            whatsapp_manager._PRICE_OBJECTION_RESPONSE["pt"]
+        )
+        self.assertTrue(folded.startswith("entendo"))
+        self.assertNotIn("coleta de endereco", folded)
+        self.assertNotIn("area atendida", folded)
+        self.assertEqual(folded.count("?"), 0)
 
     def test_hours_fallback_nao_cataloga_o_que_a_ia_faz(self):
         folded = whatsapp_manager._normalize_text(
