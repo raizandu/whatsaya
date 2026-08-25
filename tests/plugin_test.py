@@ -684,8 +684,10 @@ class TestLLMContextAndPrompting(BaseWhatsAppManagerTest):
         # Não forçar handoff só por pergunta de integração
         self.assertIn("NÃO encaminhe para humano só porque perguntaram sobre integração", ctx)
         self.assertIn("1 a 4 frases", ctx)
-        self.assertIn("português, inglês ou espanhol", ctx)
+        self.assertIn("Responda no idioma em que o lead escreveu", ctx)
+        self.assertIn("Não anuncie espanhol como idioma da oferta", ctx)
         self.assertIn("continua nesse mercado mesmo conversando em espanhol", ctx)
+        self.assertNotIn("português, inglês ou espanhol", ctx)
 
     def test_build_support_prompt_injects_market_metadata_without_language_reclassification(self):
         import whatsapp_manager
@@ -6514,6 +6516,22 @@ class TestOnboardingGate(unittest.TestCase):
         out = self._gate(texto, vendas={"V1": {"contact_key": chat}}, chat=chat)
         self.assertEqual(out, texto)
 
+    def test_checklist_de_implantacao_em_afirmacao_sai(self):
+        """QA 25/08: 'Para configurar bem, você precisaria levantar:' — afirmação,
+        não pergunta, e a guarda antiga deixava passar. Instruir não funciona."""
+        out = self._gate(
+            "É um caso forte para a AYA.\n\n"
+            "Para configurar bem, você precisaria levantar:\n"
+            "- procedimentos atendidos e dúvidas/respostas aprovadas;\n"
+            "- unidades, horários e regras de agenda.\n\n"
+            "Se você quiser, eu monto um fluxo-base de conversa para a clínica."
+        )
+        folded = whatsapp_manager._normalize_text(out)
+        self.assertNotIn("precisaria levantar", folded)
+        self.assertNotIn("fluxo-base", folded)
+        self.assertNotIn("fluxo base", folded)
+        self.assertTrue(out.strip())
+
 
 TABELA_PRECOS_MIN = (
     "| Mercado | Implementação | Mensalidade |\n| --- | --- | --- |\n"
@@ -7179,6 +7197,53 @@ class TestPrepareContactReply(BaseWhatsAppManagerTest):
         self.assertEqual(out, text)
         self.assertNotIn("não tenho como fazer", out)
 
+    def test_sdr_whatsaya_vira_atendente_comercial(self):
+        """QA 25/08 abertura: 'A AYA é a SDR com IA da WhatsAYA…' — o lead não
+        deve ver SDR. Apresentação é atendente comercial com IA no WhatsApp."""
+        import whatsapp_manager
+        out = whatsapp_manager._prepare_contact_reply(
+            "A AYA é a SDR com IA da WhatsAYA, operando direto no seu WhatsApp."
+        )
+        folded = whatsapp_manager._normalize_text(out)
+        self.assertNotIn("sdr", folded)
+        self.assertIn("atendente comercial", folded)
+        self.assertIn("whatsapp", folded)
+        self.assertTrue(out.strip())
+
+    def test_nao_anuncia_espanhol_na_oferta(self):
+        """Espanhol ainda não está na oferta oficial — não listar como idioma."""
+        import whatsapp_manager
+        out = whatsapp_manager._prepare_contact_reply(
+            "A proposta é personalizada pelo tamanho da operação — a AYA atende "
+            "no Brasil e nos EUA, em português, inglês e espanhol."
+        )
+        folded = whatsapp_manager._normalize_text(out)
+        self.assertNotIn("espanhol", folded)
+        self.assertNotIn("spanish", folded)
+        self.assertTrue(out.strip())
+
+    def test_lista_de_funcionalidades_nao_chega_como_documentacao(self):
+        """QA 25/08 clínica: 6 bullets de o-que-a-AYA-faz. WhatsApp não é spec."""
+        import whatsapp_manager
+        texto = (
+            "É um caso forte para a AYA.\n\n"
+            "Ela pode fazer a primeira triagem no WhatsApp:\n"
+            "- identificar qual procedimento a pessoa procura;\n"
+            "- responder dúvidas frequentes com as informações aprovadas;\n"
+            "- pedir dados essenciais, como nome, unidade e horário;\n"
+            "- conduzir para agendar a avaliação;\n"
+            "- fazer follow-up de quem parou de responder;\n"
+            "- repassar para sua equipe quando houver decisão de fechamento.\n\n"
+            "Ponto importante: ela não deve diagnosticar nem prometer resultado."
+        )
+        out = whatsapp_manager._prepare_contact_reply(texto)
+        folded = whatsapp_manager._normalize_text(out)
+        self.assertNotRegex(out, r"(?m)^\s*[-*]\s+")
+        self.assertNotIn("identificar qual procedimento", folded)
+        self.assertTrue(
+            "caso forte" in folded or "nao deve diagnosticar" in folded, out
+        )
+
 
 class TestTransformLlmOutput(BaseWhatsAppManagerTest):
     """Hook que envia bolhas e devolve whitespace para o Hermes não reenviar o bloco."""
@@ -7588,15 +7653,17 @@ class TestTransformLlmOutput(BaseWhatsAppManagerTest):
 
     def test_preco_de_papel_errado_recebe_o_preco_certo_nao_aviso_de_pagamento(self):
         """Assimetria (d), colisão do 497: "$497 monthly" (mensalidade BR no papel US)
-        respondia com aviso genérico de dados de pagamento — assunto que o lead nem tocou.
-        Preço errado sem conteúdo de pagamento vira correção de preço."""
+        não pode ir ao lead. EUA na conversa usa a condição validada: 497 + 99 via Zelle."""
         _result, mock_send = self._call_aya_payment_reply(
             "How much is it monthly?",
             "The monthly fee is $497.",
             {"market_id": "US", "currency": "USD", "language": "en"},
         )
         sent = mock_send.call_args.args[1]
-        self.assertIn("call", sent.lower())
+        folded = whatsapp_manager._normalize_text(sent)
+        self.assertIn("497", sent)
+        self.assertIn("99", sent)
+        self.assertIn("zelle", folded)
         self.assertNotIn("monthly fee is $497", sent)
         self.assertNotIn("payment details", sent)
 
@@ -7701,13 +7768,21 @@ class TestTransformLlmOutput(BaseWhatsAppManagerTest):
         self.assertNotIn("checkout.attacker.test", mock_send.call_args.args[1])
 
     def test_payment_method_is_not_sent_before_purchase_intent(self):
+        """Pergunta de preço nos EUA cita a condição (valores + via Zelle),
+        mas não o e-mail/destinatário — isso só com pedido de pagar agora."""
         _result, mock_send = self._call_aya_payment_reply(
             "How much does it cost?",
-            "The payment method is Zelle.",
+            "The payment method is Zelle.\nRecipient: Test Recipient\n"
+            "Zelle email: pay@example.com",
             {"market_id": "US", "currency": "USD", "language": "en"},
         )
-
-        self.assertNotIn("Zelle", mock_send.call_args.args[1])
+        sent = mock_send.call_args.args[1]
+        folded = whatsapp_manager._normalize_text(sent)
+        self.assertIn("zelle", folded)
+        self.assertIn("497", sent)
+        self.assertIn("99", sent)
+        self.assertNotIn("pay@example.com", sent)
+        self.assertNotIn("Test Recipient", sent)
 
     def test_wrong_market_currency_is_blocked_without_payment_details(self):
         _result, mock_send = self._call_aya_payment_reply(
@@ -7759,10 +7834,12 @@ class TestTransformLlmOutput(BaseWhatsAppManagerTest):
             {"market_id": "US", "currency": "USD", "language": "pt"},
         )
         sent = mock_send.call_args.args[1]
+        folded = whatsapp_manager._normalize_text(sent)
         self.assertNotIn("R$", sent)
         self.assertNotIn("1.500", sent)
-        self.assertIn("call", sent.lower())
-        self.assertNotIn("US$ 497", sent)
+        self.assertIn("497", sent)
+        self.assertIn("99", sent)
+        self.assertIn("zelle", folded)
 
     def test_market_mismatch_responde_o_valor_sem_justificar_a_moeda(self):
         """O lead pediu preço: recebe o valor do mercado dele, não uma aula sobre moeda."""
@@ -9531,6 +9608,56 @@ class TestQaFinalBrasilGoLive(unittest.TestCase):
         folded = whatsapp_manager._normalize_text(bloco)
         self.assertIn("mercado ja identificado", folded)
         self.assertIn("brasil", folded)
+
+    def test_preco_br_e_proposta_nao_tabela_nem_espanhol(self):
+        """Brasil: perguntou preço → proposta personalizada + call. Sem 1.500,
+        sem 497 de tabela, sem anunciar espanhol nem misturar EUA."""
+        out = self._gate(
+            "Legal. E quanto custa pra colocar isso na minha clínica?",
+            "A implementação é R$ 1.500 e a mensalidade R$ 497.",
+            contact={"market_id": "BR", "language": "pt"},
+        )
+        folded = whatsapp_manager._normalize_text(out)
+        self.assertIn("personalizada", folded)
+        self.assertIn("call", folded)
+        self.assertNotIn("1.500", out)
+        self.assertNotIn("espanhol", folded)
+        self.assertNotIn("nos eua", folded)
+        self.assertEqual(out.count("?"), 1)
+
+    def test_preco_us_oficial_497_99_zelle(self):
+        """EUA: a condição validada continua na conversa — 497 + 99 via Zelle.
+        Não mistura Pix nem tabela BR."""
+        out = self._gate(
+            "How much does it cost?",
+            "Implementation is $1,500 and $497/month.",
+            contact={"market_id": "US", "language": "en"},
+        )
+        folded = whatsapp_manager._normalize_text(out)
+        self.assertIn("497", out)
+        self.assertIn("99", out)
+        self.assertIn("zelle", folded)
+        self.assertNotIn("1.500", out)
+        self.assertNotIn("1,500", out)
+        self.assertNotIn("pix", folded)
+
+    def test_consulting_triage_nao_repete_paragrafo_ja_enviado(self):
+        """QA 25/08 turno 4: insistiu no valor e recebeu as mesmas 2 bolhas."""
+        primeiro = whatsapp_manager._CONSULTING_TRIAGE["pt"]
+        historico = f"Lead: quanto custa?\nAYA: {primeiro}\n"
+        out = self._gate(
+            "Mas qual é o valor da implementação e da mensalidade?",
+            "R$ 1.500 de implementação.",
+            historico=historico,
+            contact={"market_id": "BR", "language": "pt"},
+        )
+        folded = whatsapp_manager._normalize_text(out)
+        self.assertNotEqual(
+            whatsapp_manager._normalize_text(out),
+            whatsapp_manager._normalize_text(primeiro),
+        )
+        self.assertIn("call", folded)
+        self.assertNotIn("1.500", out)
 
 
 if __name__ == "__main__":

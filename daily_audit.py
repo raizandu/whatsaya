@@ -343,13 +343,19 @@ FALLBACK_PHRASES: tuple[str, ...] = (
     "What else do you need to decide?",
     "Esa parte de configuración la ajustamos juntos después de la contratación. "
     "¿Qué te falta para decidir?",
-    # _HOURS_GATE_FALLBACK
+    # _HOURS_GATE_FALLBACK (frase antiga com SDR fica para o log dos dias anteriores)
     "A AYA é a SDR da WhatsAYA no WhatsApp: qualifica leads, responde e "
     "encaminha o que estiver quente. O que você quer entender primeiro?",
     "AYA is WhatsAYA's SDR on WhatsApp: she qualifies leads, replies, and "
     "hands off hot opportunities. What do you want to understand first?",
     "AYA es la SDR de WhatsAYA en WhatsApp: califica leads, responde y "
     "escala lo que esté caliente. ¿Qué quieres entender primero?",
+    "A AYA é a atendente comercial com IA no WhatsApp: qualifica leads, "
+    "responde e encaminha o que estiver quente. O que você quer entender primeiro?",
+    "AYA is the commercial AI assistant on WhatsApp: she qualifies leads, "
+    "replies, and hands off hot opportunities. What do you want to understand first?",
+    "AYA es la atendente comercial con IA en WhatsApp: califica leads, "
+    "responde y escala lo que esté caliente. ¿Qué quieres entender primero?",
     # _PAYMENT_GATE_ASK_MARKET (frase antiga fica para o log dos dias anteriores)
     "Em qual país sua empresa atua?",
     "Which country does your company operate in?",
@@ -360,7 +366,7 @@ FALLBACK_PHRASES: tuple[str, ...] = (
     "Pra te passar o valor na moeda certa — de onde vocês atendem?",
     "So I can quote in the right currency — where are you based?",
     "Para pasarte el valor en la moneda correcta, ¿de dónde atienden?",
-    # _CONSULTING_TRIAGE
+    # _CONSULTING_TRIAGE (frase antiga com EUA/espanhol fica para o log anterior)
     "A proposta é personalizada pelo tamanho da operação — a AYA atende no Brasil "
     "e nos EUA, em português, inglês e espanhol. Me fala em uma frase como vocês "
     "atendem hoje (volume e de onde) que eu te digo se faz sentido a gente agendar "
@@ -373,6 +379,19 @@ FALLBACK_PHRASES: tuple[str, ...] = (
     "Brasil y EE.UU., en español, portugués e inglés. Cuéntame en una frase cómo "
     "atienden hoy (volumen y de dónde) y te digo si vale agendar una call para "
     "cerrar la propuesta.",
+    "A proposta é personalizada pelo tamanho da operação — a gente fecha na "
+    "call, não tem valor único de tabela. Como vocês atendem esses pedidos hoje?",
+    "The proposal is tailored to the size of the operation — we close it on a "
+    "call, there's no single list price. How do you handle those requests today?",
+    "La propuesta se arma según el tamaño de la operación — se cierra en una "
+    "call, no hay un precio único de tabla. ¿Cómo atienden esos pedidos hoy?",
+    # _CONSULTING_TRIAGE_REPEAT
+    "O valor sai na proposta, conforme o tamanho do caso. Se fizer sentido, "
+    "a gente agenda uma call curta pra fechar isso.",
+    "The number comes on the proposal, sized to the case. If it makes sense, "
+    "we book a short call to close it.",
+    "El valor sale en la propuesta, según el tamaño del caso. Si te hace "
+    "sentido, agendamos una call corta para cerrarlo.",
     # _SALES_CALL_REPLY
     "Perfeito. A proposta fecha numa call curta, personalizada pelo tamanho da "
     "operação. Me fala um período que o time te encaixa.\n\n"
@@ -425,6 +444,9 @@ FALLBACK_PHRASES: tuple[str, ...] = (
     "Want me to walk you through it?",
     "Como tu empresa opera en Brasil, los valores son en reales. "
     "¿Quieres que te pase la condición correcta?",
+    # _COMMERCIAL_CHAT_FALLBACK
+    "No WhatsApp a AYA atende o cliente de vocês: tira dúvida, qualifica e "
+    "encaminha o próximo passo. O que mais trava no atendimento hoje?",
 )
 
 # `_MARKET_PRICE_SENTENCE` é template com `{setup}`/`{monthly}`: casar o literal
@@ -433,6 +455,9 @@ FALLBACK_TEMPLATES: tuple[str, ...] = (
     "{setup} de implantação e {monthly} por mês.",
     "{setup} setup and {monthly} per month.",
     "{setup} de implementación y {monthly} al mes.",
+    "{setup} de implantação e {monthly} por mês, via Zelle.",
+    "{setup} setup and {monthly} per month, via Zelle.",
+    "{setup} de implementación y {monthly} al mes, vía Zelle.",
 )
 
 

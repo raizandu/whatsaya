@@ -29,11 +29,13 @@ class TestAyaMarketRules(unittest.TestCase):
         self.assertIn('_plugin_bootstrap_url("support_rules.md")', PLUGIN_SOURCE)
         self.assertIn('_plugin_bootstrap_url("SOUL_EMAIL.md")', PLUGIN_SOURCE)
 
-    def test_united_states_is_confirmed_in_english_portuguese_and_spanish(self):
+    def test_united_states_is_confirmed_without_advertising_spanish(self):
+        """EUA é mercado confirmado; espanhol não entra como idioma da oferta."""
         normalized = RULES.lower()
         self.assertIn("empresas nos estados unidos", normalized)
-        self.assertRegex(normalized, r"ingl[eê]s, portugu[eê]s e espanhol")
         self.assertIn("capacidade confirmada", normalized)
+        self.assertIn("não anuncie espanhol como idioma da oferta", normalized)
+        self.assertNotRegex(normalized, r"ingl[eê]s, portugu[eê]s e espanhol")
 
     def test_spanish_changes_the_reply_language_not_the_us_market(self):
         normalized = RULES.lower()
