@@ -12929,22 +12929,30 @@ def _enforce_aya_payment_output_gate(
             user_message
         )
         if len(restante) >= _MARKET_STRIP_MIN_CHARS:
-            logger.warning(
-                "[payment-gate] parágrafo de preço sem mercado removido chat=%r restante=%d pede_lugar=%s",
-                chat_id,
-                len(restante),
-                precisa_lugar,
-            )
+            language = _payment_gate_language(user_message, contact_info)
             if precisa_lugar:
                 # Recorte de preço deixa gancho órfão ("o investimento é:") e soa
                 # como tabela por região. Sem lugar, só a pergunta da moeda.
-                return (
-                    _PAYMENT_GATE_ASK_MARKET.get(
-                        _payment_gate_language(user_message, contact_info)
-                    )
+                final = (
+                    _PAYMENT_GATE_ASK_MARKET.get(language)
                     or _PAYMENT_GATE_ASK_MARKET["pt"]
                 )
-            return restante
+            else:
+                # Mesmo sem pedido de preço: não entregar "Na prática, ela:" /
+                # intro de lista após o recorte (QA 25/08).
+                final = _finalize_stripped_reply(
+                    restante,
+                    fallback=_no_price_continuation(language, chat_id),
+                )
+            logger.warning(
+                "[payment-gate] parágrafo de preço sem mercado removido chat=%r "
+                "restante=%d final=%d pede_lugar=%s",
+                chat_id,
+                len(restante),
+                len(final),
+                precisa_lugar,
+            )
+            return final
     if (
         reason == "market_mismatch"
         and not payment_content_present
@@ -12956,7 +12964,11 @@ def _enforce_aya_payment_output_gate(
         # O limiar era 40, e derrubava resposta boa por pouca margem: o lead que abriu
         # com "quero entender como a AYA funcionaria" perdeu a explicação inteira e
         # recebeu só o texto da guarda. Vale a pena entregar uma frase curta do modelo.
-        if len(restante) >= _MARKET_STRIP_MIN_CHARS:
+        # Descarta gancho órfão ("o investimento é:" / "na prática, ela:").
+        restante = _salvage_complete_reply_text(restante)
+        if len(restante) >= _MARKET_STRIP_MIN_CHARS and not _reply_remnant_is_incomplete(
+            restante
+        ):
             logger.warning(
                 "[payment-gate] parágrafo de mercado errado removido chat=%r market=%r markets=%s restante=%d",
                 chat_id,
@@ -13097,6 +13109,80 @@ _ASKS_HOURS_RE = re.compile(
     r"\b(?:horario|funcionamento|expediente|que\s+horas|"
     r"office\s+hours|timezone|fuso|que\s+horas\s+voces)\b"
 )
+# Após recorte (horário / preço sem mercado): gancho de lista ou frase cortada
+# no ':' — QA 25/08 entregou "Na prática, ela:" (55c) ao lead.
+_INCOMPLETE_REPLY_HOOK_RE = re.compile(
+    r"(?:na\s+pratica|na\s+real|em\s+resumo|resumindo|por\s+exemplo|funciona\s+assim|"
+    r"o\s+investimento\s+e|o\s+valor\s+e|o\s+preco\s+e)\s*,?\s*"
+    r"(?:ela|ele|eles|elas)?\s*:?\s*$"
+)
+_HOURS_GATE_FALLBACK = {
+    "pt": (
+        "A AYA é a SDR da WhatsAYA no WhatsApp: qualifica leads, responde e "
+        "encaminha o que estiver quente. O que você quer entender primeiro?"
+    ),
+    "en": (
+        "AYA is WhatsAYA's SDR on WhatsApp: she qualifies leads, replies, and "
+        "hands off hot opportunities. What do you want to understand first?"
+    ),
+    "es": (
+        "AYA es la SDR de WhatsAYA en WhatsApp: califica leads, responde y "
+        "escala lo que esté caliente. ¿Qué quieres entender primero?"
+    ),
+}
+
+
+def _is_incomplete_reply_sentence(sentence: str) -> bool:
+    """Frase/gancho que não pode ir sozinho ao lead depois de um recorte."""
+    value = str(sentence or "").strip()
+    if not value:
+        return True
+    if value.endswith(":"):
+        return True
+    folded = _normalize_text(value)
+    if _INCOMPLETE_REPLY_HOOK_RE.search(folded):
+        return True
+    if len(value) < 30 and not re.search(r"[.!?…]$", value):
+        return True
+    return False
+
+
+def _reply_remnant_is_incomplete(text: str) -> bool:
+    """Resto pós-recorte incompleto: ':' final, intro de lista, ou fragmento minúsculo."""
+    value = str(text or "").strip()
+    if not value:
+        return True
+    if value.endswith(":"):
+        return True
+    folded = _normalize_text(value)
+    if _INCOMPLETE_REPLY_HOOK_RE.search(folded):
+        return True
+    if len(value) < 30 and not re.search(r"[.!?…]$", value):
+        return True
+    return False
+
+
+def _salvage_complete_reply_text(text: str) -> str:
+    """Mantém só frases completas — descarta gancho órfão ('Na prática, ela:')."""
+    kept_paragraphs: list[str] = []
+    for paragraph in re.split(r"\n\s*\n+", str(text or "")):
+        sentences = re.split(r"(?<=[.!?…])\s+", paragraph)
+        kept = [
+            sentence.strip()
+            for sentence in sentences
+            if sentence.strip() and not _is_incomplete_reply_sentence(sentence)
+        ]
+        if kept:
+            kept_paragraphs.append(" ".join(kept))
+    return "\n\n".join(kept_paragraphs).strip()
+
+
+def _finalize_stripped_reply(restante: str, *, fallback: str) -> str:
+    """Depois do recorte: frases completas que sobraram, senão fallback inteiro."""
+    salvaged = _salvage_complete_reply_text(restante)
+    if salvaged and not _reply_remnant_is_incomplete(salvaged):
+        return salvaged
+    return str(fallback or "").strip()
 
 
 def _enforce_unsolicited_hours_gate(response_text: str, *, user_message: str) -> str:
@@ -13119,12 +13205,16 @@ def _enforce_unsolicited_hours_gate(response_text: str, *, user_message: str) ->
     if not removed:
         return text
     restante = "\n\n".join(kept).strip()
+    language = _payment_gate_language(user_message, {})
+    fallback = _HOURS_GATE_FALLBACK.get(language) or _HOURS_GATE_FALLBACK["pt"]
+    final = _finalize_stripped_reply(restante, fallback=fallback)
     logger.warning(
-        "[hours-gate] horário humano removido n=%d restante=%d",
+        "[hours-gate] horário humano removido n=%d restante=%d final=%d",
         removed,
         len(restante),
+        len(final),
     )
-    return restante
+    return final
 
 
 # A persona default do dono às vezes responde como assistente RASCUNHANDO uma

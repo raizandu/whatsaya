@@ -9308,6 +9308,23 @@ class TestQaFinalBrasilGoLive(unittest.TestCase):
         self.assertNotIn("tony", folded)
         self.assertNotIn("997", out)
 
+    def test_preco_sem_mercado_sem_pedido_nao_deixa_gancho_na_pratica_ela(self):
+        """Mesmo critério do hours-gate: recorte de preço sem pedido de valor não
+        pode deixar 'Na prática, ela:' / intro de lista órfã."""
+        out = self._gate(
+            "Oi! Queria entender como a AYA funciona",
+            "A AYA é a SDR da WhatsAYA no WhatsApp. Na prática, ela:\n\n"
+            "A implementação fica em R$ 997 e a mensalidade R$ 397.",
+            contact={"language": "pt"},
+        )
+        folded = whatsapp_manager._normalize_text(out)
+        self.assertTrue(out.strip())
+        self.assertFalse(out.rstrip().endswith(":"), out)
+        self.assertNotIn("na pratica, ela", folded)
+        self.assertNotIn("997", out)
+        self.assertNotIn("397", out)
+        self.assertRegex(out.rstrip(), r"[.!?…]$")
+
     def test_coloquiais_de_preco_sao_pergunta_de_preco(self):
         for msg in (
             "quanto custa isso?",
@@ -9456,17 +9473,29 @@ class TestQaFinalBrasilGoLive(unittest.TestCase):
         self.assertNotIn("tambem e de goiania", folded)
 
     def test_horario_de_goiania_nao_chega_ao_lead_sem_pedido(self):
+        """QA 25/08: hours-gate + preço sem mercado deixavam gancho órfão
+        ('Na prática, ela:') — 55c incompletos. Remover expediente sem pedir
+        não pode entregar intro de lista nem frase cortada no ':'."""
         out = whatsapp_manager._enforce_unsolicited_hours_gate(
-            "A AYA responde no WhatsApp.\n\n"
+            "A AYA é a SDR da WhatsAYA no WhatsApp. Na prática, ela:\n\n"
             "O horário de atendimento humano é de segunda a sexta, das 08h às 18h, "
             "no horário de Goiânia.",
             user_message="Oi! Queria entender como a AYA funciona",
         )
         folded = whatsapp_manager._normalize_text(out)
-        self.assertIn("whatsapp", folded)
+        self.assertTrue(out.strip())
+        self.assertFalse(out.rstrip().endswith(":"), out)
+        self.assertNotRegex(folded, r"\bela\s*:\s*$")
+        self.assertNotIn("na pratica, ela", folded)
+        self.assertRegex(out.rstrip(), r"[.!?…]$")
+        self.assertNotEqual(
+            out.strip(),
+            "A AYA é a SDR da WhatsAYA no WhatsApp. Na prática, ela:",
+        )
         self.assertNotIn("goiania", folded)
         self.assertNotIn("08h", folded)
         self.assertNotIn("18h", folded)
+        self.assertNotIn("segunda a sexta", folded)
 
     def test_horario_fica_se_o_lead_perguntou(self):
         texto = "Atendemos de segunda a sexta, das 08h às 18h, no horário de Goiânia."

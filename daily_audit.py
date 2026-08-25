@@ -343,6 +343,13 @@ FALLBACK_PHRASES: tuple[str, ...] = (
     "What else do you need to decide?",
     "Esa parte de configuración la ajustamos juntos después de la contratación. "
     "¿Qué te falta para decidir?",
+    # _HOURS_GATE_FALLBACK
+    "A AYA é a SDR da WhatsAYA no WhatsApp: qualifica leads, responde e "
+    "encaminha o que estiver quente. O que você quer entender primeiro?",
+    "AYA is WhatsAYA's SDR on WhatsApp: she qualifies leads, replies, and "
+    "hands off hot opportunities. What do you want to understand first?",
+    "AYA es la SDR de WhatsAYA en WhatsApp: califica leads, responde y "
+    "escala lo que esté caliente. ¿Qué quieres entender primero?",
     # _PAYMENT_GATE_ASK_MARKET (frase antiga fica para o log dos dias anteriores)
     "Em qual país sua empresa atua?",
     "Which country does your company operate in?",
