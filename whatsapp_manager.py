@@ -149,12 +149,6 @@ class PluginConfig:
     def whatsapp_audit_enabled(self) -> bool:
         return os.getenv("WHATSAPP_AUDIT_ENABLED", "").strip().lower() in {"1", "true", "yes"}
 
-    @property
-    def whatsapp_audit_hour(self) -> int:
-        try:
-            return max(0, min(23, int(os.getenv("WHATSAPP_AUDIT_HOUR", "20").strip())))
-        except ValueError:
-            return 20
 
     @property
     def whatsapp_sync_max_classifications(self) -> int:
@@ -2761,8 +2755,12 @@ def _run_daily_audit(day=None) -> str | None:
     try:
         destino = _audit_report_dir()
         destino.mkdir(parents=True, exist_ok=True)
-        caminho = destino / f"audit-{dia.strftime('%Y%m%d')}.md"
-        caminho.write_text(da.render_report(auditoria, veredito, material), encoding="utf-8")
+        alvo = destino / f"audit-{dia.strftime('%Y%m%d')}.md"
+        alvo.write_text(da.render_report(auditoria, veredito, material), encoding="utf-8")
+        # Só vira caminho DEPOIS de gravar: atribuir antes fazia a falha de
+        # escrita ser reportada como sucesso pelo tick, apontando para um
+        # arquivo que não existe.
+        caminho = alvo
     except OSError as err:
         logger.error("[daily-audit] não consegui gravar o relatório: %s", err)
 

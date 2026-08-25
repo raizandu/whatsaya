@@ -215,6 +215,19 @@ class RunDailyAuditTest(unittest.TestCase):
         self.assertIn("payment-gate:unofficial_details", texto)
         self.assertIn("official:BR:pix cnpj", texto)
 
+    def test_falha_ao_gravar_nao_e_reportada_como_sucesso(self):
+        # `caminho` era atribuído antes do write: com OSError, o tick logava
+        # "relatório: <arquivo>" e saía 0 apontando para um arquivo inexistente.
+        from datetime import date
+
+        with patch("whatsapp_manager._MSG_DB_PATH", self.db), \
+             patch("whatsapp_manager._audit_llm_call", return_value="v"), \
+             patch("whatsapp_manager._human_send", return_value="mid"), \
+             patch("pathlib.Path.write_text", side_effect=OSError("disco cheio")):
+            caminho = wm._run_daily_audit(date(2026, 8, 24))
+
+        self.assertIsNone(caminho)
+
     def test_sem_dono_configurado_grava_mas_nao_envia(self):
         with patch.dict(os.environ, {"WHATSAPP_OWNER_NUMBER": ""}):
             caminho, send = self._run()

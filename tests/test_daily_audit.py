@@ -67,6 +67,12 @@ GATE_P4 = (
     "markets=['BR'] prices={} price_roles={} digits=['official:BR:pix cnpj'] "
     "emails=[] restante=0 payment_content=True unofficial=['unknown_digits']"
 )
+# `parágrafo de mercado errado removido` é o OUTRO disparo do payment-gate e não
+# traz `reason=` — contar só as linhas com reason perdia esse disparo inteiro.
+GATE_STRIP = (
+    "[whatsapp-manager] [payment-gate] parágrafo de mercado errado removido "
+    f"chat='{CHAT_A}' market='US' markets=['BR', 'US'] restante=142"
+)
 HUMAN_SEND = (
     f"[whatsapp-manager] [human-send] chat='{CHAT_A}' bubbles=4 sizes=[407, 61, 261, 64]"
 )
@@ -176,6 +182,12 @@ class AggregateEventsTest(unittest.TestCase):
         self.assertEqual(placar.guard_hits["payment-gate:unofficial_details"], 1)
         self.assertEqual(placar.guard_hits["payment-gate:market_mismatch"], 1)
         self.assertEqual(placar.guard_hits["onboarding-gate"], 1)
+
+    def test_conta_o_disparo_de_recorte_de_mercado_que_nao_tem_reason(self):
+        placar = aggregate_events(parse_log_lines([GATE_STRIP]))
+
+        self.assertEqual(placar.guard_hits["payment-gate:market_strip"], 1)
+        self.assertEqual(placar.by_chat[CHAT_A], 1)
 
     def test_banner_de_boot_do_watchdog_nao_e_incidente(self):
         # 28 dessas em 48h são 28 subidas do gateway, não 28 mensagens sem resposta.
@@ -293,6 +305,34 @@ class ReadDayTurnsTest(unittest.TestCase):
         self.assertTrue(aya.from_me)
         self.assertEqual(lead.chat_id, CHAT)
 
+    def test_dia_antigo_nao_e_cortado_pelo_limite(self):
+        # O recorte por dia é feito em Python (WHERE timestamp já devolveu vazio
+        # neste banco). Sem restringir a consulta ao dia, reprocessar uma data
+        # antiga devolvia "0 conversas" em silêncio assim que o banco passasse
+        # do LIMIT — que é justamente o caminho documentado no tick.
+        for i in range(60):
+            self.insert(body=f"recente {i}", ts=_epoch("2026-08-30T10:00:00") + i)
+        self.insert(body="do dia auditado", ts=_epoch("2026-08-24T10:00:00"))
+
+        turnos = read_day_turns(self.db, date(2026, 8, 24), limit=10)
+
+        self.assertEqual([t.body for t in turnos], ["do dia auditado"])
+
+    def test_timestamp_gravado_como_texto_nao_some_do_relatorio(self):
+        # Armadilha documentada no handoff: "WHERE timestamp >= devolve vazio".
+        # SQLite é dinamicamente tipado — uma linha com timestamp TEXT nunca
+        # satisfaz a comparação numérica e sumiria do dia inteiro em silêncio.
+        self.conn.execute(
+            "INSERT INTO messages (chat_id, message_id, body, timestamp, from_me)"
+            " VALUES (?,?,?,?,?)",
+            (CHAT, "texto1", "gravada como texto", str(_epoch("2026-08-24T10:00:00")), 0),
+        )
+        self.conn.commit()
+
+        turnos = read_day_turns(self.db, date(2026, 8, 24))
+
+        self.assertEqual([t.body for t in turnos], ["gravada como texto"])
+
     def test_banco_ausente_nao_explode(self):
         self.assertEqual(read_day_turns(Path(self.tmp.name) / "nao-existe.db", date(2026, 8, 24)), [])
 
@@ -333,6 +373,30 @@ class GroupRepliesTest(unittest.TestCase):
 
         self.assertEqual(primeira.bubbles, ["oi, tudo bem?"])
         self.assertEqual(segunda.bubbles, ["depende do plano"])
+
+    def test_turnos_separados_por_horas_nao_viram_um_turno_so(self):
+        # Sem fechar por tempo, um follow-up agendado horas depois grudava no
+        # turno anterior: virava `bolhas_demais` falso, e o trecho anexado
+        # apontava para a parte errada da conversa.
+        from datetime import timedelta
+
+        primeiro = _turn(0, False, "quanto custa?")
+        resposta = _turn(1, True, "te explico")
+        followup = _turn(1, True, "passou por aqui?")
+        followup.at = resposta.at + timedelta(hours=4)
+        turnos = [primeiro, resposta, followup]
+
+        primeira, segunda = group_replies(turnos)
+
+        self.assertEqual(primeira.bubbles, ["te explico"])
+        self.assertEqual(segunda.bubbles, ["passou por aqui?"])
+
+    def test_bolhas_do_mesmo_turno_continuam_juntas(self):
+        turnos = [_turn(0, False, "oi")] + [_turn(1, True, b) for b in ("a", "b")]
+
+        (resposta,) = group_replies(turnos)
+
+        self.assertEqual(resposta.bubbles, ["a", "b"])
 
     def test_conversas_diferentes_nao_se_misturam(self):
         turnos = [
@@ -841,6 +905,39 @@ class RenderTest(unittest.TestCase):
         completo = render_report(dia, "veredito", compile_material(dia, turnos))
 
         self.assertNotIn("44.249.819", completo)
+
+
+class BusinessTimezoneTest(unittest.TestCase):
+    def test_o_fuso_do_relatorio_acompanha_o_tz_do_container(self):
+        # O log é escrito em hora local do container e os turnos eram recortados
+        # em São Paulo: com TZ diferente, as duas metades do relatório cobriam
+        # janelas deslocadas.
+        import os
+        from unittest.mock import patch
+
+        import daily_audit
+
+        with patch.dict(os.environ, {"TZ": "America/New_York"}):
+            self.assertEqual(str(daily_audit.business_tz()), "America/New_York")
+
+    def test_sem_tz_continua_no_fuso_do_negocio(self):
+        import os
+        from unittest.mock import patch
+
+        import daily_audit
+
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("TZ", None)
+            self.assertEqual(str(daily_audit.business_tz()), "America/Sao_Paulo")
+
+    def test_tz_invalido_nao_derruba_o_relatorio(self):
+        import os
+        from unittest.mock import patch
+
+        import daily_audit
+
+        with patch.dict(os.environ, {"TZ": "Nao/Existe"}):
+            self.assertEqual(str(daily_audit.business_tz()), "America/Sao_Paulo")
 
 
 class ReadDayLogLinesTest(unittest.TestCase):

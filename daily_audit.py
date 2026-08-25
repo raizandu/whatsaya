@@ -6,6 +6,7 @@ agenda, chama o modelo e entrega ao dono é o `whatsapp_manager` / o tick de cro
 """
 from __future__ import annotations
 
+import os
 import re
 import sqlite3
 import unicodedata
@@ -16,7 +17,25 @@ from zoneinfo import ZoneInfo
 
 # O dia do relatório é o dia comercial do dono, não o dia UTC: 23h de Goiânia
 # ainda é o mesmo expediente, e por UTC cairia no dia seguinte.
-BUSINESS_TZ = ZoneInfo("America/Sao_Paulo")
+BUSINESS_TZ_DEFAULT = "America/Sao_Paulo"
+
+
+def business_tz() -> ZoneInfo:
+    """Fuso do relatório — o mesmo `TZ` do container.
+
+    O log é gravado em hora local do container e os turnos são recortados por
+    este fuso: fixar São Paulo aqui fazia as duas metades do relatório cobrirem
+    janelas diferentes para quem roda com outro `TZ`.
+    """
+    nome = os.getenv("TZ", "").strip() or BUSINESS_TZ_DEFAULT
+    try:
+        return ZoneInfo(nome)
+    except Exception:
+        return ZoneInfo(BUSINESS_TZ_DEFAULT)
+
+
+# Compatibilidade: quem só precisa do padrão continua importando a constante.
+BUSINESS_TZ = ZoneInfo(BUSINESS_TZ_DEFAULT)
 
 
 # Campos que cada tag emite, na ordem do `logger.*` correspondente em
@@ -99,7 +118,7 @@ class Turn:
 
 
 def _day_bounds(day: date) -> tuple[float, float]:
-    start = datetime.combine(day, datetime.min.time(), tzinfo=BUSINESS_TZ)
+    start = datetime.combine(day, datetime.min.time(), tzinfo=business_tz())
     return start.timestamp(), (start + timedelta(days=1)).timestamp()
 
 
@@ -115,20 +134,33 @@ def read_day_turns(db_path, day: date, *, limit: int = 4000) -> list[Turn]:
     if not path.is_file():
         return []
     inicio, fim = _day_bounds(day)
+    tz = business_tz()
     try:
         conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5)
     except sqlite3.Error:
         return []
-    try:
-        rows = conn.execute(
-            """
+    corpo = """
             SELECT chat_id, timestamp, from_me, body
             FROM messages
             WHERE is_historical = 0 AND body IS NOT NULL AND TRIM(body) != ''
-            ORDER BY COALESCE(timestamp, 0) DESC LIMIT ?
-            """,
-            (max(1, int(limit)),),
+    """
+    try:
+        # Recortar o dia no SQL é o que permite reprocessar uma data antiga: sem
+        # isso o LIMIT come as linhas do dia pedido antes do filtro em Python.
+        rows = conn.execute(
+            corpo + " AND timestamp IS NOT NULL AND timestamp >= ? AND timestamp < ?"
+            " ORDER BY COALESCE(timestamp, 0) DESC LIMIT ?",
+            (inicio, fim, max(1, int(limit))),
         ).fetchall()
+        if not rows:
+            # O handoff registra `WHERE timestamp >=` devolvendo vazio contra este
+            # banco. Não reproduzi (a afinidade REAL da coluna converte texto
+            # numérico), mas é observação de produção: se o recorte no SQL não
+            # trouxer nada, tenta o caminho antigo antes de declarar dia vazio.
+            rows = conn.execute(
+                corpo + " ORDER BY COALESCE(timestamp, 0) DESC LIMIT ?",
+                (max(1, int(limit)),),
+            ).fetchall()
     except sqlite3.Error:
         return []
     finally:
@@ -137,7 +169,7 @@ def read_day_turns(db_path, day: date, *, limit: int = 4000) -> list[Turn]:
     turnos = [
         Turn(
             chat_id=str(chat_id),
-            at=datetime.fromtimestamp(float(ts), BUSINESS_TZ),
+            at=datetime.fromtimestamp(float(ts), tz),
             from_me=bool(from_me),
             body=str(body),
         )
@@ -185,6 +217,11 @@ def aggregate_events(eventos) -> EventScore:
         chave = ""
         if tag == "payment-gate" and "reason" in campos:
             chave = f"payment-gate:{_unquote(campos['reason'])}"
+        elif tag == "payment-gate" and "market" in campos:
+            # O disparo de recorte ("parágrafo de mercado errado removido") não
+            # emite `reason=`. Exigir reason descartava esse disparo inteiro —
+            # do placar e da evidência.
+            chave = "payment-gate:market_strip"
         elif tag == "onboarding-gate" and "n" in campos:
             chave = "onboarding-gate"
         elif tag == "inbound-watchdog":
@@ -219,13 +256,24 @@ class Reply:
     at: datetime
     bubbles: list[str] = field(default_factory=list)
     lead_message: str = ""
+    # Hora da última bolha, para saber onde o turno termina.
+    bubbles_last_at: datetime | None = None
+
+
+# Bolhas do mesmo turno saem em segundos (`_human_send` dorme 2–8s entre elas).
+# Uma pausa maior que isto é outro turno — um follow-up agendado, ou o dono
+# voltando ao assunto horas depois.
+REPLY_GAP_S = 15 * 60
 
 
 def group_replies(turns) -> list[Reply]:
     """Agrupa bolhas consecutivas da AYA numa resposta só, por conversa.
 
     `_human_send` grava uma linha por bolha; sem agrupar, um turno de 4 bolhas
-    contaria como 4 respostas e distorceria qualquer placar por resposta.
+    contaria como 4 respostas e distorceria qualquer placar por resposta. O
+    turno fecha na mensagem do lead OU numa pausa longa: sem o corte por tempo,
+    um follow-up de horas depois grudava no turno anterior e virava violação de
+    formato inventada, com o trecho apontando para a parte errada da conversa.
     """
     abertas: dict[str, Reply] = {}
     ultima_do_lead: dict[str, str] = {}
@@ -236,15 +284,19 @@ def group_replies(turns) -> list[Reply]:
             ultima_do_lead[turn.chat_id] = turn.body
             continue
         aberta = abertas.get(turn.chat_id)
+        if aberta is not None and (turn.at - aberta.bubbles_last_at).total_seconds() > REPLY_GAP_S:
+            aberta = None
         if aberta is None:
             aberta = Reply(
                 chat_id=turn.chat_id,
                 at=turn.at,
                 lead_message=ultima_do_lead.get(turn.chat_id, ""),
             )
+            aberta.bubbles_last_at = turn.at
             abertas[turn.chat_id] = aberta
             respostas.append(aberta)
         aberta.bubbles.append(turn.body)
+        aberta.bubbles_last_at = turn.at
     return respostas
 
 
@@ -544,10 +596,16 @@ def _gate_evidence(events) -> list[str]:
     """Evidência do payment-gate como o log a classificou — nunca o valor."""
     linhas = []
     for evento in events:
-        if evento.tag != "payment-gate" or "reason" not in evento.fields:
+        if evento.tag != "payment-gate":
             continue
         campos = evento.fields
-        partes = [f"motivo={_unquote(campos['reason'])}", f"chat={mask_chat(evento.chat_id)}"]
+        if "reason" in campos:
+            motivo = _unquote(campos["reason"])
+        elif "market" in campos:
+            motivo = "market_strip"
+        else:
+            continue
+        partes = [f"motivo={motivo}", f"chat={mask_chat(evento.chat_id)}"]
         for chave in ("market", "intent", "digits", "emails", "prices", "unofficial"):
             if chave in campos:
                 partes.append(f"{chave}={campos[chave]}")
