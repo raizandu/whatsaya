@@ -6,6 +6,7 @@ modelo auditor e o agendamento.
 """
 from __future__ import annotations
 
+import datetime
 import logging
 import os
 import sys
@@ -543,6 +544,50 @@ class NotionTicketTest(unittest.TestCase):
             wm._create_notion_ticket(self._proposta(), date(2026, 8, 24))
 
         self.assertNotIn("secret_supersecreto", "\n".join(logs.output))
+
+
+class DefaultDayPathTest(unittest.TestCase):
+    """`day=None` é o ÚNICO caminho que o cron usa, e era o único que os testes
+    não exercitavam — todos passavam uma data explícita. Resultado: um
+    `datetime.now` errado (o módulo é importado como `datetime`, não a classe)
+    só quebrou em produção, no smoke do cron.
+
+    Cobre os três pontos de entrada sem data, para a classe de buraco fechar
+    junto com o caso.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="whatsaya-hoje-")
+        self.env = patch.dict(os.environ, {
+            "WHATSAPP_AUDIT_REPORT_DIR": str(Path(self.tmp.name) / "reports"),
+            "WHATSAPP_PLUGIN_LOG": str(Path(self.tmp.name) / "vazio.log"),
+            "WHATSAPP_OWNER_NUMBER": "",
+        })
+        self.env.start()
+
+    def tearDown(self):
+        self.env.stop()
+        self.tmp.cleanup()
+
+    def test_coleta_sem_data_usa_hoje_e_nao_quebra(self):
+        import daily_audit as da
+
+        dia, _auditoria, material = wm._audit_day_material()
+
+        self.assertEqual(dia, datetime.datetime.now(da.business_tz()).date())
+        self.assertIn("Auditoria do atendimento", material)
+
+    def test_modo_agente_sem_data_nao_quebra(self):
+        material, caminho = wm._collect_audit_material()
+
+        self.assertIn("Números do dia", material)
+        self.assertTrue(Path(caminho).is_file())
+
+    def test_auditoria_completa_sem_data_nao_quebra(self):
+        with patch("whatsapp_manager._audit_llm_call", return_value=""):
+            caminho = wm._run_daily_audit()
+
+        self.assertTrue(Path(caminho).is_file())
 
 
 class AuditMaxTokensTest(unittest.TestCase):
