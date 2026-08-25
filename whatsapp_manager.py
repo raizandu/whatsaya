@@ -61,8 +61,22 @@ def _plugin_log_path() -> Path:
     return Path(os.getenv("WHATSAPP_PLUGIN_LOG", _PLUGIN_LOG_DEFAULT))
 
 
+def _running_under_test() -> bool:
+    return "unittest" in sys.modules or "pytest" in sys.modules
+
+
 def _attach_plugin_file_log(path=None) -> bool:
-    """Espelha o log do plugin num arquivo legível pelo auditor. Fail-open."""
+    """Espelha o log do plugin num arquivo legível pelo auditor. Fail-open.
+
+    Sem argumento é o caminho automático do boot. Aí a suíte é recusada: rodar
+    os testes DENTRO do container reexecuta `register()` uma vez por processo de
+    teste (690 numa rodada medida) e despejava milhares de linhas de fixture no
+    log que o auditor lê — enchendo a janela de rotação e fazendo chat de teste
+    aparecer no relatório como lead real. Caminho explícito continua anexando,
+    porque aí é deliberado (teste do próprio handler, ferramenta, reprocesso).
+    """
+    if path is None and _running_under_test():
+        return False
     destino = Path(path or _plugin_log_path())
     for handler in logger.handlers:
         if isinstance(handler, logging.FileHandler) and \

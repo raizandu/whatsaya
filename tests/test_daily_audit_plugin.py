@@ -60,6 +60,32 @@ class PluginFileLogTest(unittest.TestCase):
         linhas = [l for l in self.path.read_text(encoding="utf-8").splitlines() if "[handoff]" in l]
         self.assertEqual(len(linhas), 1)
 
+    def test_suite_de_teste_nao_escreve_no_log_de_producao(self):
+        """Rodar a suíte DENTRO do container reexecuta `register()` a cada
+        processo de teste — 690 vezes numa rodada observada — e despejava
+        milhares de linhas de fixture no log que o auditor lê. Além de encher a
+        janela de rotação (~1 MB em 15 min), fazia chat de teste aparecer no
+        relatório como se fosse lead real."""
+        antes = list(wm.logger.handlers)
+        gravavel = Path(self.tmp.name) / "producao.log"
+
+        # Aponta o caminho "de produção" para um lugar GRAVÁVEL: se a recusa
+        # dependesse de /opt/data não existir, este teste passaria no macOS e
+        # falharia no container, que é onde o problema acontece de verdade.
+        with patch.dict(os.environ, {"WHATSAPP_PLUGIN_LOG": str(gravavel)}):
+            attached = wm._attach_plugin_file_log()
+
+        self.assertFalse(attached)
+        self.assertEqual(wm.logger.handlers, antes)
+        self.assertFalse(gravavel.exists())
+
+    def test_caminho_explicito_continua_anexando(self):
+        # Caminho explícito é deliberado (testes, ferramenta, reprocessamento):
+        # a guarda vale só para o caminho automático do boot.
+        self.assertTrue(wm._attach_plugin_file_log(self.path))
+        wm.logger.warning("[handoff] linha de teste")
+        self.assertIn("linha de teste", self.path.read_text(encoding="utf-8"))
+
     def test_caminho_impossivel_nao_derruba_o_plugin(self):
         # Fail-open: perder o log do auditor é aceitável; derrubar o atendimento não.
         wm._attach_plugin_file_log(Path("/nao/existe/de/jeito/nenhum/x.log"))
