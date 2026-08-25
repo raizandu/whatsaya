@@ -6532,6 +6532,19 @@ class TestOnboardingGate(unittest.TestCase):
         self.assertNotIn("fluxo base", folded)
         self.assertTrue(out.strip())
 
+    def test_configurar_esse_fluxo_precisamos_levantar_sai(self):
+        """Spec UX: 'Para configurar esse fluxo precisamos levantar…' — a guarda
+        antiga só casava 'precisaria'. Frase literal do documento de experiência."""
+        out = self._gate(
+            "Para configurar esse fluxo precisamos levantar procedimentos, "
+            "dúvidas aprovadas, unidades, horários, regras de agenda, "
+            "critérios de handoff, tom de voz e objeções."
+        )
+        folded = whatsapp_manager._normalize_text(out)
+        self.assertNotIn("para configurar esse fluxo", folded)
+        self.assertNotIn("precisamos levantar", folded)
+        self.assertTrue(out.strip())
+
 
 TABELA_PRECOS_MIN = (
     "| Mercado | Implementação | Mensalidade |\n| --- | --- | --- |\n"
@@ -6736,6 +6749,24 @@ class TestPriceFallbacks(unittest.TestCase):
             rules_content="",
         )
         self.assertIn("Me conta como funciona", out)
+
+    def test_lead_ja_descreveu_operacao_nao_repergunta_atendimento(self):
+        """Spec: não perguntar de novo o que já está confirmado."""
+        historico = (
+            "Lead: Tenho uma clínica odontológica. A maioria chama perguntando "
+            "sobre procedimentos e querendo marcar avaliação\n"
+        )
+        with patch("whatsapp_manager._fetch_chat_history", return_value=historico):
+            out = whatsapp_manager._payment_gate_fallback(
+                "hmm entendi",
+                {"market_id": "BR", "language": "pt"},
+                "market_mismatch",
+                rules_content="",
+                chat_id="12025550199@s.whatsapp.net",
+            )
+        folded = whatsapp_manager._normalize_text(out)
+        self.assertNotIn("me conta como funciona seu atendimento", folded)
+        self.assertTrue(out.strip())
 
 
 class TestCountryReplyCapture(unittest.TestCase):
@@ -7243,6 +7274,51 @@ class TestPrepareContactReply(BaseWhatsAppManagerTest):
         self.assertTrue(
             "caso forte" in folded or "nao deve diagnosticar" in folded, out
         )
+
+    def test_sdr_da_whatsaya_nao_chega_ao_lead(self):
+        import whatsapp_manager
+        out = whatsapp_manager._prepare_contact_reply(
+            "A AYA é a SDR da WhatsAYA no WhatsApp."
+        )
+        folded = whatsapp_manager._normalize_text(out)
+        self.assertNotIn("sdr", folded)
+        self.assertIn("atendente comercial", folded)
+
+    def test_qualifica_registra_contexto_faz_handoff_nao_chega(self):
+        import whatsapp_manager
+        out = whatsapp_manager._prepare_contact_reply(
+            "A AYA é a SDR da WhatsAYA no WhatsApp. Ela qualifica, registra "
+            "contexto, faz handoff, follow-up e conduz fluxos conforme as "
+            "regras definidas."
+        )
+        folded = whatsapp_manager._normalize_text(out)
+        self.assertNotIn("sdr", folded)
+        self.assertNotIn("registra contexto", folded)
+        self.assertNotIn("faz handoff", folded)
+        self.assertTrue(out.strip())
+
+    def test_proximo_passo_interno_nao_chega(self):
+        import whatsapp_manager
+        out = whatsapp_manager._prepare_contact_reply(
+            "Perfeito. Posso encaminhar isso para a equipe.\n\n"
+            "Próximo passo interno: marcar como lead qualificado."
+        )
+        folded = whatsapp_manager._normalize_text(out)
+        self.assertNotIn("proximo passo interno", folded)
+        self.assertIn("equipe", folded)
+
+    def test_marcador_handoff_nao_chega_ao_lead(self):
+        import whatsapp_manager
+        out = whatsapp_manager._prepare_contact_reply(
+            "Perfeito. Posso encaminhar isso para a equipe continuar com você. "
+            "Qual período costuma ser melhor: manhã ou tarde?\n\n"
+            "[[HANDOFF: lead quer avançar — proposta na call]]"
+        )
+        folded = whatsapp_manager._normalize_text(out)
+        self.assertNotIn("[[handoff", folded)
+        self.assertNotIn("handoff:", folded)
+        self.assertIn("equipe", folded)
+        self.assertIn("manha ou tarde", folded)
 
 
 class TestTransformLlmOutput(BaseWhatsAppManagerTest):
@@ -9716,6 +9792,48 @@ class TestQaFinalBrasilGoLive(unittest.TestCase):
         self.assertIn("equipe", folded)
         self.assertIn("manha ou tarde", folded)
         self.assertIn("[[HANDOFF:", out)
+
+    def test_marcador_da_guarda_nao_sobrevive_ao_caminho_do_lead(self):
+        """O gate precisa do marcador para avisar o dono; o lead não vê."""
+        out = self._gate(
+            "quero avançar",
+            "qualquer lixo",
+            contact={"market_id": "BR", "language": "pt"},
+        )
+        self.assertIn("[[HANDOFF:", out)
+        visivel, motivo = whatsapp_manager._extract_handoff(out)
+        visivel = whatsapp_manager._prepare_contact_reply(visivel)
+        folded = whatsapp_manager._normalize_text(visivel)
+        self.assertTrue(motivo)
+        self.assertNotIn("[[handoff", folded)
+        self.assertNotIn("handoff:", folded)
+        self.assertIn("posso encaminhar isso para a equipe continuar com voce", folded)
+        self.assertIn("manha ou tarde", folded)
+
+    def test_objecao_depois_da_triagem_ainda_reconhece(self):
+        """Stem compartilhado ('contatos por dia') não pode trocar objeção por repeat."""
+        triage = whatsapp_manager._CONSULTING_TRIAGE["pt"]
+        primeira = triage.split(".")[0]
+        historico = f"Lead: quanto custa?\nAYA: {primeira}.\n"
+        out = self._gate(
+            "tá caro",
+            "R$ 1.500.",
+            historico=historico,
+            contact={"market_id": "BR", "language": "pt"},
+        )
+        folded = whatsapp_manager._normalize_text(out)
+        self.assertTrue(folded.startswith("entendo"))
+        self.assertIn("contatos por dia", folded)
+        self.assertNotIn("agenda uma call curta", folded)
+
+    def test_hours_fallback_nao_cataloga_o_que_a_ia_faz(self):
+        folded = whatsapp_manager._normalize_text(
+            whatsapp_manager._HOURS_GATE_FALLBACK["pt"]
+        )
+        self.assertNotIn("qualifica leads", folded)
+        self.assertNotIn("sdr", folded)
+        self.assertIn("atendente comercial", folded)
+        self.assertEqual(folded.count("?"), 1)
 
 
 if __name__ == "__main__":

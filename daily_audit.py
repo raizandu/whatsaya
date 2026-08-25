@@ -336,13 +336,19 @@ FALLBACK_PHRASES: tuple[str, ...] = (
     "Perfeito — seguem os dados oficiais para o pagamento:",
     "Great — here are the official payment details:",
     "Perfecto — estos son los datos oficiales de pago:",
-    # _ONBOARDING_GATE_FALLBACK
+    # _ONBOARDING_GATE_FALLBACK (frase antiga fica para o log)
     "Essa parte de configuração a gente ajusta junto depois da contratação. "
     "O que falta para você tomar a decisão?",
     "We'll sort out that configuration together after you sign up. "
     "What else do you need to decide?",
     "Esa parte de configuración la ajustamos juntos después de la contratación. "
     "¿Qué te falta para decidir?",
+    "Essa parte a gente resolve depois, quando o projeto estiver fechado. "
+    "O que você quer entender agora pra decidir?",
+    "We'll sort that out later, once the project is closed. "
+    "What do you need to understand now to decide?",
+    "Eso lo resolvemos después, cuando el proyecto esté cerrado. "
+    "¿Qué necesitas entender ahora para decidir?",
     # _HOURS_GATE_FALLBACK (frase antiga com SDR fica para o log dos dias anteriores)
     "A AYA é a SDR da WhatsAYA no WhatsApp: qualifica leads, responde e "
     "encaminha o que estiver quente. O que você quer entender primeiro?",
@@ -356,6 +362,15 @@ FALLBACK_PHRASES: tuple[str, ...] = (
     "replies, and hands off hot opportunities. What do you want to understand first?",
     "AYA es la atendente comercial con IA en WhatsApp: califica leads, "
     "responde y escala lo que esté caliente. ¿Qué quieres entender primero?",
+    "A AYA é uma atendente comercial com IA no WhatsApp. Ela responde quem "
+    "chama, entende o que a pessoa precisa e conduz para o próximo passo. "
+    "Como funciona seu atendimento hoje?",
+    "AYA is a commercial AI assistant on WhatsApp. She answers whoever "
+    "reaches out, understands what they need, and guides the next step. "
+    "How does your customer service work today?",
+    "AYA es una atendente comercial con IA en WhatsApp. Responde a quien "
+    "escribe, entiende lo que la persona necesita y conduce al siguiente "
+    "paso. ¿Cómo funciona su atención hoy?",
     # _PAYMENT_GATE_ASK_MARKET (frase antiga fica para o log dos dias anteriores)
     "Em qual país sua empresa atua?",
     "Which country does your company operate in?",
