@@ -8790,5 +8790,248 @@ class TestInboundWatchdog(unittest.TestCase):
         )
 
 
+# Fixtures literais do QA de 24/08 para as melhorias de estado/idioma do agente.
+_QA_RULES_MIN = (
+    "| Mercado | Implementação | Mensalidade |\n"
+    "| --- | --- | --- |\n"
+    "| Estados Unidos | US$ 12 | US$ 3/mês |\n"
+    "| Brasil | R$ 8 | R$ 2/mês |\n"
+    "<!-- AYA_PAYMENT_DETAILS:US:START -->\n"
+    "Zelle email: qa-zelle@example.com\n"
+    "<!-- AYA_PAYMENT_DETAILS:US:END -->\n"
+    "<!-- AYA_PAYMENT_DETAILS:BR:START -->\n"
+    "Pix: qa-pix-chave-teste\n"
+    "<!-- AYA_PAYMENT_DETAILS:BR:END -->\n"
+)
+_QA_CHAT = "12025550199@s.whatsapp.net"
+_QA_CONTINUATION_PT = (
+    "Me conta como funciona seu atendimento hoje que eu te explico como a AYA se encaixa."
+)
+
+
+class TestConversationStateBlock(unittest.TestCase):
+    """Melhoria 1: o banco rastreia o que o modelo esquece.
+
+    Teste #05 do QA de 24/08: a mesma pergunta de continuação saiu no 1º e no 7º
+    turno; 'quero avançar' ganhou o preço de novo. O bloco injetado lista o que
+    já aconteceu para o modelo não reoferecer.
+    """
+
+    def _bloco(self, history, contact=None, chat=_QA_CHAT):
+        return whatsapp_manager._conversation_state_block(
+            chat,
+            rules_content=_QA_RULES_MIN,
+            contact_info=contact or {"market_id": "US", "language": "pt"},
+            history=history,
+        )
+
+    def test_conversa_vazia_nao_injeta_bloco(self):
+        self.assertEqual(self._bloco(""), "")
+
+    def test_preco_oficial_ja_informado_pelo_from_me(self):
+        # Teste #05 / 'quero avançar' respondido com o preço outra vez.
+        history = (
+            f"AYA: US$ 12 de implantação e US$ 3 por mês.\n"
+            "Lead: quero avançar"
+        )
+        bloco = self._bloco(history)
+        self.assertIn("### O QUE JÁ ACONTECEU NESTA CONVERSA ###", bloco)
+        self.assertIn("Preço oficial já informado", bloco)
+        self.assertIn("Não repita nem reofereça o que está acima.", bloco)
+
+    def test_preco_so_na_pergunta_do_lead_nao_conta(self):
+        history = "Lead: Ah que show....cara, e quanto q custa?\nAYA: Me conta como você atende hoje."
+        bloco = self._bloco(history)
+        self.assertNotIn("Preço oficial já informado", bloco)
+
+    def test_preco_oficial_reconhece_from_me_rotulado_com_nome_do_dono(self):
+        history = "André: US$ 12 de implantação e US$ 3 por mês."
+        with patch.dict(os.environ, {"WHATSAPP_OWNER_NAME": "André"}, clear=False):
+            bloco = self._bloco(history)
+        self.assertIn("Preço oficial já informado", bloco)
+
+    def test_dados_de_pagamento_ja_enviados_sem_vazar_valor(self):
+        history = (
+            "AYA: Perfeito — seguem os dados oficiais para o pagamento:\n"
+            "AYA: Zelle email: qa-zelle@example.com"
+        )
+        bloco = self._bloco(history)
+        self.assertIn("Dados de pagamento já enviados", bloco)
+        self.assertNotIn("qa-zelle@example.com", bloco)
+        self.assertNotIn("qazelleexamplecom", bloco)
+
+    def test_objecao_de_preco_ja_levantada(self):
+        history = "Lead: Achei o valor de implementação um pouco caro."
+        bloco = self._bloco(history)
+        self.assertIn("Objeção de preço já levantada", bloco)
+
+    def test_pergunta_de_preco_nao_e_objecao(self):
+        history = "Lead: e quanto q custa?"
+        bloco = self._bloco(history)
+        self.assertNotIn("Objeção de preço já levantada", bloco)
+
+    def test_lead_pediu_humano_com_horario_do_handoff(self):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        ts = datetime(2026, 8, 24, 14, 32, tzinfo=ZoneInfo("America/Sao_Paulo")).timestamp()
+        whatsapp_manager._handoff_sent_at[_QA_CHAT] = ts
+        try:
+            history = "Lead: Quero falar com uma pessoa"
+            bloco = self._bloco(history)
+        finally:
+            whatsapp_manager._handoff_sent_at.pop(_QA_CHAT, None)
+        self.assertIn("Lead pediu humano (14:32)", bloco)
+
+    def test_pergunta_de_continuacao_ja_feita_nao_repete(self):
+        # Teste #05 do QA: no 7º turno o lead recebeu a mesma pergunta do 1º.
+        history = (
+            f"AYA: {_QA_CONTINUATION_PT}\n"
+            "Lead: A gente atende por telefone e WhatsApp."
+        )
+        bloco = self._bloco(history)
+        self.assertIn("Pergunta de continuação já feita", bloco)
+
+
+class TestTurnLanguageHint(unittest.TestCase):
+    """Melhoria 2: lead em português recebeu turno em inglês ('Yes.' + parágrafo)."""
+
+    def test_portugues_claro_pede_resposta_em_portugues(self):
+        dica = whatsapp_manager._turn_language_hint(
+            "Tenho uma empresa de limpeza e quero avançar.",
+            {"language": "en"},
+        )
+        self.assertEqual(
+            dica,
+            "RESPONDA EM PORTUGUÊS — o lead escreve em português.",
+        )
+
+    def test_ok_preserva_idioma_do_cadastro(self):
+        dica = whatsapp_manager._turn_language_hint("ok", {"language": "en"})
+        self.assertEqual(dica, "RESPONDA EM INGLÊS — o lead escreve em inglês.")
+
+    def test_ok_sem_cadastro_nao_inventa_idioma(self):
+        self.assertEqual(whatsapp_manager._turn_language_hint("ok", {}), "")
+        self.assertEqual(whatsapp_manager._turn_language_hint("ok", None), "")
+
+
+class TestPromptDietAndPrefixOrder(unittest.TestCase):
+    """Melhorias 3 e 4: encurtar regras com guarda; variável depois do prefixo estável."""
+
+    def _ctx(self, history="### HISTÓRICO DE MENSAGENS ANTERIORES ###\nLead: oi\n", **kwargs):
+        return whatsapp_manager._build_support_prompt(
+            "persona-estavel",
+            "regras-estaveis",
+            history,
+            contact_info={"name": "Taylor", "relationship": "Cliente", "language": "pt"},
+            conversation_state=(
+                "### O QUE JÁ ACONTECEU NESTA CONVERSA ###\n"
+                "- Preço oficial já informado\n"
+                "Não repita nem reofereça o que está acima.\n"
+            ),
+            language_hint="RESPONDA EM PORTUGUÊS — o lead escreve em português.",
+            **kwargs,
+        )["context"]
+
+    def test_regras_com_guarda_ficam_numa_linha_de_intencao(self):
+        ctx = whatsapp_manager._build_support_prompt("soul", "rules", "")["context"]
+        start = ctx.find("CONSTRAINTS ABSOLUTAS")
+        self.assertGreater(start, 0)
+        bloco = ctx[start:]
+        self.assertIn("DADOS DE PAGAMENTO TÊM GATE", bloco)
+        self.assertIn("ONBOARDING SÓ DEPOIS DA VENDA", bloco)
+        self.assertIn("PREÇO E MOEDA", bloco)
+        self.assertIn("SEPARE OS MERCADOS", bloco)
+        # Lista longa de implantação saiu — a guarda cobre.
+        self.assertNotIn("dias e horários de funcionamento", bloco)
+        self.assertNotIn("cidade/estado", bloco)
+        # Não mexer no que não tem guarda.
+        self.assertIn("TRÊS NÍVEIS DE CERTEZA", bloco)
+        self.assertIn("SIGILO COMERCIAL", bloco)
+        self.assertIn("NUNCA use ferramentas", bloco)
+        self.assertIn("FORMATO DA RESPOSTA", bloco)
+        self.assertGreater(bloco.find("FORMATO DA RESPOSTA"), bloco.find("ONBOARDING SÓ DEPOIS DA VENDA"))
+
+    def test_constraints_medem_menos_depois_da_dieta(self):
+        ctx = whatsapp_manager._build_support_prompt("soul", "rules", "")["context"]
+        start = ctx.find("CONSTRAINTS ABSOLUTAS")
+        end = ctx.find("### DATA E HORA ATUAL ###", start)
+        self.assertGreater(start, 0)
+        self.assertGreater(end, start)
+        bloco = ctx[start:end]
+        # Pré-dieta (f23cab9): o bloco sozinho tinha ~6.4k chars. Depois: 5893.
+        # Um grupo por rodada — pagamento, onboarding, pedido de humano, recorte
+        # de mercado. Folga para o nome do dono variar no f-string.
+        self.assertLess(len(bloco), 6100)
+        self.assertGreater(len(bloco), 2000)
+
+    def test_prefixo_estavel_antes_do_variavel(self):
+        ctx = self._ctx()
+        persona = ctx.find("### PERSONA E DIRETRIZES DO SUPORTE WHATSAPP ###")
+        regras = ctx.find("### BASE DE CONHECIMENTO E REGRAS DE NEGÓCIO ###")
+        constraints = ctx.find("CONSTRAINTS ABSOLUTAS")
+        formato = ctx.find("FORMATO DA RESPOSTA")
+        relogio = ctx.find("### DATA E HORA ATUAL ###")
+        historico = ctx.find("### HISTÓRICO DE MENSAGENS ANTERIORES ###")
+        estado = ctx.find("### O QUE JÁ ACONTECEU NESTA CONVERSA ###")
+        idioma = ctx.rfind("RESPONDA EM PORTUGUÊS")
+        self.assertTrue(all(i >= 0 for i in (
+            persona, regras, constraints, formato, relogio, historico, estado, idioma,
+        )))
+        self.assertLess(persona, regras)
+        self.assertLess(regras, constraints)
+        self.assertLess(constraints, relogio)
+        self.assertLess(formato, relogio)
+        self.assertLess(relogio, historico)
+        self.assertLess(historico, estado)
+        self.assertLess(estado, idioma)
+        self.assertTrue(ctx.rstrip().endswith(
+            "RESPONDA EM PORTUGUÊS — o lead escreve em português."
+        ))
+
+
+class TestPreLlmInjectsStateAndLanguage(BaseWhatsAppManagerTest):
+    """O ramo cliente do pre_llm_call injeta estado e dica de idioma no turno."""
+
+    def test_pre_llm_cliente_termina_com_dica_de_idioma_e_traz_estado(self):
+        pre_llm = self.ctx.hooks.get("pre_llm_call")
+        context = {
+            "platform": "whatsapp",
+            "sender_id": "12025550199@s.whatsapp.net",
+            "user_message": "Tenho uma empresa de limpeza e quero avançar.",
+        }
+        contacts = {
+            "12025550199@s.whatsapp.net": {
+                "name": "Taylor",
+                "relationship": "Cliente",
+                "language": "pt",
+                "market_id": "US",
+                "summary": "Lead de limpeza nos EUA.",
+                "intent": "Contratar",
+                "frequency": "primeira conversa",
+            }
+        }
+        historico = (
+            f"AYA: {_QA_CONTINUATION_PT}\n"
+            "Lead: A gente atende por telefone e WhatsApp."
+        )
+        with patch("whatsapp_manager._load_support_files", return_value=("soul", _QA_RULES_MIN)), \
+             patch("whatsapp_manager._load_personal_contacts", return_value=contacts), \
+             patch("whatsapp_manager._fetch_chat_history", return_value=historico), \
+             patch("whatsapp_manager._live_classify_contact", return_value=None), \
+             patch("whatsapp_manager._persist_external_commercial_metadata"):
+            res = pre_llm("pre_llm_call", context, user_message=context["user_message"])
+        ctx = res["context"]
+        self.assertIn("### O QUE JÁ ACONTECEU NESTA CONVERSA ###", ctx)
+        self.assertIn("Pergunta de continuação já feita", ctx)
+        self.assertIn("Não repita nem reofereça o que está acima.", ctx)
+        self.assertLess(
+            ctx.find("CONSTRAINTS ABSOLUTAS"),
+            ctx.find("### O QUE JÁ ACONTECEU NESTA CONVERSA ###"),
+        )
+        self.assertTrue(ctx.rstrip().endswith(
+            "RESPONDA EM PORTUGUÊS — o lead escreve em português."
+        ))
+
+
 if __name__ == "__main__":
     unittest.main()
