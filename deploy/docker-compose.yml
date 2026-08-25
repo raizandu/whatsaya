@@ -590,6 +590,12 @@ services:
       # máximo do modelo e cobra a reserva: a primeira auditoria morreu com
       # HTTP 402 "requested up to 65536 tokens, but can only afford 19788".
       - WHATSAPP_AUDIT_MAX_TOKENS=${WHATSAPP_AUDIT_MAX_TOKENS:-4000}
+      # true = o parecer é produzido pelo AGENTE do Hermes (herda a cadeia
+      # Codex→OpenRouter da assinatura); o tick só imprime o material. Ligado
+      # por env porque `hermes cron create --script` não aceita argumento.
+      # Nesse modo o portão sim/não da fase 2 não arma — o veredito não volta
+      # ao processo do plugin, e a proposta vira nota para aplicar à mão.
+      - WHATSAPP_AUDIT_AGENT_MODE=${WHATSAPP_AUDIT_AGENT_MODE:-false}
       - WHATSAPP_AUDIT_REPORT_DIR=${WHATSAPP_AUDIT_REPORT_DIR:-/opt/data/reports}
       - WHATSAPP_PLUGIN_LOG=${WHATSAPP_PLUGIN_LOG:-/opt/data/.hermes/logs/whatsapp_plugin.log}
 

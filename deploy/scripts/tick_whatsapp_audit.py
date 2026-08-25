@@ -10,7 +10,8 @@ por dentro, no provider limpo configurado em WHATSAPP_AUDIT_*):
 Sem argumento audita o dia corrente (rode no fim do expediente). Com uma data
 `YYYY-MM-DD` audita aquele dia — útil para reprocessar.
 
-Modo agente (`--material`): não chama LLM nenhuma. Coleta, grava o relatório sem
+Modo agente (`WHATSAPP_AUDIT_AGENT_MODE=true`, ou `--material` à mão): não chama
+LLM nenhuma. Coleta, grava o relatório sem
 veredito e imprime instruções + material no stdout, para o agente do Hermes
 produzir o parecer. É assim que o auditor herda a cadeia Codex→OpenRouter da
 assinatura, sem auth nova — o plugin não tem credencial do backend Codex, que é
@@ -26,6 +27,7 @@ lê e aplica à mão. Foi uma troca aceita de propósito.
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from datetime import date
 from pathlib import Path
@@ -80,7 +82,12 @@ def main(argv: list[str]) -> int:
         logging.info("auditoria desligada (WHATSAPP_AUDIT_ENABLED)")
         return 0
 
-    apenas_material = "--material" in argv
+    # `hermes cron create --script` só aceita caminho, sem argv. Por isso o modo
+    # agente também liga por env; a flag continua para rodar à mão.
+    apenas_material = (
+        "--material" in argv
+        or os.getenv("WHATSAPP_AUDIT_AGENT_MODE", "").strip().lower() in {"1", "true", "yes"}
+    )
     datas = [a for a in argv if not a.startswith("-")]
     dia = None
     if datas:
