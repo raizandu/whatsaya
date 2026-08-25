@@ -20,6 +20,7 @@ from daily_audit import (
     language_hint_scoreboard,
     parse_gateway_lines,
     parse_verdict,
+    notion_ticket_payload,
     render_code_ticket,
     render_proposals,
     reply_latencies,
@@ -1565,3 +1566,89 @@ class RenderProposalsLabelTest(unittest.TestCase):
         }))
 
         self.assertIn("aplicável por sim/não", render_proposals([p]))
+
+
+class NotionTicketPayloadTest(unittest.TestCase):
+    """Corpo do ticket para a base "Tickets — Suporte", montado por código puro.
+
+    Os `select` só aceitam opções que existem no schema — inventar valor faz a
+    API recusar a página inteira, e o achado do dia se perde em silêncio.
+    """
+
+    def _codigo(self, **over):
+        base = {"tipo": "CODIGO", "titulo": "Pergunta de implantação antes da venda",
+                "evidencia": "AYA: 'Qual a duração de cada serviço?' para lead sem venda",
+                "proposta": "barrar na saída quando não há venda", "alvo": {}}
+        base.update(over)
+        (p,) = parse_verdict(_veredito(base))
+        return p
+
+    def test_usa_o_banco_de_dados_pedido_como_pai(self):
+        payload = notion_ticket_payload(self._codigo(), date(2026, 8, 24), "db-123")
+
+        self.assertEqual(payload["parent"], {"database_id": "db-123"})
+
+    def test_titulo_vai_na_propriedade_title(self):
+        payload = notion_ticket_payload(self._codigo(), date(2026, 8, 24), "db")
+
+        titulo = payload["properties"]["Ticket"]["title"][0]["text"]["content"]
+        self.assertIn("Pergunta de implantação", titulo)
+
+    def test_usa_apenas_opcoes_que_existem_no_schema(self):
+        payload = notion_ticket_payload(self._codigo(), date(2026, 8, 24), "db")
+        props = payload["properties"]
+
+        self.assertEqual(props["Tipo"]["select"]["name"], "Melhoria")
+        self.assertEqual(props["Origem"]["select"]["name"], "Interno")
+        # "Triagem" e não "Aberto": ticket criado por máquina ainda não foi aceito
+        # por ninguém, e entrar como Aberto mente sobre o estado dele.
+        self.assertEqual(props["Status"]["select"]["name"], "Triagem")
+        self.assertIn(props["Prioridade"]["select"]["name"], {"Crítica", "Alta", "Média", "Baixa"})
+
+    def test_descricao_resume_sem_repetir_o_corpo(self):
+        payload = notion_ticket_payload(self._codigo(), date(2026, 8, 24), "db")
+
+        desc = payload["properties"]["Descrição"]["rich_text"][0]["text"]["content"]
+        self.assertIn("2026-08-24", desc)
+        self.assertLessEqual(len(desc), 2000)
+
+    def test_corpo_vira_blocos_com_titulo_de_secao(self):
+        payload = notion_ticket_payload(self._codigo(), date(2026, 8, 24), "db")
+        tipos = [b["type"] for b in payload["children"]]
+
+        self.assertIn("heading_2", tipos)
+        self.assertIn("paragraph", tipos)
+
+    def test_nenhum_bloco_passa_do_limite_da_api(self):
+        # rich_text corta em 2000 caracteres; bloco maior faz a API recusar tudo.
+        payload = notion_ticket_payload(
+            self._codigo(evidencia="x" * 5000), date(2026, 8, 24), "db")
+
+        for bloco in payload["children"]:
+            conteudo = bloco[bloco["type"]]["rich_text"]
+            for parte in conteudo:
+                self.assertLessEqual(len(parte["text"]["content"]), 2000)
+
+    def test_proposta_que_nao_e_de_codigo_nao_vira_ticket(self):
+        (dado,) = parse_verdict(_veredito({
+            "tipo": "DADO", "titulo": "t", "evidencia": "e", "proposta": "p",
+            "alvo": {"tipo": "contato", "chat": CHAT_A, "campo": "notes", "valor": "v"},
+        }))
+
+        self.assertIsNone(notion_ticket_payload(dado, date(2026, 8, 24), "db"))
+
+    def test_sem_base_alvo_nao_monta_payload(self):
+        self.assertIsNone(notion_ticket_payload(self._codigo(), date(2026, 8, 24), ""))
+
+    def test_credencial_nao_vaza_para_o_notion(self):
+        # TKT-1 desta mesma base é "credenciais em texto aberto no Notion".
+        # O auditor não pode piorar isso.
+        p = self._codigo(evidencia="modelo escreveu CNPJ 44.249.819/0001-62")
+        payload = notion_ticket_payload(p, date(2026, 8, 24), "db")
+
+        self.assertNotIn("44.249.819", _json_dump(payload))
+
+
+def _json_dump(obj):
+    import json as _j
+    return _j.dumps(obj, ensure_ascii=False)

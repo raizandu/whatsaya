@@ -115,9 +115,19 @@ credencial real por contaminação de provider. O mesmo vale para `summary`/`ton
 `toolsets: []` no perfil de cliente: o agente não se automodifica por caminho
 nenhum.
 
-A criação do ticket na base do Notion **não é feita pelo plugin**: exigiria token
-e id de base que o deploy não tem, e é escrita em serviço externo. O corpo sai
-pronto no relatório para copiar.
+**Ticket automático.** Achado de `CODIGO` abre ticket na base "Tickets — Suporte"
+via `NOTION_API_KEY` + `NOTION_TICKETS_DB` (`POST /v1/pages`). Precisa de chave de
+**integração interna** (`ntn_`/`secret_`), não de OAuth — o plugin roda no
+container, onde não há MCP —, e a integração tem de estar compartilhada com a
+base, senão a API devolve 404 mesmo com a chave certa. Entra como `Status=Triagem`
+(criado por máquina, ainda não aceito por ninguém) e `Tipo=Melhoria`; as opções de
+`select` são travadas em teste porque valor inexistente faz a API recusar a página
+inteira e o achado se perde em silêncio. **Fail-closed:** sem as duas envs não há
+chamada, e o corpo do ticket continua saindo no relatório para copiar.
+
+O corpo passa por `redact` antes de sair — o TKT-1 aberto nessa mesma base é
+"credenciais de produção em texto aberto no Notion", e a automação não pode
+piorar justamente o ticket crítico.
 
 ### Dois perfis de isolamento
 

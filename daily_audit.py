@@ -1164,3 +1164,76 @@ def render_code_ticket(proposal, day: date) -> str:
         "Suíte no container (é o veredito), push na main, `git pull --ff-only` no",
         "clone e `docker restart hermes`.",
     ])
+
+
+# Opções válidas da base "Tickets — Suporte". Inventar valor de `select` faz a API
+# recusar a página inteira, e aí o achado do dia se perde em silêncio.
+NOTION_TICKET_TYPE = "Melhoria"
+NOTION_TICKET_ORIGIN = "Interno"
+# "Triagem", não "Aberto": ticket criado por máquina ainda não foi aceito por
+# ninguém, e entrar como Aberto mente sobre o estado dele.
+NOTION_TICKET_STATUS = "Triagem"
+NOTION_TICKET_PRIORITY = "Média"
+_NOTION_TEXT_CAP = 1900  # a API corta em 2000; folga para não raspar o limite
+
+
+def _rich_text(texto: str) -> list[dict]:
+    """Quebra em pedaços que cabem num rich_text da API."""
+    bruto = str(texto or "")
+    if not bruto:
+        return [{"type": "text", "text": {"content": ""}}]
+    return [
+        {"type": "text", "text": {"content": bruto[i:i + _NOTION_TEXT_CAP]}}
+        for i in range(0, len(bruto), _NOTION_TEXT_CAP)
+    ]
+
+
+def _notion_blocks(corpo: str) -> list[dict]:
+    blocos: list[dict] = []
+    for linha in corpo.splitlines():
+        texto = linha.rstrip()
+        if not texto.strip():
+            continue
+        if texto.startswith("## "):
+            blocos.append({"object": "block", "type": "heading_2",
+                           "heading_2": {"rich_text": _rich_text(texto[3:])}})
+        elif texto.startswith("# "):
+            continue  # o título já é a propriedade Ticket
+        elif texto.startswith("> "):
+            blocos.append({"object": "block", "type": "quote",
+                           "quote": {"rich_text": _rich_text(texto[2:])}})
+        else:
+            blocos.append({"object": "block", "type": "paragraph",
+                           "paragraph": {"rich_text": _rich_text(texto)}})
+    return blocos
+
+
+def notion_ticket_payload(proposal, day: date, database_id: str) -> dict | None:
+    """Corpo pronto para `POST /v1/pages` na base de tickets.
+
+    Puro de propósito: montar o payload é o que erra na prática (opção de select
+    inexistente, bloco acima do limite), e isso dá para travar em teste sem rede.
+
+    O corpo já vem de `render_code_ticket`, que passa por `redact` — o TKT-1
+    desta mesma base é "credenciais em texto aberto no Notion", e o auditor não
+    pode piorar isso.
+    """
+    corpo = render_code_ticket(proposal, day)
+    if not corpo or not str(database_id or "").strip():
+        return None
+    titulo = proposal.title or "Achado do auditor"
+    descricao = redact(
+        f"Auditoria de {day.isoformat()}: {proposal.proposal or proposal.title}"
+    )[:_NOTION_TEXT_CAP]
+    return {
+        "parent": {"database_id": str(database_id).strip()},
+        "properties": {
+            "Ticket": {"title": [{"type": "text", "text": {"content": titulo[:_NOTION_TEXT_CAP]}}]},
+            "Descrição": {"rich_text": _rich_text(descricao)},
+            "Tipo": {"select": {"name": NOTION_TICKET_TYPE}},
+            "Origem": {"select": {"name": NOTION_TICKET_ORIGIN}},
+            "Status": {"select": {"name": NOTION_TICKET_STATUS}},
+            "Prioridade": {"select": {"name": NOTION_TICKET_PRIORITY}},
+        },
+        "children": _notion_blocks(corpo),
+    }

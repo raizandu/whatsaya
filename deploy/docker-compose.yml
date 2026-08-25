@@ -589,6 +589,16 @@ services:
       - WHATSAPP_AUDIT_REPORT_DIR=${WHATSAPP_AUDIT_REPORT_DIR:-/opt/data/reports}
       - WHATSAPP_PLUGIN_LOG=${WHATSAPP_PLUGIN_LOG:-/opt/data/.hermes/logs/whatsapp_plugin.log}
 
+      # Ticket automático para achado de CÓDIGO do auditor, na base de tickets.
+      # Precisa de chave de INTEGRAÇÃO INTERNA do Notion (`ntn_`/`secret_`), não
+      # de OAuth: o plugin roda dentro do container, onde não há MCP. Sem as duas
+      # preenchidas não há chamada — o corpo do ticket sai no relatório para
+      # copiar à mão, e a auditoria não depende de serviço externo para valer.
+      # A integração precisa estar compartilhada com a base ("Connections" na
+      # página do banco), senão a API devolve 404 mesmo com a chave certa.
+      - NOTION_API_KEY=${NOTION_API_KEY:-}
+      - NOTION_TICKETS_DB=${NOTION_TICKETS_DB:-}
+
       # Chave Pix do dono, usada quando o item do catálogo não define a sua.
       # Sem default de propósito: uma chave errada aqui manda o pagamento do cliente
       # para a conta errada.

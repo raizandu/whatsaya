@@ -2746,6 +2746,50 @@ _pending_audit_action: dict[str, dict] = {}
 _PENDING_AUDIT_TTL_S: int = 900  # 15 minutos
 
 
+# Criação de ticket na base "Tickets — Suporte". Fail-closed como o auditor: sem
+# as duas envs não há chamada, e o corpo do ticket continua saindo no relatório
+# para copiar à mão. Escrita em serviço externo não acontece por acidente.
+_NOTION_API = "https://api.notion.com/v1/pages"
+_NOTION_VERSION = "2022-06-28"
+
+
+def _notion_post(url: str, payload: dict, key: str) -> dict | None:
+    req = urllib.request.Request(
+        url, data=json.dumps(payload).encode("utf-8"), method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {key}",
+            "Notion-Version": _NOTION_VERSION,
+        },
+    )
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        return json.loads(resp.read().decode("utf-8") or "{}")
+
+
+def _create_notion_ticket(proposal, day) -> str | None:
+    """Abre um ticket para uma proposta de CODIGO. Devolve a URL, ou None."""
+    import daily_audit as da
+
+    key = os.getenv("NOTION_API_KEY", "").strip() or os.getenv("NOTION_TOKEN", "").strip()
+    base = os.getenv("NOTION_TICKETS_DB", "").strip()
+    if not key or not base:
+        logger.info("[daily-audit] Notion sem chave/base — ticket só no relatório")
+        return None
+    payload = da.notion_ticket_payload(proposal, day, base)
+    if not payload:
+        return None
+    try:
+        resposta = _notion_post(_NOTION_API, payload, key)
+    except Exception as err:
+        # Nunca interpolar a chave numa mensagem de log.
+        logger.warning("[daily-audit] falha ao criar ticket no Notion: %s", type(err).__name__)
+        return None
+    url = (resposta or {}).get("url")
+    if url:
+        logger.info("[daily-audit] ticket criado: %s", url)
+    return url
+
+
 def _owner_sender_id() -> str:
     """Mesma chave que o `pre_gateway_dispatch` usa para o dono no self-chat."""
     digitos = "".join(c for c in config.whatsapp_owner_number if c.isdigit())
@@ -2844,6 +2888,21 @@ def _run_daily_audit(day=None) -> str | None:
     propostas = da.parse_verdict(veredito)
     aplicaveis = [p for p in propostas if p.applicable]
 
+    # Achado de código vira ticket na base. Se o Notion não estiver configurado
+    # (ou falhar), o corpo do ticket continua no relatório para copiar — a
+    # auditoria não depende de serviço externo para valer.
+    tickets: list[str] = []
+    for proposta in propostas:
+        if proposta.kind != "codigo":
+            continue
+        try:
+            url = _create_notion_ticket(proposta, dia)
+        except Exception as err:
+            logger.warning("[daily-audit] ticket: %s", type(err).__name__)
+            url = None
+        if url:
+            tickets.append(url)
+
     caminho = None
     try:
         destino = _audit_report_dir()
@@ -2872,6 +2931,8 @@ def _run_daily_audit(day=None) -> str | None:
     if owner_number:
         owner_jid = f"{''.join(c for c in owner_number if c.isdigit())}@s.whatsapp.net"
         resumo = da.render_owner_summary(auditoria, da.render_proposals(propostas))
+        if tickets:
+            resumo += "\n\n*Tickets abertos:*\n" + "\n".join(tickets)
         # Uma proposta por vez: enfileirar três e pedir "sim" três vezes seguidas
         # transforma confirmação em reflexo, que é o oposto do portão.
         if aplicaveis:

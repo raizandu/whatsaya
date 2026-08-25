@@ -267,6 +267,43 @@ class RunDailyAuditTest(unittest.TestCase):
 
         self.assertEqual(wm._pending_audit_action, {})
 
+    def test_achado_de_codigo_abre_ticket_e_o_dono_recebe_o_link(self):
+        from datetime import date
+        import json as _json
+
+        veredito = _json.dumps({"resumo": "x", "findings": [{
+            "tipo": "CODIGO", "titulo": "Falta guarda", "evidencia": "e",
+            "proposta": "filtrar na saída", "alvo": {},
+        }]}, ensure_ascii=False)
+
+        with patch("whatsapp_manager._MSG_DB_PATH", self.db), \
+             patch("whatsapp_manager._audit_llm_call", return_value=veredito), \
+             patch("whatsapp_manager._create_notion_ticket",
+                   return_value="https://notion.so/tkt-9") as tkt, \
+             patch("whatsapp_manager._human_send", return_value="mid") as send:
+            wm._run_daily_audit(date(2026, 8, 24))
+
+        tkt.assert_called_once()
+        self.assertIn("notion.so/tkt-9", send.call_args.args[1])
+
+    def test_sem_notion_configurado_a_auditoria_segue(self):
+        from datetime import date
+        import json as _json
+
+        veredito = _json.dumps({"resumo": "x", "findings": [{
+            "tipo": "CODIGO", "titulo": "Falta guarda", "evidencia": "e",
+            "proposta": "filtrar", "alvo": {},
+        }]}, ensure_ascii=False)
+
+        with patch("whatsapp_manager._MSG_DB_PATH", self.db), \
+             patch("whatsapp_manager._audit_llm_call", return_value=veredito), \
+             patch("whatsapp_manager._create_notion_ticket", return_value=None), \
+             patch("whatsapp_manager._human_send", return_value="mid") as send:
+            caminho = wm._run_daily_audit(date(2026, 8, 24))
+
+        self.assertTrue(Path(caminho).is_file())
+        self.assertIn("Falta guarda", send.call_args.args[1])
+
     def test_avisa_o_dono_no_self_chat(self):
         _, send = self._run()
 
@@ -399,6 +436,81 @@ class AuditProposalGateTest(unittest.TestCase):
 
         self.assertTrue(resultado.startswith("❌"))
         save.assert_not_called()
+
+
+class NotionTicketTest(unittest.TestCase):
+    """Criação do ticket de CODIGO. Fail-closed: sem as duas envs, não chama nada."""
+
+    def _proposta(self):
+        import daily_audit as da
+
+        return da.Proposal(kind="codigo", title="Falta guarda",
+                           evidence="AYA: 'Qual a duração de cada serviço?'",
+                           proposal="barrar na saída")
+
+    def test_sem_chave_nao_chama_a_api(self):
+        from datetime import date
+
+        with patch.dict(os.environ, {"NOTION_API_KEY": "", "NOTION_TICKETS_DB": "db"}), \
+             patch("whatsapp_manager._notion_post") as post:
+            resultado = wm._create_notion_ticket(self._proposta(), date(2026, 8, 24))
+
+        self.assertIsNone(resultado)
+        post.assert_not_called()
+
+    def test_sem_base_alvo_nao_chama_a_api(self):
+        from datetime import date
+
+        with patch.dict(os.environ, {"NOTION_API_KEY": "secret_x", "NOTION_TICKETS_DB": ""}), \
+             patch("whatsapp_manager._notion_post") as post:
+            resultado = wm._create_notion_ticket(self._proposta(), date(2026, 8, 24))
+
+        self.assertIsNone(resultado)
+        post.assert_not_called()
+
+    def test_cria_o_ticket_e_devolve_a_url(self):
+        from datetime import date
+
+        with patch.dict(os.environ, {"NOTION_API_KEY": "secret_x", "NOTION_TICKETS_DB": "db-1"}), \
+             patch("whatsapp_manager._notion_post",
+                   return_value={"url": "https://notion.so/tkt-9"}) as post:
+            url = wm._create_notion_ticket(self._proposta(), date(2026, 8, 24))
+
+        self.assertEqual(url, "https://notion.so/tkt-9")
+        corpo = post.call_args.args[1]
+        self.assertEqual(corpo["parent"], {"database_id": "db-1"})
+
+    def test_proposta_que_nao_e_codigo_nao_vira_ticket(self):
+        import daily_audit as da
+        from datetime import date
+
+        dado = da.Proposal(kind="dado", title="t",
+                           target={"tipo": "contato", "campo": "notes", "valor": "v"})
+
+        with patch.dict(os.environ, {"NOTION_API_KEY": "secret_x", "NOTION_TICKETS_DB": "db"}), \
+             patch("whatsapp_manager._notion_post") as post:
+            self.assertIsNone(wm._create_notion_ticket(dado, date(2026, 8, 24)))
+
+        post.assert_not_called()
+
+    def test_falha_da_api_nao_derruba_a_auditoria(self):
+        from datetime import date
+
+        with patch.dict(os.environ, {"NOTION_API_KEY": "secret_x", "NOTION_TICKETS_DB": "db"}), \
+             patch("whatsapp_manager._notion_post", side_effect=OSError("timeout")):
+            self.assertIsNone(wm._create_notion_ticket(self._proposta(), date(2026, 8, 24)))
+
+    def test_a_chave_nunca_aparece_no_log(self):
+        from datetime import date
+        import logging
+
+        with patch.dict(os.environ, {"NOTION_API_KEY": "secret_supersecreto",
+                                     "NOTION_TICKETS_DB": "db"}), \
+             patch("whatsapp_manager._notion_post", side_effect=OSError("boom")), \
+             self.assertLogs("whatsapp_manager", level=logging.WARNING) as logs:
+            wm._create_notion_ticket(self._proposta(), date(2026, 8, 24))
+
+        self.assertNotIn("secret_supersecreto", "\n".join(logs.output))
 
 
 if __name__ == "__main__":
