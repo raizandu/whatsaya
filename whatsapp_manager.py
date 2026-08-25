@@ -11966,15 +11966,50 @@ def _is_price_objection(user_message: str) -> bool:
     return bool(_PRICE_OBJECTION_RE.search(normalized))
 
 
+_BUSINESS_CONTEXT_RE = re.compile(
+    r"\b(?:clinica|consultorio|empresa|atendo|atendemos|clientes|pacientes|"
+    r"secretaria|procedimento|agenda|leads?|whatsapp)\b"
+)
+
+
+def _lead_described_operation(lead_msgs: list[str]) -> bool:
+    """Lead já contou o negócio — não reperguntar 'como vocês atendem hoje'."""
+    for msg in lead_msgs:
+        if (
+            _asks_about_price(msg)
+            or _wants_sales_call(msg)
+            or _wants_payment_details(msg)
+            or _lead_requests_human(msg)
+        ):
+            continue
+        folded = _normalize_text(msg)
+        if len(folded) >= 40 and _BUSINESS_CONTEXT_RE.search(folded):
+            return True
+    return False
+
+
 def _already_sent_to_chat(chat_id: str, frase: str) -> bool:
-    """A frase pronta já saiu nesta conversa? Fallback não pode soar de script."""
+    """A frase pronta já saiu nesta conversa? Fallback não pode soar de script.
+
+    `_split_human_bubbles` parte no ponto-final, então o bloco inteiro da guarda
+    quase nunca aparece contínuo no sqlite. Basta um trecho de 24+ caracteres.
+    """
     if not chat_id or not frase:
         return False
     try:
         historico = _normalize_text(_fetch_chat_history(chat_id, limit=40))
     except Exception:
         return False
-    return _normalize_text(frase) in historico
+    if not historico:
+        return False
+    folded = _normalize_text(frase)
+    if folded and folded in historico:
+        return True
+    for chunk in re.split(r"[.!?…]+", frase):
+        stem = _normalize_text(chunk)
+        if len(stem) >= 24 and stem in historico:
+            return True
+    return False
 
 
 def _no_price_continuation(language: str, chat_id: str) -> str:
@@ -12226,6 +12261,9 @@ def _conversation_state_block(
     if any(_lead_requests_human(msg) for msg in lead_msgs):
         facts.append("Lead pediu humano")
 
+    if _lead_described_operation(lead_msgs):
+        facts.append("Lead já descreveu a operação; não pergunte de novo como atendem hoje")
+
     historico_norm = _normalize_text(history)
     if historico_norm and any(
         _normalize_text(frase) in historico_norm
@@ -12325,48 +12363,67 @@ _LOCATION_ACK = {
 }
 _CONSULTING_TRIAGE = {
     "pt": (
-        "A proposta é personalizada pelo tamanho da operação — a gente fecha na "
-        "call, não tem valor único de tabela. Como vocês atendem esses pedidos hoje?"
+        "O valor depende do tamanho do atendimento e do que precisa ser integrado. "
+        "Pra eu te direcionar sem te vender algo maior do que precisa: hoje vocês "
+        "recebem mais ou menos quantos contatos por dia?"
     ),
     "en": (
-        "The proposal is tailored to the size of the operation — we close it on a "
-        "call, there's no single list price. How do you handle those requests today?"
+        "Pricing depends on the size of your inbound and what needs to be wired in. "
+        "So I don't sell you more than you need: roughly how many contacts a day "
+        "do you get?"
     ),
     "es": (
-        "La propuesta se arma según el tamaño de la operación — se cierra en una "
-        "call, no hay un precio único de tabla. ¿Cómo atienden esos pedidos hoy?"
+        "El valor depende del tamaño de la atención y de lo que hay que integrar. "
+        "Para no venderte más de lo que necesitan: ¿más o menos cuántos contactos "
+        "reciben al día?"
     ),
 }
 # QA 25/08: o lead insistiu no valor e recebeu o mesmo parágrafo. Fallback não
 # pode soar de script.
 _CONSULTING_TRIAGE_REPEAT = {
     "pt": (
-        "O valor sai na proposta, conforme o tamanho do caso. Se fizer sentido, "
-        "a gente agenda uma call curta pra fechar isso."
+        "Entendo. A gente ajusta o projeto ao que vocês realmente precisam. "
+        "Se fizer sentido, agenda uma call curta pra fechar a proposta."
     ),
     "en": (
-        "The number comes on the proposal, sized to the case. If it makes sense, "
-        "we book a short call to close it."
+        "Got it. We size the project to what you actually need. If it still "
+        "makes sense, we book a short call to close the proposal."
     ),
     "es": (
-        "El valor sale en la propuesta, según el tamaño del caso. Si te hace "
-        "sentido, agendamos una call corta para cerrarlo."
+        "Entiendo. Ajustamos el proyecto a lo que realmente necesitan. Si te "
+        "hace sentido, agendamos una call corta para cerrar la propuesta."
+    ),
+}
+_CONSULTING_OBJECTION = {
+    "pt": (
+        "Entendo. A ideia é justamente ajustar o projeto ao que vocês realmente "
+        "precisam, sem colocar complexidade à toa. Hoje vocês recebem mais ou "
+        "menos quantos contatos por dia?"
+    ),
+    "en": (
+        "I hear you. The point is to fit the project to what you actually need, "
+        "not pile on extras. Roughly how many contacts a day do you get?"
+    ),
+    "es": (
+        "Te entiendo. La idea es ajustar el proyecto a lo que realmente "
+        "necesitan, sin meter complejidad de más. ¿Más o menos cuántos "
+        "contactos reciben al día?"
     ),
 }
 _SALES_CALL_REPLY = {
     "pt": (
-        "Perfeito. A proposta fecha numa call curta, personalizada pelo tamanho da "
-        "operação. Me fala um período que o time te encaixa.\n\n"
+        "Perfeito. Posso encaminhar isso para a equipe continuar com você. "
+        "Qual período costuma ser melhor: manhã ou tarde?\n\n"
         "[[HANDOFF: lead quer avançar — proposta na call]]"
     ),
     "en": (
-        "Perfect. We close the proposal on a short call, sized to the operation. "
-        "Tell me a time window and the team will take it from there.\n\n"
+        "Perfect. I can pass this to the team to continue with you. "
+        "What time of day usually works better: morning or afternoon?\n\n"
         "[[HANDOFF: lead wants to move forward — proposal on a call]]"
     ),
     "es": (
-        "Perfecto. La propuesta se cierra en una call corta, según el tamaño de la "
-        "operación. Dime un horario y el equipo te encaja.\n\n"
+        "Perfecto. Puedo pasarlo al equipo para seguir contigo. "
+        "¿Qué horario te viene mejor: mañana o tarde?\n\n"
         "[[HANDOFF: lead quiere avanzar — propuesta en call]]"
     ),
 }
@@ -12655,7 +12712,10 @@ def _enforce_aya_payment_output_gate(
             market,
             False,
         )
-        frase = _CONSULTING_TRIAGE.get(language) or _CONSULTING_TRIAGE["pt"]
+        if _is_price_objection(user_message):
+            frase = _CONSULTING_OBJECTION.get(language) or _CONSULTING_OBJECTION["pt"]
+        else:
+            frase = _CONSULTING_TRIAGE.get(language) or _CONSULTING_TRIAGE["pt"]
         if _already_sent_to_chat(chat_id, frase):
             frase = _CONSULTING_TRIAGE_REPEAT.get(language) or _CONSULTING_TRIAGE_REPEAT["pt"]
         return ack + frase

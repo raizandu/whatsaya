@@ -9365,8 +9365,9 @@ class TestQaFinalBrasilGoLive(unittest.TestCase):
             contact={"language": "pt"},
         )
         folded = whatsapp_manager._normalize_text(out)
-        self.assertIn("call", folded)
-        self.assertIn("personalizada", folded)
+        self.assertIn("contatos por dia", folded)
+        self.assertNotIn("valor unico de tabela", folded)
+        self.assertNotIn("como voces atendem esses pedidos hoje", folded)
         self.assertNotIn("1.500", out)
         self.assertNotIn("pais", folded)
         self.assertNotIn("mais caro", folded)
@@ -9380,7 +9381,7 @@ class TestQaFinalBrasilGoLive(unittest.TestCase):
             contact={"language": "pt"},
         )
         folded = whatsapp_manager._normalize_text(out)
-        self.assertIn("call", folded)
+        self.assertIn("contatos por dia", folded)
         self.assertNotIn("investimento e", folded)
         self.assertNotIn("tony", folded)
         self.assertNotIn("997", out)
@@ -9509,7 +9510,7 @@ class TestQaFinalBrasilGoLive(unittest.TestCase):
             "Em qual país sua empresa atua?",
         )
         folded = whatsapp_manager._normalize_text(out)
-        self.assertIn("call", folded)
+        self.assertIn("contatos por dia", folded)
         self.assertNotIn("1.500", out)
         self.assertNotIn("país", out.lower())
 
@@ -9519,7 +9520,7 @@ class TestQaFinalBrasilGoLive(unittest.TestCase):
             "Pode pagar pelo Pix: CNPJ 44.249.819/0001-62.",
         )
         folded = whatsapp_manager._normalize_text(out)
-        self.assertIn("call", folded)
+        self.assertIn("equipe", folded)
         self.assertIn("[[handoff:", folded.lower())
         self.assertNotIn("44.249.819", out)
 
@@ -9545,7 +9546,7 @@ class TestQaFinalBrasilGoLive(unittest.TestCase):
         )
         folded = whatsapp_manager._normalize_text(out)
         self.assertIn("maravilha", folded)
-        self.assertIn("call", folded)
+        self.assertIn("contatos por dia", folded)
         self.assertNotIn("1.500", out)
         self.assertNotIn("tambem e de goiania", folded)
 
@@ -9594,7 +9595,7 @@ class TestQaFinalBrasilGoLive(unittest.TestCase):
             historico=historico,
         )
         folded = whatsapp_manager._normalize_text(out)
-        self.assertIn("call", folded)
+        self.assertIn("contatos por dia", folded)
         self.assertNotIn("1.500", out)
         self.assertNotIn("Que tipo de empresa", out)
 
@@ -9618,8 +9619,8 @@ class TestQaFinalBrasilGoLive(unittest.TestCase):
             contact={"market_id": "BR", "language": "pt"},
         )
         folded = whatsapp_manager._normalize_text(out)
-        self.assertIn("personalizada", folded)
-        self.assertIn("call", folded)
+        self.assertIn("contatos por dia", folded)
+        self.assertNotIn("valor unico de tabela", folded)
         self.assertNotIn("1.500", out)
         self.assertNotIn("espanhol", folded)
         self.assertNotIn("nos eua", folded)
@@ -9658,6 +9659,63 @@ class TestQaFinalBrasilGoLive(unittest.TestCase):
         )
         self.assertIn("call", folded)
         self.assertNotIn("1.500", out)
+        self.assertNotIn("contatos por dia", folded)
+
+    def test_preco_depois_da_clinica_nao_repergunta_como_atendem(self):
+        """Spec UX: lead já descreveu a operação. A copy ruim do QA 25/08
+        ('Como vocês atendem esses pedidos hoje?') não pode voltar."""
+        historico = (
+            "Lead: Tenho uma clínica odontológica. A maioria chama perguntando "
+            "sobre procedimentos e querendo marcar avaliação\n"
+            "AYA: É exatamente um dos cenários em que a AYA ajuda mais.\n"
+        )
+        out = self._gate(
+            "Legal. E quanto custa pra colocar isso na minha clínica?",
+            "A implementação é R$ 1.500.",
+            historico=historico,
+            contact={"market_id": "BR", "language": "pt"},
+        )
+        folded = whatsapp_manager._normalize_text(out)
+        self.assertNotIn("como voces atendem esses pedidos hoje", folded)
+        self.assertNotIn("valor unico de tabela", folded)
+        self.assertIn("contatos por dia", folded)
+
+    def test_objecao_de_preco_reconhece_antes_de_qualificar(self):
+        out = self._gate(
+            "tá caro",
+            "A implementação é R$ 1.500.",
+            contact={"market_id": "BR", "language": "pt"},
+        )
+        folded = whatsapp_manager._normalize_text(out)
+        self.assertTrue(folded.startswith("entendo"))
+        self.assertIn("contatos por dia", folded)
+        self.assertNotIn("valor unico de tabela", folded)
+
+    def test_anti_repeticao_pega_bolha_fatiada(self):
+        """A guarda sai em 2 bolhas; o bloco inteiro não fica contínuo no sqlite."""
+        primeiro = whatsapp_manager._CONSULTING_TRIAGE["pt"]
+        primeira_frase = primeiro.split(".")[0]
+        historico = f"Lead: quanto custa?\nAYA: {primeira_frase}.\n"
+        out = self._gate(
+            "Mas qual é o valor da implementação e da mensalidade?",
+            "R$ 1.500.",
+            historico=historico,
+            contact={"market_id": "BR", "language": "pt"},
+        )
+        folded = whatsapp_manager._normalize_text(out)
+        self.assertNotIn("contatos por dia", folded)
+        self.assertIn("call", folded)
+
+    def test_quero_avancar_handoff_natural(self):
+        out = self._gate(
+            "quero avançar",
+            "qualquer lixo",
+            contact={"market_id": "BR", "language": "pt"},
+        )
+        folded = whatsapp_manager._normalize_text(out)
+        self.assertIn("equipe", folded)
+        self.assertIn("manha ou tarde", folded)
+        self.assertIn("[[HANDOFF:", out)
 
 
 if __name__ == "__main__":

@@ -385,14 +385,38 @@ FALLBACK_PHRASES: tuple[str, ...] = (
     "call, there's no single list price. How do you handle those requests today?",
     "La propuesta se arma según el tamaño de la operación — se cierra en una "
     "call, no hay un precio único de tabla. ¿Cómo atienden esos pedidos hoy?",
-    # _CONSULTING_TRIAGE_REPEAT
+    "O valor depende do tamanho do atendimento e do que precisa ser integrado. "
+    "Pra eu te direcionar sem te vender algo maior do que precisa: hoje vocês "
+    "recebem mais ou menos quantos contatos por dia?",
+    "Pricing depends on the size of your inbound and what needs to be wired in. "
+    "So I don't sell you more than you need: roughly how many contacts a day "
+    "do you get?",
+    "El valor depende del tamaño de la atención y de lo que hay que integrar. "
+    "Para no venderte más de lo que necesitan: ¿más o menos cuántos contactos "
+    "reciben al día?",
+    # _CONSULTING_TRIAGE_REPEAT (frases antigas ficam para o log)
     "O valor sai na proposta, conforme o tamanho do caso. Se fizer sentido, "
     "a gente agenda uma call curta pra fechar isso.",
     "The number comes on the proposal, sized to the case. If it makes sense, "
     "we book a short call to close it.",
     "El valor sale en la propuesta, según el tamaño del caso. Si te hace "
     "sentido, agendamos una call corta para cerrarlo.",
-    # _SALES_CALL_REPLY
+    "Entendo. A gente ajusta o projeto ao que vocês realmente precisam. "
+    "Se fizer sentido, agenda uma call curta pra fechar a proposta.",
+    "Got it. We size the project to what you actually need. If it still "
+    "makes sense, we book a short call to close the proposal.",
+    "Entiendo. Ajustamos el proyecto a lo que realmente necesitan. Si te "
+    "hace sentido, agendamos una call corta para cerrar la propuesta.",
+    # _CONSULTING_OBJECTION
+    "Entendo. A ideia é justamente ajustar o projeto ao que vocês realmente "
+    "precisam, sem colocar complexidade à toa. Hoje vocês recebem mais ou "
+    "menos quantos contatos por dia?",
+    "I hear you. The point is to fit the project to what you actually need, "
+    "not pile on extras. Roughly how many contacts a day do you get?",
+    "Te entiendo. La idea es ajustar el proyecto a lo que realmente "
+    "necesitan, sin meter complejidad de más. ¿Más o menos cuántos "
+    "contactos reciben al día?",
+    # _SALES_CALL_REPLY (frase antiga fica para o log)
     "Perfeito. A proposta fecha numa call curta, personalizada pelo tamanho da "
     "operação. Me fala um período que o time te encaixa.\n\n"
     "[[HANDOFF: lead quer avançar — proposta na call]]",
@@ -401,6 +425,15 @@ FALLBACK_PHRASES: tuple[str, ...] = (
     "[[HANDOFF: lead wants to move forward — proposal on a call]]",
     "Perfecto. La propuesta se cierra en una call corta, según el tamaño de la "
     "operación. Dime un horario y el equipo te encaja.\n\n"
+    "[[HANDOFF: lead quiere avanzar — propuesta en call]]",
+    "Perfeito. Posso encaminhar isso para a equipe continuar com você. "
+    "Qual período costuma ser melhor: manhã ou tarde?\n\n"
+    "[[HANDOFF: lead quer avançar — proposta na call]]",
+    "Perfect. I can pass this to the team to continue with you. "
+    "What time of day usually works better: morning or afternoon?\n\n"
+    "[[HANDOFF: lead wants to move forward — proposal on a call]]",
+    "Perfecto. Puedo pasarlo al equipo para seguir contigo. "
+    "¿Qué horario te viene mejor: mañana o tarde?\n\n"
     "[[HANDOFF: lead quiere avanzar — propuesta en call]]",
     # _HUMAN_CONNECT_REPLY
     "Vou te conectar com o time agora. Eles já entram com o que conversamos.\n\n"
