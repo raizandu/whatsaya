@@ -11647,16 +11647,18 @@ _PRICE_OBJECTION_NEGATED_RE = re.compile(
     r"\b(?:nao|not|no)\s+(?:achei|acho|achamos|e|es|esta|ta|is|it['’]?s)?\s*(?:tao\s+|tan\s+)?"
     r"(?:car[oa]|salgad|expensive|pricey|costly)"
 )
+# Sem ponto final na primeira palavra: o separador de bolhas quebra em fim de
+# frase, e "Entendo." saiu como bolha sozinha no QA (mesma armadilha do "Perfeito!").
 _PRICE_OBJECTION_RESPONSE = {
-    "pt": "Entendo. A implementação é justamente onde a AYA é configurada para a sua "
-          "operação — serviços, área atendida, coleta de endereço e agenda — para já "
+    "pt": "Entendo — a implementação é justamente onde a AYA é configurada para a sua "
+          "operação, com serviços, área atendida, coleta de endereço e agenda, para já "
           "entrar funcionando do seu jeito.",
-    "en": "I hear you. The implementation is exactly where AYA gets set up for your "
-          "operation — services, service area, address collection and scheduling — so "
-          "it starts working your way from day one.",
-    "es": "Te entiendo. La implementación es justamente donde configuramos la AYA para "
-          "tu operación — servicios, zona de atención, dirección y agenda — para que "
-          "arranque funcionando a tu manera.",
+    "en": "I hear you — the implementation is exactly where AYA gets set up for your "
+          "operation, covering services, service area, address collection and "
+          "scheduling, so it starts working your way from day one.",
+    "es": "Te entiendo — la implementación es justamente donde configuramos la AYA "
+          "para tu operación, con servicios, zona de atención, dirección y agenda, "
+          "para que arranque funcionando a tu manera.",
 }
 # QA Final 4.0, ajuste 4: preço isolado deixa a conversa morrer — condução curta,
 # sem escassez artificial.
