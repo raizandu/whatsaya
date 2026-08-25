@@ -6720,6 +6720,47 @@ class TestPriceFallbacks(unittest.TestCase):
         self.assertIn("Me conta como funciona", out)
 
 
+class TestCountryReplyCapture(unittest.TestCase):
+    """Rodada 2 do QA de 24/08: a AYA perguntou o país, o lead respondeu "Brasil"
+    (seco), _infer_explicit_market_metadata não capturou (exige declaração sobre a
+    operação) e o fallback perguntou o país DE NOVO. Resposta direta à pergunta
+    conta — mas só quando a pergunta foi feita nesta conversa."""
+
+    _HIST = "AYA: Em qual país sua empresa atua?\nLead: Brasil"
+
+    def _capture(self, msg, historico=_HIST):
+        with patch("whatsapp_manager._fetch_chat_history", return_value=historico):
+            return whatsapp_manager._market_from_country_reply(msg, "12025550199@s.whatsapp.net")
+
+    def test_resposta_seca_apos_pergunta_de_pais(self):
+        for msg, esperado in (
+            ("Brasil", "BR"),
+            ("brasil.", "BR"),
+            ("Nos EUA", "US"),
+            ("Estados Unidos", "US"),
+            ("in the USA", "US"),
+        ):
+            with self.subTest(msg=msg):
+                up = self._capture(msg)
+                self.assertEqual(up.get("market_id"), esperado)
+                self.assertEqual(up.get("market_source"), "country_reply")
+
+    def test_sem_pergunta_previa_nao_captura(self):
+        self.assertEqual(self._capture("Brasil", historico=""), {})
+        self.assertEqual(
+            self._capture("Brasil", historico="AYA: Me conta como você atende hoje."), {}
+        )
+
+    def test_frase_longa_ou_ambigua_nao_e_resposta_de_pais(self):
+        for msg in (
+            "acho o brasil um país lindo demais, fui pra lá nas férias",
+            "a AYA usa inteligência artificial?",
+            "ok",
+        ):
+            with self.subTest(msg=msg):
+                self.assertEqual(self._capture(msg), {})
+
+
 class TestPurchaseIntentGaps(unittest.TestCase):
     """Buracos medidos no QA de 24/08 no fluxo de fechamento."""
 

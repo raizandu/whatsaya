@@ -8289,6 +8289,37 @@ def _turn_language_hint(
     return hint
 
 
+def _market_from_country_reply(text: str, chat_id: str) -> dict:
+    """Mercado de uma resposta direta à pergunta de país ("Brasil", "nos EUA").
+
+    Rodada 2 do QA de 24/08: a AYA perguntou "Em qual país sua empresa atua?",
+    o lead respondeu "Brasil" seco, a inferência explícita não capturou (exige
+    declaração sobre a operação) e o fallback perguntou o país DE NOVO. Resposta
+    curta que resolve para um mercado conta — mas só quando a pergunta de país
+    (_PAYMENT_GATE_ASK_MARKET, qualquer idioma) foi feita nesta conversa; sem
+    esse contexto, "usa" é verbo e "brasil" é assunto.
+    """
+    normalized = _normalize_text(str(text or "")).strip(" .!?,")
+    if not normalized or len(normalized) > 40:
+        return {}
+    market = _canonical_commercial_market(normalized)
+    if not market:
+        stripped = re.sub(
+            r"^(?:(?:no|na|nos|nas|em|in|the|en|los|aqui|atu(?:o|amos))\s+)+",
+            "",
+            normalized,
+        )
+        market = _canonical_commercial_market(stripped)
+    if not market:
+        return {}
+    if not any(
+        _already_sent_to_chat(chat_id, pergunta)
+        for pergunta in _PAYMENT_GATE_ASK_MARKET.values()
+    ):
+        return {}
+    return {"market_id": market, "market_source": "country_reply"}
+
+
 def _infer_explicit_market_metadata(text: str) -> dict:
     """Extrai mercado apenas de uma declaração explícita sobre a própria operação do lead."""
     normalized = _normalize_text(str(text or ""))
@@ -10733,7 +10764,12 @@ def pre_llm_call(*args, **kwargs):
         not _canonical_commercial_market(external_metadata)
         and not (contact_info.get("market_id") or contact_info.get("market"))
     ):
-        commercial_updates.update(_infer_explicit_market_metadata(str(user_msg_now)))
+        market_updates = _infer_explicit_market_metadata(str(user_msg_now))
+        if not market_updates:
+            # Resposta seca à pergunta de país não é "declaração sobre a operação" e
+            # escapava — o fallback perguntava o país de novo (rodada 2 do QA 24/08).
+            market_updates = _market_from_country_reply(str(user_msg_now), clean_jid)
+        commercial_updates.update(market_updates)
     association_changed = False
     if (
         str(db_query_jid).endswith("@lid")
