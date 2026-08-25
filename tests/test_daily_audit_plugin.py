@@ -229,6 +229,44 @@ class RunDailyAuditTest(unittest.TestCase):
         self.assertIn("15.3", texto)
         self.assertIn("api_calls no dia: 2", texto)
 
+    def test_proposta_aplicavel_fica_armada_para_sim_nao(self):
+        from datetime import date
+        import json as _json
+
+        wm._pending_audit_action.clear()
+        veredito = _json.dumps({"resumo": "dia ok", "findings": [{
+            "tipo": "DADO", "titulo": "anotar ramo", "evidencia": "repetiu 2x",
+            "proposta": "anotar o ramo", "alvo": {"tipo": "contato",
+                                                  "chat": "556299990000@s.whatsapp.net",
+                                                  "campo": "notes", "valor": "clínica"},
+        }]}, ensure_ascii=False)
+
+        with patch("whatsapp_manager._MSG_DB_PATH", self.db), \
+             patch("whatsapp_manager._audit_llm_call", return_value=veredito), \
+             patch("whatsapp_manager._human_send", return_value="mid") as send:
+            wm._run_daily_audit(date(2026, 8, 24))
+
+        self.assertEqual(len(wm._pending_audit_action), 1)
+        self.assertIn("sim", send.call_args.args[1].lower())
+        wm._pending_audit_action.clear()
+
+    def test_proposta_nao_aplicavel_nao_arma_portao(self):
+        from datetime import date
+        import json as _json
+
+        wm._pending_audit_action.clear()
+        veredito = _json.dumps({"resumo": "x", "findings": [{
+            "tipo": "CODIGO", "titulo": "falta guarda", "evidencia": "e",
+            "proposta": "filtrar na saída", "alvo": {},
+        }]}, ensure_ascii=False)
+
+        with patch("whatsapp_manager._MSG_DB_PATH", self.db), \
+             patch("whatsapp_manager._audit_llm_call", return_value=veredito), \
+             patch("whatsapp_manager._human_send", return_value="mid"):
+            wm._run_daily_audit(date(2026, 8, 24))
+
+        self.assertEqual(wm._pending_audit_action, {})
+
     def test_avisa_o_dono_no_self_chat(self):
         _, send = self._run()
 
@@ -280,6 +318,87 @@ class RunDailyAuditTest(unittest.TestCase):
 
         self.assertTrue(Path(caminho).is_file())
         send.assert_not_called()
+
+
+class AuditProposalGateTest(unittest.TestCase):
+    """Portão da fase 2: só DADO se aplica, e só por sim/não explícito do dono."""
+
+    def setUp(self):
+        wm._pending_audit_action.clear()
+
+    def tearDown(self):
+        wm._pending_audit_action.clear()
+
+    def _proposta(self, **alvo):
+        import daily_audit as da
+
+        return da.Proposal(
+            kind="dado", title="anotar ramo", evidence="lead repetiu 2x",
+            proposal="anotar o ramo do lead", target=alvo, applicable=True,
+        )
+
+    def test_aplica_nota_de_contato_apos_sim(self):
+        proposta = self._proposta(tipo="contato", chat="556299990000@s.whatsapp.net",
+                                  campo="notes", valor="clínica odontológica")
+
+        with patch("whatsapp_manager._update_contact_fields", return_value="ok") as upd:
+            resultado = wm._apply_audit_proposal(proposta)
+
+        self.assertTrue(resultado.startswith("✅"))
+        upd.assert_called_once()
+        self.assertEqual(upd.call_args.args[1], {"notes": "clínica odontológica"})
+
+    def test_aplica_campo_de_catalogo_apos_sim(self):
+        proposta = self._proposta(tipo="catalogo", chave="plano-x",
+                                  campo="price", valor="R$ 997")
+
+        with patch("whatsapp_manager._load_product_catalog",
+                   return_value={"plano-x": {"name": "Plano X", "price": "R$ 1"}}), \
+             patch("whatsapp_manager._save_product_catalog") as save:
+            resultado = wm._apply_audit_proposal(proposta)
+
+        self.assertTrue(resultado.startswith("✅"))
+        self.assertEqual(save.call_args.args[0]["plano-x"]["price"], "R$ 997")
+
+    def test_proposta_nao_aplicavel_e_recusada_no_backend(self):
+        # Segunda camada: mesmo que algo marque `applicable`, o aplicador
+        # revalida o alvo. O agente não se automodifica por caminho nenhum.
+        import daily_audit as da
+
+        proposta = da.Proposal(kind="dado", target={"tipo": "arquivo", "caminho": "SOUL.md"},
+                               applicable=True)
+
+        with patch("whatsapp_manager._update_contact_fields") as upd, \
+             patch("whatsapp_manager._save_product_catalog") as save:
+            resultado = wm._apply_audit_proposal(proposta)
+
+        self.assertTrue(resultado.startswith("❌"))
+        upd.assert_not_called()
+        save.assert_not_called()
+
+    def test_chave_pix_e_recusada_no_backend(self):
+        import daily_audit as da
+
+        proposta = da.Proposal(kind="dado", applicable=True,
+                               target={"tipo": "catalogo", "chave": "p", "campo": "pix_key",
+                                       "valor": "outra"})
+
+        with patch("whatsapp_manager._save_product_catalog") as save:
+            resultado = wm._apply_audit_proposal(proposta)
+
+        self.assertTrue(resultado.startswith("❌"))
+        save.assert_not_called()
+
+    def test_item_de_catalogo_inexistente_nao_cria_item(self):
+        proposta = self._proposta(tipo="catalogo", chave="nao-existe",
+                                  campo="price", valor="R$ 1")
+
+        with patch("whatsapp_manager._load_product_catalog", return_value={}), \
+             patch("whatsapp_manager._save_product_catalog") as save:
+            resultado = wm._apply_audit_proposal(proposta)
+
+        self.assertTrue(resultado.startswith("❌"))
+        save.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -19,6 +19,9 @@ from daily_audit import (
     compile_material,
     language_hint_scoreboard,
     parse_gateway_lines,
+    parse_verdict,
+    render_code_ticket,
+    render_proposals,
     reply_latencies,
     render_owner_summary,
     render_report,
@@ -1364,3 +1367,201 @@ class ReplyLatenciesTest(unittest.TestCase):
         (resposta,) = group_replies([_turn(0, True, "passou por aqui?")])
 
         self.assertEqual(reply_latencies([resposta]), [])
+
+
+def _veredito(*findings):
+    import json as _json
+    return _json.dumps({"findings": list(findings)}, ensure_ascii=False)
+
+
+class ParseVerdictTest(unittest.TestCase):
+    """Fase 2: o veredito vira propostas tipadas, e o tipo define o portão.
+
+    DADO é aplicável por sim/não no chat do dono; PROMPT e CODIGO nunca são
+    automáticos. As duas decisões de segurança do handoff estão codificadas aqui:
+    o agente não se automodifica, e nada de escrita de prompt sem suíte cobrindo.
+    """
+
+    def test_proposta_de_dado_em_campo_permitido_e_aplicavel(self):
+        (p,) = parse_verdict(_veredito({
+            "tipo": "DADO", "titulo": "Contato sem contexto",
+            "evidencia": "lead repetiu o ramo 2x",
+            "proposta": "anotar o ramo do lead",
+            "alvo": {"tipo": "contato", "chat": CHAT_A, "campo": "notes", "valor": "clínica odontológica"},
+        }))
+
+        self.assertEqual(p.kind, "dado")
+        self.assertTrue(p.applicable)
+
+    def test_proposta_de_prompt_nunca_e_aplicavel(self):
+        (p,) = parse_verdict(_veredito({
+            "tipo": "PROMPT", "titulo": "Regra ignorada",
+            "evidencia": "...", "proposta": "encurtar CONSTRAINTS",
+            "alvo": {"tipo": "arquivo", "caminho": "support_rules.md"},
+        }))
+
+        self.assertEqual(p.kind, "prompt")
+        self.assertFalse(p.applicable)
+
+    def test_proposta_de_codigo_nunca_e_aplicavel(self):
+        (p,) = parse_verdict(_veredito({
+            "tipo": "CODIGO", "titulo": "Falta guarda",
+            "evidencia": "...", "proposta": "filtrar na saída", "alvo": {},
+        }))
+
+        self.assertEqual(p.kind, "codigo")
+        self.assertFalse(p.applicable)
+
+    def test_dado_apontando_para_arquivo_de_prompt_e_recusado(self):
+        # O caminho de escape óbvio: rotular de DADO uma edição de prompt.
+        (p,) = parse_verdict(_veredito({
+            "tipo": "DADO", "titulo": "ajuste",
+            "evidencia": "...", "proposta": "mudar a regra",
+            "alvo": {"tipo": "arquivo", "caminho": "SOUL_WHATSAPP.md"},
+        }))
+
+        self.assertFalse(p.applicable)
+        self.assertIn("alvo", p.reason)
+
+    def test_chave_pix_nunca_e_aplicavel_mesmo_como_dado(self):
+        # Errar a chave manda o pagamento do cliente para a conta errada, e o
+        # modelo deste sistema já reproduziu credencial real por contaminação.
+        (p,) = parse_verdict(_veredito({
+            "tipo": "DADO", "titulo": "corrigir pix",
+            "evidencia": "...", "proposta": "atualizar a chave",
+            "alvo": {"tipo": "catalogo", "chave": "plano-x", "campo": "pix_key", "valor": "outra"},
+        }))
+
+        self.assertFalse(p.applicable)
+        self.assertIn("pix_key", p.reason)
+
+    def test_link_tambem_fica_fora_do_aplicavel(self):
+        (p,) = parse_verdict(_veredito({
+            "tipo": "DADO", "titulo": "corrigir link",
+            "evidencia": "...", "proposta": "novo link",
+            "alvo": {"tipo": "catalogo", "chave": "plano-x", "campo": "link", "valor": "http://x"},
+        }))
+
+        self.assertFalse(p.applicable)
+
+    def test_campo_auto_gerado_do_contato_e_recusado(self):
+        # `summary`/`tone`/`guidelines` são do classificador; update manual já
+        # não os sobrescreve, e o auditor não pode furar essa regra.
+        (p,) = parse_verdict(_veredito({
+            "tipo": "DADO", "titulo": "resumo",
+            "evidencia": "...", "proposta": "reescrever o resumo",
+            "alvo": {"tipo": "contato", "chat": CHAT_A, "campo": "summary", "valor": "..."},
+        }))
+
+        self.assertFalse(p.applicable)
+
+    def test_tipo_desconhecido_vira_nota_sem_portao(self):
+        (p,) = parse_verdict(_veredito({
+            "tipo": "OUTRO", "titulo": "x", "evidencia": "y", "proposta": "z", "alvo": {},
+        }))
+
+        self.assertEqual(p.kind, "nota")
+        self.assertFalse(p.applicable)
+
+    def test_veredito_que_nao_e_json_vira_nota_unica(self):
+        # Fail-safe: sem estrutura não há portão, e o dono lê o texto cru.
+        propostas = parse_verdict("O dia correu bem, nada relevante.")
+
+        self.assertEqual(len(propostas), 1)
+        self.assertEqual(propostas[0].kind, "nota")
+        self.assertFalse(propostas[0].applicable)
+        self.assertIn("O dia correu bem", propostas[0].proposal)
+
+    def test_json_dentro_de_cerca_markdown_e_lido(self):
+        cru = "```json\n" + _veredito({
+            "tipo": "CODIGO", "titulo": "t", "evidencia": "e", "proposta": "p", "alvo": {},
+        }) + "\n```"
+
+        (p,) = parse_verdict(cru)
+
+        self.assertEqual(p.kind, "codigo")
+
+    def test_veredito_vazio_nao_produz_proposta(self):
+        self.assertEqual(parse_verdict(""), [])
+
+    def test_valor_da_proposta_e_redigido(self):
+        # O valor vem do modelo e pode repetir um documento lido no material.
+        (p,) = parse_verdict(_veredito({
+            "tipo": "DADO", "titulo": "anotar",
+            "evidencia": "CNPJ 44.249.819/0001-62",
+            "proposta": "anotar", "alvo": {"tipo": "contato", "chat": CHAT_A,
+                                           "campo": "notes", "valor": "cnpj 44.249.819/0001-62"},
+        }))
+
+        self.assertNotIn("44.249.819", p.evidence)
+        self.assertNotIn("44.249.819", p.target.get("valor", ""))
+
+
+class RenderCodeTicketTest(unittest.TestCase):
+    """Proposta de CODIGO vira corpo de ticket no ciclo que funcionou em 24/08:
+    achado com texto cru → teste vermelho com a frase literal → filtro
+    determinístico → deploy. Sem isso o ticket chega como opinião."""
+
+    def _proposta(self):
+        (p,) = parse_verdict(_veredito({
+            "tipo": "CODIGO", "titulo": "Pergunta de implantação antes da venda",
+            "evidencia": "AYA: 'Qual a duração de cada serviço?' para lead sem venda",
+            "proposta": "barrar pergunta de implantação na saída quando não há venda",
+            "alvo": {},
+        }))
+        return p
+
+    def test_traz_as_quatro_etapas_do_ciclo(self):
+        corpo = render_code_ticket(self._proposta(), date(2026, 8, 24))
+
+        for etapa in ("Achado", "Teste vermelho", "Filtro determinístico", "Deploy"):
+            self.assertIn(etapa, corpo)
+
+    def test_usa_a_evidencia_como_frase_literal_do_teste(self):
+        corpo = render_code_ticket(self._proposta(), date(2026, 8, 24))
+
+        self.assertIn("Qual a duração de cada serviço?", corpo)
+
+    def test_identifica_o_dia_auditado(self):
+        self.assertIn("2026-08-24", render_code_ticket(self._proposta(), date(2026, 8, 24)))
+
+    def test_recusa_proposta_que_nao_e_de_codigo(self):
+        (dado,) = parse_verdict(_veredito({
+            "tipo": "DADO", "titulo": "t", "evidencia": "e", "proposta": "p",
+            "alvo": {"tipo": "contato", "chat": CHAT_A, "campo": "notes", "valor": "v"},
+        }))
+
+        self.assertEqual(render_code_ticket(dado, date(2026, 8, 24)), "")
+
+    def test_o_corpo_do_ticket_tambem_e_redigido(self):
+        (p,) = parse_verdict(_veredito({
+            "tipo": "CODIGO", "titulo": "vazou",
+            "evidencia": "modelo escreveu CNPJ 44.249.819/0001-62",
+            "proposta": "filtrar", "alvo": {},
+        }))
+
+        self.assertNotIn("44.249.819", render_code_ticket(p, date(2026, 8, 24)))
+
+
+class RenderProposalsLabelTest(unittest.TestCase):
+    def test_dado_recusado_nao_se_anuncia_como_aplicavel(self):
+        # O rótulo contradizia o próprio aviso logo abaixo ("aplicável por
+        # sim/não" seguido de "só o dono altera à mão").
+        (p,) = parse_verdict(_veredito({
+            "tipo": "DADO", "titulo": "Chave Pix errada", "evidencia": "e",
+            "proposta": "trocar a chave",
+            "alvo": {"tipo": "catalogo", "chave": "p", "campo": "pix_key", "valor": "x"},
+        }))
+
+        texto = render_proposals([p])
+
+        self.assertNotIn("aplicável por sim/não", texto)
+        self.assertIn("só o dono altera", texto)
+
+    def test_dado_aceito_continua_anunciado_como_aplicavel(self):
+        (p,) = parse_verdict(_veredito({
+            "tipo": "DADO", "titulo": "anotar", "evidencia": "e", "proposta": "p",
+            "alvo": {"tipo": "contato", "chat": CHAT_A, "campo": "notes", "valor": "v"},
+        }))
+
+        self.assertIn("aplicável por sim/não", render_proposals([p]))

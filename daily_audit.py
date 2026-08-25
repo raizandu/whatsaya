@@ -6,6 +6,7 @@ agenda, chama o modelo e entrega ao dono é o `whatsapp_manager` / o tick de cro
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import sqlite3
@@ -777,22 +778,29 @@ def render_owner_summary(day: DayAudit, verdict: str) -> str:
     return redact("\n".join(linhas))
 
 
-def render_report(day: DayAudit, verdict: str, material: str) -> str:
+def render_report(day: DayAudit, verdict: str, material: str, proposals=()) -> str:
     """Relatório completo gravado em disco, com o material que embasou o veredito."""
     # `material` já sai redigido de `compile_material`; redigir de novo só
     # destruiria o que a primeira passada preservou de propósito. O veredito, sim,
     # vem de fora e pode repetir um documento que o modelo leu.
-    texto = redact(str(verdict or "").strip()) or "_Auditor sem veredito nesta rodada._"
-    return "\n".join([
+    propostas = render_proposals(proposals) if proposals else ""
+    texto = propostas or redact(str(verdict or "").strip()) \
+        or "_Auditor sem veredito nesta rodada._"
+    partes = [
         f"# Auditoria — {day.day.isoformat()}",
         "",
         "## Veredito do auditor",
         texto,
-        "",
-        "---",
-        "",
-        material,
-    ])
+    ]
+    tickets = [render_code_ticket(p, day.day) for p in proposals or ()]
+    tickets = [t for t in tickets if t]
+    if tickets:
+        # Prontos para copiar para a base de tickets: a criação automática não é
+        # feita daqui de propósito (ver o comentário em `_run_daily_audit`).
+        partes += ["", "---", "", "## Tickets de código propostos", ""]
+        partes.append("\n\n".join(tickets))
+    partes += ["", "---", "", material]
+    return "\n".join(partes)
 
 
 _LOG_DATE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})T\d{2}:\d{2}:\d{2}")
@@ -980,3 +988,179 @@ def reply_latencies(replies) -> list[float]:
         for r in replies
         if r.lead_at is not None and r.at >= r.lead_at
     ]
+
+
+# --- Fase 2: propostas com portão ---------------------------------------------
+#
+# O tipo da proposta define o portão, e os limites abaixo são decisões de
+# segurança do desenho, não preferência:
+#
+# - DADO é o único aplicável por sim/não no chat do dono, e mesmo assim só em
+#   campo de dado de operação.
+# - PROMPT nunca é automático: o texto vai direto para o prompt de produção sem
+#   suíte cobrindo, e a regra medida aqui é que instruir não funciona.
+# - CODIGO nunca é automático: o agente de atendimento não se automodifica.
+#   Contaminado com poder de escrita, reescreveria as próprias guardas.
+#
+# `pix_key` e `link` ficam fora do aplicável mesmo sendo campo de catálogo: são
+# destino de dinheiro e de tráfego. Errar a chave manda o pagamento do cliente
+# para a conta errada, e um "sim" distraído não é consentimento suficiente para
+# isso — esses dois o dono edita à mão.
+CONTACT_FIELDS_APPLICABLE = {"notes"}
+CATALOG_FIELDS_APPLICABLE = {"name", "description", "price", "delivery_fee"}
+CATALOG_FIELDS_OWNER_ONLY = {"pix_key", "link"}
+
+
+@dataclass
+class Proposal:
+    kind: str            # dado | prompt | codigo | nota
+    title: str = ""
+    evidence: str = ""
+    proposal: str = ""
+    target: dict = field(default_factory=dict)
+    applicable: bool = False
+    reason: str = ""
+
+
+def _verdict_json(text: str) -> dict | None:
+    bruto = str(text or "").strip()
+    if not bruto:
+        return None
+    cerca = re.search(r"```(?:json)?\s*(.+?)```", bruto, re.S)
+    if cerca:
+        bruto = cerca.group(1).strip()
+    inicio, fim = bruto.find("{"), bruto.rfind("}")
+    if inicio == -1 or fim <= inicio:
+        return None
+    try:
+        dados = json.loads(bruto[inicio:fim + 1])
+    except (json.JSONDecodeError, ValueError):
+        return None
+    return dados if isinstance(dados, dict) else None
+
+
+def _judge_applicability(kind: str, target: dict) -> tuple[bool, str]:
+    if kind != "dado":
+        return False, f"tipo {kind} não é aplicável por aqui"
+    alvo = str(target.get("tipo") or "").lower()
+    campo = str(target.get("campo") or "")
+    if alvo == "contato":
+        if campo in CONTACT_FIELDS_APPLICABLE:
+            return True, ""
+        return False, f"campo de contato {campo!r} não é aplicável (auto-gerado ou desconhecido)"
+    if alvo == "catalogo":
+        if campo in CATALOG_FIELDS_OWNER_ONLY:
+            return False, f"{campo} é destino de dinheiro/tráfego — só o dono altera à mão"
+        if campo in CATALOG_FIELDS_APPLICABLE:
+            return True, ""
+        return False, f"campo de catálogo {campo!r} não é aplicável"
+    return False, f"alvo {alvo!r} não é dado de operação"
+
+
+def parse_verdict(text: str) -> list[Proposal]:
+    """Converte o veredito do auditor em propostas tipadas com portão.
+
+    Fail-safe: veredito sem estrutura vira uma nota só, sem portão — o dono lê o
+    texto cru. Melhor perder a automação de um dia do que aplicar uma proposta
+    que ninguém conseguiu ler direito.
+    """
+    bruto = str(text or "").strip()
+    if not bruto:
+        return []
+    dados = _verdict_json(bruto)
+    achados = (dados or {}).get("findings")
+    if not isinstance(achados, list) or not achados:
+        return [Proposal(kind="nota", proposal=redact(bruto),
+                         reason="veredito sem estrutura — sem portão")]
+
+    propostas: list[Proposal] = []
+    for achado in achados:
+        if not isinstance(achado, dict):
+            continue
+        tipo = str(achado.get("tipo") or "").strip().lower()
+        kind = tipo if tipo in {"dado", "prompt", "codigo"} else "nota"
+        alvo = achado.get("alvo") if isinstance(achado.get("alvo"), dict) else {}
+        alvo = {k: redact(str(v)) if isinstance(v, str) else v for k, v in alvo.items()}
+        aplicavel, motivo = _judge_applicability(kind, alvo)
+        propostas.append(Proposal(
+            kind=kind,
+            title=redact(str(achado.get("titulo") or "")),
+            evidence=redact(str(achado.get("evidencia") or "")),
+            proposal=redact(str(achado.get("proposta") or "")),
+            target=alvo,
+            applicable=aplicavel,
+            reason=motivo,
+        ))
+    return propostas
+
+
+_PROPOSAL_LABEL = {
+    "dado": "DADO (aplicável por sim/não)",
+    "prompt": "PROMPT (aplique à mão)",
+    "codigo": "CÓDIGO (vira ticket)",
+    "nota": "NOTA",
+}
+
+
+def render_proposals(proposals) -> str:
+    """Propostas do auditor, numeradas, com o portão de cada uma explícito.
+
+    O dono precisa ver POR QUE algo não é aplicável — senão "o auditor sugeriu e
+    não fez" vira desconfiança da ferramenta em vez de informação.
+    """
+    if not proposals:
+        return ""
+    linhas: list[str] = []
+    for indice, proposta in enumerate(proposals, start=1):
+        if proposta.kind == "nota" and not proposta.title:
+            linhas.append(proposta.proposal)
+            continue
+        rotulo = _PROPOSAL_LABEL.get(proposta.kind, proposta.kind)
+        if proposta.kind == "dado" and not proposta.applicable:
+            # Anunciar "aplicável por sim/não" e logo abaixo dizer que só o dono
+            # altera é contradição na cara do dono.
+            rotulo = "DADO recusado (aplique à mão)"
+        linhas.append(f"*{indice}. {proposta.title}* — {rotulo}")
+        if proposta.evidence:
+            linhas.append(f"_{proposta.evidence}_")
+        if proposta.proposal:
+            linhas.append(proposta.proposal)
+        if not proposta.applicable and proposta.reason and proposta.kind == "dado":
+            linhas.append(f"⚠️ {proposta.reason}")
+        linhas.append("")
+    return "\n".join(linhas).strip()
+
+
+def render_code_ticket(proposal, day: date) -> str:
+    """Corpo de ticket para uma proposta de CODIGO, no ciclo que funcionou.
+
+    O template é o ciclo de 24/08 — achado com texto cru, teste vermelho com a
+    frase literal, filtro determinístico, deploy — porque foi ele que rendeu 7
+    correções numa rodada. Ticket sem a frase literal chega como opinião, e a
+    sessão de dev perde o tempo de reconstruir o caso antes de poder corrigir.
+    """
+    if getattr(proposal, "kind", "") != "codigo":
+        return ""
+    evidencia = proposal.evidence or "(sem texto cru no material)"
+    return "\n".join([
+        f"# {proposal.title or 'Achado do auditor'}",
+        "",
+        f"Auditoria de {day.isoformat()}.",
+        "",
+        "## Achado (texto cru)",
+        evidencia,
+        "",
+        "## Teste vermelho",
+        "Escrever o caso com a frase literal acima e vê-lo falhar antes de corrigir:",
+        f"> {evidencia}",
+        "",
+        "## Filtro determinístico",
+        proposal.proposal or "(proposta não detalhada)",
+        "",
+        "_Instruir não funciona, filtrar funciona: preferir guarda na saída a mais_",
+        "_uma regra no prompt._",
+        "",
+        "## Deploy",
+        "Suíte no container (é o veredito), push na main, `git pull --ff-only` no",
+        "clone e `docker restart hermes`.",
+    ])

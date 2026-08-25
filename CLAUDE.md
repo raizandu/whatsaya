@@ -97,6 +97,28 @@ hermes cron create "0 20 * * *" --name wa-auditoria-diaria \
 `register()` copia o tick para `/opt/data/.hermes/scripts/` no boot. Rodar
 `tick_whatsapp_audit.py 2026-08-24` reprocessa um dia específico.
 
+**Propostas com portão (fase 2).** O auditor responde em JSON e cada achado vem
+tipado; o tipo decide quem aplica, e os limites são de segurança, não de gosto:
+
+| Tipo | Portão |
+|---|---|
+| `DADO` | Único aplicável por *sim/não* no chat do dono (`_pending_audit_action`, TTL 15 min, ao lado do fluxo de catálogo em `pre_gateway_dispatch`). Só nota de contato e campo de item de catálogo |
+| `PROMPT` | Nunca automático — o texto iria direto ao prompt de produção sem suíte cobrindo, e a regra medida aqui é que instruir não funciona |
+| `CODIGO` | Nunca automático. Vira corpo de ticket no relatório, no ciclo de 24/08 (achado com texto cru → teste vermelho com a frase literal → filtro determinístico → deploy) |
+
+`pix_key` e `link` ficam **fora do aplicável mesmo sendo campo de catálogo**: são
+destino de dinheiro e de tráfego, um "sim" distraído não é consentimento
+suficiente para redirecionar pagamento, e o modelo deste sistema já reproduziu
+credencial real por contaminação de provider. O mesmo vale para `summary`/`tone`/
+`guidelines` do contato, que são do classificador. `_apply_audit_proposal`
+**revalida o alvo no backend** — é a segunda camada da mesma decisão que mantém
+`toolsets: []` no perfil de cliente: o agente não se automodifica por caminho
+nenhum.
+
+A criação do ticket na base do Notion **não é feita pelo plugin**: exigiria token
+e id de base que o deploy não tem, e é escrita em serviço externo. O corpo sai
+pronto no relatório para copiar.
+
 ### Dois perfis de isolamento
 
 - **`default`** — dono, no SelfChat. Persona `SOUL.md`, histórico completo, todas as ferramentas.

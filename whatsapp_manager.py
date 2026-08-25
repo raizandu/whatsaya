@@ -2740,6 +2740,71 @@ def _call_llm_api(url: str, headers: dict, payload: dict, extract_fn, timeout: i
 
 _GATEWAY_LOG_PATH = Path("/opt/data/.hermes/logs/gateway.log")
 
+# Proposta do auditor pendente de sim/não do dono, no molde do
+# `_pending_catalog_action`: { sender_id -> {"proposal": Proposal, "created_at": ts} }
+_pending_audit_action: dict[str, dict] = {}
+_PENDING_AUDIT_TTL_S: int = 900  # 15 minutos
+
+
+def _owner_sender_id() -> str:
+    """Mesma chave que o `pre_gateway_dispatch` usa para o dono no self-chat."""
+    digitos = "".join(c for c in config.whatsapp_owner_number if c.isdigit())
+    return f"{digitos}@s.whatsapp.net" if digitos else ""
+
+
+def _apply_audit_proposal(proposal) -> str:
+    """Aplica uma proposta de DADO já confirmada pelo dono.
+
+    Revalida o alvo aqui, e não só na hora de propor: é a segunda camada da
+    mesma decisão que mantém `toolsets: []` no perfil de cliente. O agente não se
+    automodifica por caminho nenhum, e um alvo que não seja dado de operação não
+    vira escrita nem que chegue marcado como aplicável.
+    """
+    import daily_audit as da
+
+    alvo = getattr(proposal, "target", None) or {}
+    tipo = str(alvo.get("tipo") or "").lower()
+    campo = str(alvo.get("campo") or "")
+    valor = alvo.get("valor")
+    if getattr(proposal, "kind", "") != "dado" or not isinstance(valor, str) or not valor.strip():
+        return "❌ Proposta sem dado aplicável."
+
+    if tipo == "contato":
+        if campo not in da.CONTACT_FIELDS_APPLICABLE:
+            logger.warning("[daily-audit] recusado campo de contato %r", campo)
+            return f"❌ Campo de contato {campo!r} não é aplicável por aqui."
+        identificador = str(alvo.get("chat") or "").strip()
+        if not identificador:
+            return "❌ Proposta sem contato alvo."
+        try:
+            retorno = _update_contact_fields(identificador, {campo: valor})
+        except Exception as err:
+            logger.error("[daily-audit] falha ao aplicar em contato: %s", err)
+            return f"❌ Não consegui aplicar: {err}"
+        logger.info("[daily-audit] aplicado campo=%s em contato", campo)
+        return f"✅ Anotação salva no contato. {retorno}".strip()
+
+    if tipo == "catalogo":
+        if campo in da.CATALOG_FIELDS_OWNER_ONLY:
+            logger.warning("[daily-audit] recusado campo de destino %r", campo)
+            return (f"❌ {campo} é destino de dinheiro/tráfego — altere à mão, "
+                    "não por confirmação automática.")
+        if campo not in da.CATALOG_FIELDS_APPLICABLE:
+            return f"❌ Campo de catálogo {campo!r} não é aplicável por aqui."
+        chave = str(alvo.get("chave") or "").strip()
+        catalogo = _load_product_catalog()
+        if not chave or chave not in catalogo:
+            # Criar item por proposta do auditor seria inventar oferta; só edita
+            # o que o dono já cadastrou.
+            return f"❌ Item {chave!r} não existe no catálogo."
+        catalogo[chave][campo] = valor
+        _save_product_catalog(catalogo)
+        logger.info("[daily-audit] aplicado campo=%s no item %r", campo, chave)
+        return f"✅ Catálogo atualizado: {chave} · {campo}."
+
+    logger.warning("[daily-audit] recusado alvo %r", tipo)
+    return "❌ Esse alvo não é dado de operação — o auditor não altera prompt nem código."
+
 
 def _audit_report_dir() -> Path:
     return Path(os.getenv("WHATSAPP_AUDIT_REPORT_DIR", "/opt/data/reports"))
@@ -2772,12 +2837,21 @@ def _run_daily_audit(day=None) -> str | None:
         logger.error("[daily-audit] auditor falhou: %s", err)
         veredito = ""
 
+    # Propostas tipadas antes de gravar: o relatório em disco leva os tickets de
+    # código prontos para copiar. A criação automática na base de tickets NÃO é
+    # feita daqui — exigiria token e id de base que este deploy não tem, e é
+    # escrita em serviço externo. O corpo do ticket fica pronto; criar é do dono.
+    propostas = da.parse_verdict(veredito)
+    aplicaveis = [p for p in propostas if p.applicable]
+
     caminho = None
     try:
         destino = _audit_report_dir()
         destino.mkdir(parents=True, exist_ok=True)
         alvo = destino / f"audit-{dia.strftime('%Y%m%d')}.md"
-        alvo.write_text(da.render_report(auditoria, veredito, material), encoding="utf-8")
+        alvo.write_text(
+            da.render_report(auditoria, veredito, material, propostas), encoding="utf-8"
+        )
         # Só vira caminho DEPOIS de gravar: atribuir antes fazia a falha de
         # escrita ser reportada como sucesso pelo tick, apontando para um
         # arquivo que não existe.
@@ -2797,10 +2871,23 @@ def _run_daily_audit(day=None) -> str | None:
     owner_number = config.whatsapp_owner_number
     if owner_number:
         owner_jid = f"{''.join(c for c in owner_number if c.isdigit())}@s.whatsapp.net"
+        resumo = da.render_owner_summary(auditoria, da.render_proposals(propostas))
+        # Uma proposta por vez: enfileirar três e pedir "sim" três vezes seguidas
+        # transforma confirmação em reflexo, que é o oposto do portão.
+        if aplicaveis:
+            _pending_audit_action[_owner_sender_id()] = {
+                "proposal": aplicaveis[0],
+                "created_at": time.time(),
+            }
+            resumo += (
+                "\n\n*Aplicar a proposta 1?* Responda *sim* para aplicar ou *não* "
+                "para descartar."
+            )
         try:
-            _human_send(owner_jid, da.render_owner_summary(auditoria, veredito))
+            _human_send(owner_jid, resumo)
         except Exception as err:
             logger.error("[daily-audit] falha ao avisar o dono: %s", err)
+            _pending_audit_action.pop(_owner_sender_id(), None)
     else:
         logger.warning("[daily-audit] WHATSAPP_OWNER_NUMBER vazio — relatório só em disco")
 
@@ -2856,23 +2943,35 @@ def _audit_llm_call(material: str, timeout: int = 120) -> str | None:
 
 _AUDIT_SYSTEM_PROMPT = (
     "Você audita o atendimento comercial de um bot de WhatsApp (a AYA) a partir de um "
-    "relatório já agregado e anonimizado de um dia.\n"
-    "Escreva em português do Brasil, direto, sem preâmbulo.\n\n"
-    "Entregue no máximo 3 problemas, do mais grave para o menos, cada um com:\n"
-    "1) o que aconteceu, citando a evidência do material;\n"
-    "2) o tipo da correção, exatamente uma destas palavras: DADO, PROMPT ou CODIGO.\n"
-    "   DADO = cadastro de contato, FAQ ou item de catálogo.\n"
-    "   PROMPT = texto de support_rules.md / SOUL_WHATSAPP.md.\n"
-    "   CODIGO = guarda determinística ou correção no plugin.\n"
-    "3) a proposta concreta.\n\n"
+    "relatório já agregado e anonimizado de um dia.\n\n"
+    "Responda SOMENTE com um JSON, sem texto fora dele, nesta forma:\n"
+    '{"resumo": "uma linha sobre o dia", "findings": [\n'
+    '  {"tipo": "DADO|PROMPT|CODIGO", "titulo": "curto",\n'
+    '   "evidencia": "o que no material sustenta isso",\n'
+    '   "proposta": "a correção concreta",\n'
+    '   "alvo": {}}\n'
+    "]}\n\n"
+    "No máximo 3 findings, do mais grave para o menos. Português do Brasil.\n\n"
+    "O `tipo` decide quem aplica, então não erre:\n"
+    "- DADO — dado de operação: anotação de contato ou campo de item de catálogo. "
+    "É o único que o dono pode aplicar respondendo sim/não no chat. Preencha `alvo` "
+    'como {"tipo":"contato","chat":"<id do material>","campo":"notes","valor":"..."} '
+    'ou {"tipo":"catalogo","chave":"<item>","campo":"name|description|price|delivery_fee",'
+    '"valor":"..."}.\n'
+    "- PROMPT — texto de support_rules.md ou SOUL_WHATSAPP.md. O dono aplica à mão.\n"
+    "- CODIGO — guarda determinística ou correção no plugin. Vira ticket.\n\n"
     "Regras que não se negociam:\n"
+    "- NUNCA classifique como DADO uma mudança de prompt, de código, de chave Pix ou "
+    "de link. Chave Pix e link são destino de dinheiro e de tráfego: se a proposta é "
+    "sobre eles, o tipo é PROMPT ou CODIGO e o dono altera à mão.\n"
     "- O placar 'guarda salvou x modelo acertou' já vem calculado. Não recalcule e não "
     "o contradiga: turno segurado pela guarda é falha do modelo, não sucesso do dia.\n"
     "- Desconfie de proposta que só acrescenta instrução ao prompt. Neste sistema já se "
     "mediu que instruir não funciona e filtrar funciona; prefira PROMPT que REMOVE ou "
     "encurta regra, e CODIGO quando a regra precisa valer sempre.\n"
-    "- Não invente número, valor, credencial ou nome que não esteja no material.\n"
-    "- Se o dia não tem problema relevante, diga isso em uma linha."
+    "- Não invente número, valor, credencial ou nome que não esteja no material. Se o "
+    "material não sustenta um finding, não o escreva.\n"
+    "- Dia sem problema relevante: `findings` vazio e `resumo` dizendo isso."
 )
 
 
@@ -9519,6 +9618,40 @@ def pre_gateway_dispatch(*args, **kwargs):
                 logger.error(f"Erro ao enviar resposta update contact: {send_err}")
 
         return {"action": "skip", "reason": "update-contact-command"}
+
+    # Proposta do auditor pendente de sim/não. Fica na região determinística, ao
+    # lado do catálogo e ANTES da classificação por LLM: se descesse, o
+    # classificador consumiria o "sim" do dono como conversa.
+    if is_owner and sender_id in _pending_audit_action:
+        pendente = _pending_audit_action.get(sender_id) or {}
+        chat_id = str(event.source.chat_id) if event.source.chat_id else ""
+        if time.time() - pendente.get("created_at", 0) > _PENDING_AUDIT_TTL_S:
+            del _pending_audit_action[sender_id]
+        else:
+            reply_norm = _normalize_text(msg_text.strip())
+            confirm_words = {"sim", "s", "confirma", "confirmar", "ok", "pode", "isso",
+                             "aplica", "aplicar", "salva", "salvar", "correto", "certo"}
+            cancel_words = {"nao", "n", "cancela", "cancelar", "cancelado", "errado",
+                            "descarta", "descartar"}
+            if reply_norm in confirm_words:
+                del _pending_audit_action[sender_id]
+                try:
+                    resposta = _apply_audit_proposal(pendente.get("proposal"))
+                except Exception as err:
+                    logger.error("[daily-audit] erro ao aplicar proposta: %s", err)
+                    resposta = f"❌ Não consegui aplicar: {err}"
+                if chat_id:
+                    _human_send(chat_id, resposta)
+                return {"action": "skip", "reason": "audit-proposal-applied"}
+            if reply_norm in cancel_words:
+                del _pending_audit_action[sender_id]
+                if chat_id:
+                    _human_send(chat_id, "❌ Proposta descartada.")
+                return {"action": "skip", "reason": "audit-proposal-cancelled"}
+            # Qualquer outra coisa: o dono mudou de assunto. Solta a proposta em
+            # vez de insistir — repetir "responda sim ou não" a cada mensagem foi
+            # exatamente o padrão que já irritou no fluxo de catálogo.
+            del _pending_audit_action[sender_id]
 
     if is_owner:
         pending_catalog = _pending_catalog_action.get(sender_id)
