@@ -541,16 +541,24 @@ class DayAudit:
     handoffs: list[tuple[str, str]] = field(default_factory=list)
     replies: list[Reply] = field(default_factory=list)
     gate_evidence: list[str] = field(default_factory=list)
+    # Mensagens que o dono digitou na conversa do lead (takeover). Ficam fora do
+    # placar da AYA, mas contam como sinal do dia.
+    owner_manual: int = 0
 
 
 def build_day_audit(day: date, events, turns, infer_language) -> DayAudit:
     """Junta o que o log provou e o que a conversa mostra num retrato do dia."""
     placar = aggregate_events(events)
-    respostas = group_replies(turns)
+    # O dono digitando na conversa do lead também é `from_me=1` no banco; sem
+    # separar, a digitação dele entraria no placar da AYA e levaria violação de
+    # formato pelo que ele mesmo escreveu.
+    auditaveis, do_dono = split_owner_manual(turns, events)
+    respostas = group_replies(auditaveis)
     dia = DayAudit(
         day=day,
         chats=len({t.chat_id for t in turns}),
         lead_messages=sum(1 for t in turns if not t.from_me),
+        owner_manual=len(do_dono),
         guard_hits=placar.guard_hits,
         by_chat=placar.by_chat,
         unattributed=placar.unattributed,
@@ -628,6 +636,7 @@ def compile_material(day: DayAudit, turns) -> str:
         f"- turnos de resposta: {day.replies_guard + day.replies_model}",
         f"- guarda salvou: {day.replies_guard}",
         f"- modelo acertou: {day.replies_model}",
+        f"- mensagens em que o dono assumiu a conversa: {day.owner_manual}",
     ]
 
     if day.guard_hits:
@@ -695,6 +704,8 @@ def render_owner_summary(day: DayAudit, verdict: str) -> str:
         f"*Placar:* {day.replies_guard} guarda salvou × {day.replies_model} modelo acertou.",
         f"*Disparos de guarda:* {sum(day.guard_hits.values())} · *achados de formato/idioma/silêncio:* {achados}",
     ]
+    if day.owner_manual:
+        linhas.append(f"Você assumiu a conversa em {day.owner_manual} mensagem(ns).")
     if day.unanswered:
         linhas.append(f"⚠️ {len(day.unanswered)} mensagem(ns) sem resposta.")
     texto = str(verdict or "").strip()
@@ -752,3 +763,47 @@ def read_day_log_lines(log_path, day: date) -> list[str]:
             if dentro:
                 colhidas.append(linha)
     return colhidas
+
+
+def split_owner_manual(turns, events) -> tuple[list[Turn], list[Turn]]:
+    """Separa o que a AYA enviou do que o dono digitou na conversa do lead.
+
+    `from_me=1` no banco é ambíguo: o bridge tem dois writers para mensagem
+    própria (`persistLiveMessage`, sem guarda, e o writer de mensagem manual do
+    dono), ambos `INSERT OR IGNORE` contra o mesmo índice único — quem grava
+    primeiro vence, então `message_type` é corrida e não separa nada.
+
+    O log `[human-send]` é a autoridade: registra o chat e o tamanho de cada
+    bolha que a AYA realmente enviou. Casa-se tamanho a tamanho, consumindo, para
+    que bolhas repetidas não atribuam demais.
+
+    A decisão é POR CONVERSA. Numa conversa em que o log registrou envios, um
+    turno próprio sem tamanho correspondente é do dono. Numa conversa sem nenhum
+    envio registrado não há como discriminar — e aí tudo é mantido, porque o
+    contrário faria um log rotacionado ou truncado zerar o dia em silêncio, que é
+    pior do que superestimar.
+    """
+    disponiveis: dict[str, list[int]] = {}
+    for evento in events:
+        if evento.tag != "human-send" or "sizes" not in evento.fields:
+            continue
+        tamanhos = [int(n) for n in re.findall(r"\d+", evento.fields["sizes"])]
+        disponiveis.setdefault(evento.chat_id, []).extend(tamanhos)
+
+    do_bot: list[Turn] = []
+    do_dono: list[Turn] = []
+    for turn in turns:
+        if not turn.from_me:
+            do_bot.append(turn)
+            continue
+        if turn.chat_id not in disponiveis:
+            do_bot.append(turn)
+            continue
+        restantes = disponiveis[turn.chat_id]
+        tamanho = len(turn.body)
+        if tamanho in restantes:
+            restantes.remove(tamanho)
+            do_bot.append(turn)
+        else:
+            do_dono.append(turn)
+    return do_bot, do_dono

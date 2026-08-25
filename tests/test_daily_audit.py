@@ -28,6 +28,7 @@ from daily_audit import (
     find_language_mismatch,
     group_replies,
     mask_chat,
+    split_owner_manual,
     redact,
     parse_log_lines,
     read_day_log_lines,
@@ -727,6 +728,25 @@ class BuildDayAuditTest(unittest.TestCase):
 
         self.assertEqual((dia.chats, dia.lead_messages), (2, 2))
 
+    def test_takeover_do_dono_nao_entra_no_placar_da_aya(self):
+        # Durante QA o dono digita muito na conversa do lead. Sem separar, cada
+        # mensagem dele virava "turno da AYA" e levava violação de formato.
+        turnos = [
+            _turn(0, False, "quanto custa?"),
+            _turn(1, True, "Em qual país sua empresa atua?"),
+            _turn(2, False, "brasil"),
+            _turn(3, True, "opa, aqui é o Gustavo, " + "d" * 420),
+        ]
+        eventos = parse_log_lines([
+            f"[whatsapp-manager] [human-send] chat='{CHAT_A}' bubbles=1 sizes=[30]"
+        ])
+
+        dia = build_day_audit(date(2026, 8, 24), eventos, turnos, _pt)
+
+        self.assertEqual((dia.replies_guard, dia.replies_model), (1, 0))
+        self.assertEqual(dia.format_violations, [])
+        self.assertEqual(dia.owner_manual, 1)
+
     def test_dia_sem_movimento_nao_explode(self):
         dia = build_day_audit(date(2026, 8, 24), [], [], _pt)
 
@@ -762,6 +782,21 @@ class CompileMaterialTest(unittest.TestCase):
         self.assertNotIn(CHAT_A, material)
         self.assertNotIn("556299990000", material)
         self.assertIn("…0000", material)
+
+    def test_takeover_do_dono_aparece_no_material(self):
+        # O auditor precisa saber que o dono assumiu: turno dele não é falha da
+        # AYA, e uma conversa cheia de takeover explica um dia "sem resposta".
+        turnos = [
+            _turn(0, False, "quanto custa?"),
+            _turn(1, True, "manual do dono"),
+        ]
+        eventos = parse_log_lines([
+            f"[whatsapp-manager] [human-send] chat='{CHAT_A}' bubbles=1 sizes=[999]"
+        ])
+
+        material = compile_material(self._dia(turnos, eventos), turnos)
+
+        self.assertIn("dono assumiu", material)
 
     def test_traz_o_placar_de_guarda_e_modelo(self):
         turnos = [
@@ -991,3 +1026,92 @@ class ReadDayLogLinesTest(unittest.TestCase):
 
         self.assertEqual(len(linhas), 2)
         self.assertIn("08:00:00", linhas[0])
+
+
+class SplitOwnerManualTest(unittest.TestCase):
+    """`from_me=1` no banco é AYA **ou** o dono digitando na conversa do lead.
+
+    Os dois writers do bridge usam `INSERT OR IGNORE` contra o mesmo índice
+    único, então `message_type` é corrida e não serve para separar. O log
+    `[human-send]` é a autoridade: ele registra o chat e o tamanho de cada bolha
+    que a AYA realmente enviou.
+    """
+
+    def test_bolha_da_aya_e_reconhecida_pelo_tamanho_registrado_no_log(self):
+        turnos = [
+            _turn(0, False, "quanto custa?"),
+            _turn(1, True, "x" * 40),
+        ]
+        eventos = parse_log_lines([
+            f"[whatsapp-manager] [human-send] chat='{CHAT_A}' bubbles=1 sizes=[40]"
+        ])
+
+        auditaveis, dono = split_owner_manual(turnos, eventos)
+
+        # A mensagem do lead fica: é ela que dá contexto ao turno.
+        self.assertEqual([t.body for t in auditaveis], ["quanto custa?", "x" * 40])
+        self.assertEqual(dono, [])
+
+    def test_mensagem_manual_do_dono_nao_conta_como_resposta_da_aya(self):
+        # Sem isso, o dono assumindo a conversa vira "turno da AYA" e leva
+        # violação de formato pelo que ele mesmo digitou.
+        turnos = [
+            _turn(0, False, "quanto custa?"),
+            _turn(1, True, "x" * 40),
+            _turn(2, True, "deixa comigo, eu respondo"),
+        ]
+        eventos = parse_log_lines([
+            f"[whatsapp-manager] [human-send] chat='{CHAT_A}' bubbles=1 sizes=[40]"
+        ])
+
+        auditaveis, dono = split_owner_manual(turnos, eventos)
+
+        self.assertEqual([t.body for t in auditaveis], ["quanto custa?", "x" * 40])
+        self.assertEqual([t.body for t in dono], ["deixa comigo, eu respondo"])
+
+    def test_bolhas_repetidas_do_mesmo_tamanho_sao_consumidas_uma_a_uma(self):
+        turnos = [_turn(i, True, "abc") for i in range(3)]
+        eventos = parse_log_lines([
+            f"[whatsapp-manager] [human-send] chat='{CHAT_A}' bubbles=2 sizes=[3, 3]"
+        ])
+
+        bot, dono = split_owner_manual(turnos, eventos)
+
+        self.assertEqual(len(bot), 2)
+        self.assertEqual(len(dono), 1)
+
+    def test_mensagem_do_lead_nunca_e_reclassificada(self):
+        turnos = [_turn(0, False, "oi")]
+
+        bot, dono = split_owner_manual(turnos, [])
+
+        self.assertEqual([t.body for t in bot], ["oi"])
+        self.assertEqual(dono, [])
+
+    def test_conversa_sem_envio_no_log_mantem_os_turnos(self):
+        # Sem nenhum envio registrado não há como discriminar. Descartar aqui
+        # faria um log rotacionado zerar o dia em silêncio — pior que
+        # superestimar.
+        turnos = [_turn(0, False, "oi"), _turn(1, True, "resposta sem log")]
+
+        auditaveis, dono = split_owner_manual(turnos, [])
+
+        self.assertEqual([t.body for t in auditaveis], ["oi", "resposta sem log"])
+        self.assertEqual(dono, [])
+
+    def test_a_decisao_e_por_conversa(self):
+        # CHAT_A tem envio registrado, então lá o não-correspondente é do dono.
+        # CHAT_B não tem nenhum, então lá nada é reclassificado.
+        turnos = [
+            _turn(0, True, "manual do dono no A", chat=CHAT_A),
+            _turn(1, True, "abc", chat=CHAT_A),
+            _turn(2, True, "sem log no B", chat=CHAT_B),
+        ]
+        eventos = parse_log_lines([
+            f"[whatsapp-manager] [human-send] chat='{CHAT_A}' bubbles=1 sizes=[3]"
+        ])
+
+        auditaveis, dono = split_owner_manual(turnos, eventos)
+
+        self.assertEqual([t.body for t in auditaveis], ["abc", "sem log no B"])
+        self.assertEqual([t.body for t in dono], ["manual do dono no A"])
