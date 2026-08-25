@@ -143,6 +143,32 @@ O corpo passa por `redact` antes de sair — o TKT-1 aberto nessa mesma base é
 "credenciais de produção em texto aberto no Notion", e a automação não pode
 piorar justamente o ticket crítico.
 
+### Reset de contato de teste (`deploy/scripts/wa_reset_contact.py`)
+
+Depois de uma rodada de QA, zerar o histórico do número de teste. Dry-run por
+padrão; `--apply` grava, com backup em `/opt/data/backups/` antes de qualquer
+DELETE. **Rode no host com o container parado** — o SessionStore regrava
+`sessions.json` no shutdown, então limpar com ele de pé faz a sessão ressuscitar.
+
+```bash
+docker stop hermes
+WA_BASE=/opt/whatsaya/data python3 wa_reset_contact.py <numero> --apply
+docker start hermes
+```
+
+Duas armadilhas que custaram caro e que o script cobre:
+
+- **`@lid` é o mesmo contato com outros dígitos.** Resolver os `@lid` pelo
+  `personal_contacts.json` **não basta**: em 24/08 nenhum dos dois números de
+  teste estava cadastrado lá, a auto-detecção devolveu zero, e 39 das 74
+  mensagens sobreviveriam sob `@lid` — com a AYA seguindo "lembrando" do lead
+  depois do reset. A fonte confiável é o mapa `lidToPhone` do bridge
+  (`GET /bot-status`); o cadastro é só fallback. Sem `@lid` conhecido o script
+  avisa em vez de fingir que limpou.
+- **`sessions.json` existe em mais de um lugar.** A sessão viva estava em
+  `profiles/whatsapp/sessions/`, não no caminho documentado — a busca é
+  recursiva.
+
 ### Dois perfis de isolamento
 
 - **`default`** — dono, no SelfChat. Persona `SOUL.md`, histórico completo, todas as ferramentas.
