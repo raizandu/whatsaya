@@ -1,6 +1,7 @@
 """Testes do motor transacional de follow-up; não importam o plugin vivo."""
 from __future__ import annotations
 
+import json
 import sqlite3
 import tempfile
 import threading
@@ -13,9 +14,11 @@ from commercial_followups import (
     FollowupEngine,
     add_business_minutes,
     cadence_due_times,
+    followup_policy,
     is_business_time,
     next_business_time,
     render_contextual_message,
+    sanitize_followup_fact,
     validate_context,
 )
 
@@ -272,6 +275,82 @@ class FollowupEngineTest(unittest.TestCase):
         self.assertIn("integração com a agenda atual", message)
         self.assertNotIn("ainda tá por aí", message.lower())
         self.assertNotIn("qualquer coisa é só chamar", message.lower())
+        self.assertNotIn("quer que eu continue daqui", message.lower())
+
+    def test_clinic_inbound_becomes_personal_silence_followup(self):
+        fact = sanitize_followup_fact(
+            "Tenho uma clínica odontológica e recebo bastante gente "
+            "perguntando sobre procedimentos e querendo marcar avaliação"
+        )
+        policy = followup_policy(
+            asked_price=False, wants_call=False, wants_pay=False, wants_human=False,
+        )
+        self.assertEqual(policy["stage"], "qualification")
+        self.assertEqual(policy["cadence_kind"], "silence")
+        message = render_contextual_message({
+            "stage": policy["stage"],
+            "context_kind": policy["context_kind"],
+            "context_fact": fact,
+            "context_source_message_id": "in-clinic-1",
+            "context_verified": 1,
+            "step_no": 1,
+        })
+        folded = message.lower()
+        self.assertIn("clínica odontológica", folded)
+        self.assertNotIn("ainda tá por aí", folded)
+        self.assertNotIn("quer que eu continue daqui", folded)
+
+    def test_price_question_policy_schedules_proposal_not_silence(self):
+        policy = followup_policy(
+            asked_price=True, wants_call=False, wants_pay=False, wants_human=False,
+        )
+        self.assertEqual(policy["stage"], "pricing")
+        self.assertEqual(policy["cadence_kind"], "proposal")
+        self.assertEqual(policy["context_kind"], "question")
+        message = render_contextual_message({
+            "stage": "pricing",
+            "context_kind": "question",
+            "context_fact": "quanto custa pra colocar isso na clínica",
+            "context_source_message_id": "in-price-1",
+            "context_verified": 1,
+            "step_no": 1,
+        })
+        folded = message.lower()
+        self.assertIn("clínica", folded)
+        self.assertIn("call", folded)
+        self.assertNotIn("1.500", message)
+        self.assertNotIn("497", message)
+
+    def test_human_request_policy_is_takeover(self):
+        policy = followup_policy(
+            asked_price=False, wants_call=False, wants_pay=False, wants_human=True,
+        )
+        self.assertTrue(policy["takeover"])
+        self.assertNotIn("cadence_kind", policy)
+
+    def test_sanitize_followup_fact_redacts_and_clips(self):
+        fact = sanitize_followup_fact(
+            "Meu CNPJ é 11222333000199 e o e-mail é dono@example.com — "
+            + ("avaliação " * 40)
+        )
+        self.assertNotIn("11222333000199", fact)
+        self.assertNotIn("dono@example.com", fact)
+        self.assertLessEqual(len(fact), 180)
+        self.assertEqual(sanitize_followup_fact("oi"), "")
+
+    def test_outbound_enqueues_crm_snapshot(self):
+        self.schedule()
+        con = sqlite3.connect(self.db)
+        try:
+            rows = list(con.execute("SELECT payload_json, status FROM crm_outbox"))
+        finally:
+            con.close()
+        self.assertEqual(len(rows), 1)
+        payload = json.loads(rows[0][0])
+        self.assertEqual(payload["stage"], "qualification")
+        self.assertEqual(payload["cadence_kind"], "silence")
+        self.assertIn("next_followup_utc", payload)
+        self.assertNotIn("context_fact", payload)
 
     def test_outbox_rejects_transcript_and_deduplicates_version(self):
         with self.assertRaises(ValueError):

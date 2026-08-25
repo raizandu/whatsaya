@@ -25,7 +25,12 @@ import socket
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from commercial_followups import FollowupEngine, render_contextual_message
+from commercial_followups import (
+    FollowupEngine,
+    followup_policy,
+    render_contextual_message,
+    sanitize_followup_fact,
+)
 
 import logging
 
@@ -453,6 +458,8 @@ _FOLLOWUP_DB_PATH = Path(
 )
 _FOLLOWUP_ENGINE: FollowupEngine | None = None
 _FOLLOWUP_ENGINE_LOCK = threading.Lock()
+_followup_turn_snapshot: dict[str, dict] = {}
+_followup_turn_lock = threading.Lock()
 _FOLLOWUP_OPT_OUT_RE = re.compile(
     r"\b(?:n[aã]o\s+(?:me\s+)?(?:chame|mande\s+mais\s+mensagens?|entre\s+em\s+contato)|"
     r"pare\s+de\s+(?:me\s+)?mandar|remova\s+(?:meu\s+)?contato|quero\s+sair)\b",
@@ -658,12 +665,68 @@ def _followup_configure_lead(chat_id: str, **changes):
     return _followup_engine().configure_lead(key, **changes)
 
 
+def _followup_remember_turn(
+    chat_id: str,
+    inbound_text: str,
+    inbound_message_id: str | None,
+) -> None:
+    """Guarda o fato verificado deste turno para o outbound da bridge agendar o follow."""
+    key = _canonical_followup_jid(chat_id) or str(chat_id)
+    if not key or _followup_skip_contact(key):
+        return
+    if not inbound_message_id or not str(inbound_message_id).strip():
+        return
+    fact = sanitize_followup_fact(inbound_text)
+    if not fact:
+        return
+    policy = followup_policy(
+        asked_price=_asks_about_price(inbound_text),
+        wants_call=_wants_sales_call(inbound_text) and not _wants_payment_details(inbound_text),
+        wants_pay=_wants_payment_details(inbound_text),
+        wants_human=_lead_requests_human(inbound_text),
+    )
+    snapshot = dict(policy)
+    snapshot["context_fact"] = fact
+    snapshot["context_source_message_id"] = str(inbound_message_id).strip()
+    with _followup_turn_lock:
+        _followup_turn_snapshot[key] = snapshot
+
+
 def _followup_register_outbound(chat_id: str, message_id: str) -> list[int]:
     """Registra somente envio confirmado pela bridge; sem contexto não agenda nada."""
     if not chat_id or not isinstance(message_id, (str, int)) or not str(message_id):
         return []
     key = _canonical_followup_jid(chat_id) or str(chat_id)
-    return _followup_engine().note_outbound(key, message_id=str(message_id))
+    with _followup_turn_lock:
+        snap = _followup_turn_snapshot.pop(key, None)
+    if not snap:
+        return []
+    engine = _followup_engine()
+    now = datetime.datetime.now(datetime.UTC)
+    if snap.get("takeover"):
+        engine.note_human_takeover(key, at=now)
+        return []
+    engine.configure_lead(
+        key,
+        automation_enabled=True,
+        stage=snap.get("stage"),
+        cadence_kind=snap.get("cadence_kind"),
+        context_kind=snap.get("context_kind"),
+        context_fact=snap.get("context_fact"),
+        context_source_message_id=snap.get("context_source_message_id"),
+        context_verified=True,
+        now=now,
+    )
+    return engine.note_outbound(
+        key,
+        message_id=str(message_id),
+        cadence_kind=snap.get("cadence_kind"),
+        context_kind=snap.get("context_kind"),
+        context_fact=snap.get("context_fact"),
+        context_source_message_id=snap.get("context_source_message_id"),
+        context_verified=True,
+        at=now,
+    )
 
 
 def _followup_cancel(chat_id: str) -> None:
@@ -2195,6 +2258,15 @@ def _deliver_contact_reply(
 ) -> str:
     """Entrega contato e só retorna após receber ao menos um `messageId` real."""
     _assert_delivery_allowed(chat_id)
+    inbound = _current_inbound_record(chat_id)
+    try:
+        _followup_remember_turn(
+            chat_id,
+            str(inbound.get("text") or ""),
+            str(inbound.get("message_id") or "") or None,
+        )
+    except Exception as err:
+        logger.warning("[followup] snapshot do turno falhou: %s", err)
     spoken, before, after = _split_voice_and_text(clean_text)
     last_message_id = None
     if before:

@@ -201,6 +201,63 @@ class FollowupPluginIntegrationTest(unittest.TestCase):
         self.assertEqual(lead["opt_out"], 1)
         self.assertEqual(lead["automation_enabled"], 0)
 
+    def test_clinic_turn_schedules_personalized_followup(self):
+        from commercial_followups import FollowupEngine, render_contextual_message
+
+        chat = "5511999995750@s.whatsapp.net"
+        db = Path(self._policy_tmp.name) / "followups.db"
+        engine = FollowupEngine(db)
+        with patch.object(wm, "_followup_engine", return_value=engine), \
+             patch.object(wm, "_followup_skip_contact", return_value=False):
+            wm._followup_remember_turn(
+                chat,
+                "Tenho uma clínica odontológica e recebo bastante gente "
+                "perguntando sobre procedimentos",
+                "wamid-in-clinic",
+            )
+            ids = wm._followup_register_outbound(chat, "wamid-out-clinic")
+        self.assertTrue(ids)
+        lead = engine.get_lead(chat)
+        self.assertIsNotNone(lead)
+        assert lead is not None
+        self.assertEqual(lead["stage"], "qualification")
+        self.assertEqual(lead["cadence_kind"], "silence")
+        self.assertIn("clínica odontológica", lead["context_fact"])
+        job = engine.get_jobs(chat)[0]
+        text = render_contextual_message(job)
+        self.assertIn("clínica odontológica", text.lower())
+        self.assertNotIn("ainda tá por aí", text.lower())
+
+    def test_price_turn_uses_proposal_cadence(self):
+        from commercial_followups import FollowupEngine
+
+        chat = "5511999995750@s.whatsapp.net"
+        db = Path(self._policy_tmp.name) / "followups-price.db"
+        engine = FollowupEngine(db)
+        with patch.object(wm, "_followup_engine", return_value=engine), \
+             patch.object(wm, "_followup_skip_contact", return_value=False):
+            wm._followup_remember_turn(
+                chat,
+                "Legal. E quanto custa pra colocar isso na minha clínica?",
+                "wamid-in-price",
+            )
+            wm._followup_register_outbound(chat, "wamid-out-price")
+        lead = engine.get_lead(chat)
+        assert lead is not None
+        self.assertEqual(lead["stage"], "pricing")
+        self.assertEqual(lead["cadence_kind"], "proposal")
+
+    def test_no_snapshot_does_not_send_generic_ping(self):
+        from commercial_followups import FollowupEngine
+
+        chat = "5511888888888@s.whatsapp.net"
+        db = Path(self._policy_tmp.name) / "followups-empty.db"
+        engine = FollowupEngine(db)
+        with patch.object(wm, "_followup_engine", return_value=engine):
+            ids = wm._followup_register_outbound(chat, "wamid-out-empty")
+        self.assertEqual(ids, [])
+        self.assertIsNone(engine.get_lead(chat))
+
 
 if __name__ == "__main__":
     unittest.main()

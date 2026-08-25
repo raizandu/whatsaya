@@ -21,6 +21,41 @@ BUSINESS_OPEN = time(8, 0)
 BUSINESS_CLOSE = time(18, 0)
 TERMINAL_STAGES = {"ganho", "perdido", "cancelado", "concluido", "concluída", "won", "lost", "cancelled"}
 CONTEXT_KINDS = {"business", "pain", "question", "objection", "proposal", "payment", "next_step"}
+_EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
+_LONG_DIGITS_RE = re.compile(r"\d{6,}")
+# Copy por (stage, kind, step). Sempre cita o fato verificado; nunca ping genérico.
+_FOLLOWUP_COPY = {
+    ("qualification", "business", 1):
+        "Você comentou {fact}. Se ainda estiver na pauta, me diz o que mais trava no atendimento hoje.",
+    ("qualification", "business", 2):
+        "Retomando: {fact}. Faz sentido a gente olhar isso numa call curta?",
+    ("qualification", "business", 3):
+        "Último toque sobre {fact}. Se não for o momento, é só falar.",
+    ("qualification", "pain", 1):
+        "Você falou de {fact}. Posso te mostrar como a AYA entra nisso, sem enrolação.",
+    ("qualification", "pain", 2):
+        "Ainda vale {fact}? A gente resolve isso numa call curta.",
+    ("qualification", "pain", 3):
+        "Último toque: {fact}. Se saiu da pauta, sem problema.",
+    ("pricing", "question", 1):
+        "Ficou pendente {fact}. A proposta é personalizada e fecha numa call curta — quer que eu encaixe?",
+    ("pricing", "question", 2):
+        "Sobre o investimento ({fact}): sem tabela neste chat, a gente fecha na call. Prefere um horário?",
+    ("pricing", "question", 3):
+        "Se {fact} ainda importa, me fala um período que o time te encaixa.",
+    ("proposal", "next_step", 1):
+        "A gente tinha ficado em {fact}. Me fala um período pra call da proposta.",
+    ("proposal", "next_step", 2):
+        "Ainda vale {fact}? O time encaixa a call no período que você passar.",
+    ("proposal", "next_step", 3):
+        "Se {fact} saiu da pauta, sem problema — é só responder por aqui.",
+    ("payment", "payment", 1):
+        "Os dados oficiais já foram, sobre {fact}. Qualquer trava no pagamento, me chama aqui.",
+    ("payment", "payment", 2):
+        "Retomando o pagamento de {fact}. Se já fez, manda o comprovante; se não, te ajudo.",
+    ("payment", "payment", 3):
+        "Último aviso sobre {fact}. Se fechou por outro canal, me confirma.",
+}
 CADENCES: dict[str, tuple[tuple[str, int], ...]] = {
     "silence": (("business_minutes", 30), ("business_days", 1), ("business_days", 3)),
     "proposal": (("business_days", 1), ("business_days", 3), ("business_days", 7)),
@@ -145,20 +180,86 @@ def validate_context(
     return clean_kind, clean_fact, clean_source
 
 
+def sanitize_followup_fact(text: str) -> str:
+    """Recorta a fala do lead para caber no follow. Sem credencial, sem ping vazio."""
+    clean = " ".join(str(text or "").split())
+    clean = _LONG_DIGITS_RE.sub("[DIGITS]", clean)
+    clean = _EMAIL_RE.sub("[EMAIL]", clean)
+    if _SECRET_RE.search(clean):
+        return ""
+    if len(clean) < 4:
+        return ""
+    if len(clean) > 180:
+        clipped = clean[:177].rsplit(" ", 1)[0].rstrip(".,;:")
+        clean = (clipped or clean[:177]).rstrip() + "…"
+    return clean
+
+
+def followup_policy(
+    *,
+    asked_price: bool,
+    wants_call: bool,
+    wants_pay: bool,
+    wants_human: bool,
+) -> dict[str, Any]:
+    """Estágio/cadência a partir do turno — sem LLM. Takeover cancela automação."""
+    if wants_human:
+        return {"takeover": True}
+    if wants_pay:
+        return {
+            "takeover": False,
+            "stage": "payment",
+            "cadence_kind": "payment",
+            "context_kind": "payment",
+        }
+    if wants_call:
+        return {
+            "takeover": False,
+            "stage": "proposal",
+            "cadence_kind": "proposal",
+            "context_kind": "next_step",
+        }
+    if asked_price:
+        return {
+            "takeover": False,
+            "stage": "pricing",
+            "cadence_kind": "proposal",
+            "context_kind": "question",
+        }
+    return {
+        "takeover": False,
+        "stage": "qualification",
+        "cadence_kind": "silence",
+        "context_kind": "business",
+    }
+
+
+def _stage_from_kind(kind: str) -> str:
+    return {
+        "question": "pricing",
+        "next_step": "proposal",
+        "proposal": "proposal",
+        "payment": "payment",
+        "pain": "qualification",
+        "business": "qualification",
+        "objection": "pricing",
+    }.get(kind, "qualification")
+
+
 def render_contextual_message(job: dict[str, Any]) -> str:
     """Copy determinística; nunca gera promessa, desconto ou dado não verificado."""
-    _kind, fact, _source = validate_context(
+    kind, fact, _source = validate_context(
         job.get("context_kind"),
         job.get("context_fact"),
         job.get("context_source_message_id"),
         bool(job.get("context_verified")),
     )
-    step = int(job.get("step_no") or 1)
-    if step == 1:
-        return f"Sobre {fact}: quer que eu continue daqui?"
-    if step == 2:
-        return f"Retomando {fact}: ficou algum ponto que eu possa esclarecer?"
-    return f"Sobre {fact}: se ainda fizer sentido, me diga qual ponto você quer retomar."
+    step = max(1, min(int(job.get("step_no") or 1), 3))
+    stage = str(job.get("stage") or "").strip().lower() or _stage_from_kind(kind)
+    template = _FOLLOWUP_COPY.get((stage, kind, step))
+    if not template:
+        template = "{fact} — se ainda estiver na pauta, me diz por onde retomar."
+    return template.format(fact=fact)
 
 
 class FollowupEngine:
@@ -484,6 +585,32 @@ class FollowupEngine:
                 )
                 if cur.rowcount and cur.lastrowid is not None:
                     ids.append(int(cur.lastrowid))
+            if ids:
+                due_times = cadence_due_times(selected_cadence, current)
+                payload = {
+                    "chat_id": clean_id,
+                    "stage": str(state.get("stage") or ""),
+                    "cadence_kind": selected_cadence,
+                    "automation_enabled": bool(state.get("automation_enabled")),
+                    "next_action": "followup_step_1",
+                    "next_followup_utc": _iso(due_times[0]) if due_times else "",
+                    "attempt_count": 0,
+                    "followup_status": "pending",
+                }
+                con.execute(
+                    """
+                    INSERT OR IGNORE INTO crm_outbox(
+                        chat_id, lead_version, payload_json, status, created_utc, updated_utc
+                    ) VALUES (?, ?, ?, 'pending', ?, ?)
+                    """,
+                    (
+                        clean_id,
+                        int(state["lead_version"]),
+                        json.dumps(payload, ensure_ascii=False, sort_keys=True),
+                        _iso(current),
+                        _iso(current),
+                    ),
+                )
             return ids
 
     def claim_due(
