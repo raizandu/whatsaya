@@ -8047,13 +8047,29 @@ _TURN_LANGUAGE_HINT = {
 }
 
 
-def _turn_language_hint(user_message: str, contact_info: dict | None = None) -> str:
-    """Linha imperativa no fim do turno. Mensagem ambígua ('ok') preserva o cadastro."""
+def _turn_language_hint(
+    user_message: str, contact_info: dict | None = None, chat_id: str = ""
+) -> str:
+    """Linha imperativa no fim do turno. Mensagem ambígua ('ok') preserva o cadastro.
+
+    Com chat_id, loga presença e FONTE da dica — sem isso o auditor diário não
+    distingue "dica não emitida" (limite do detector ou cadastro sem language) de
+    "emitida e ignorada pelo modelo", que é a pergunta que decide se a melhoria 2
+    vira guarda determinística (pedido do auditor, 24/08).
+    """
     language = _infer_message_language(user_message)
+    fonte = "mensagem" if language else ""
     if not language:
         raw = str((contact_info or {}).get("language") or "").strip().lower()
         language = next((code for code in ("pt", "en", "es") if raw.startswith(code)), "")
-    return _TURN_LANGUAGE_HINT.get(language, "")
+        fonte = "cadastro" if language else "nenhuma"
+    hint = _TURN_LANGUAGE_HINT.get(language, "")
+    if chat_id:
+        logger.info(
+            "[language-hint] chat=%r lead=%s hint=%s fonte=%s",
+            chat_id, language or "?", bool(hint), fonte,
+        )
+    return hint
 
 
 def _infer_explicit_market_metadata(text: str) -> dict:
@@ -10577,7 +10593,7 @@ def pre_llm_call(*args, **kwargs):
             contact_info=contact_info,
             history=history_context,
         ),
-        language_hint=_turn_language_hint(str(user_msg_now), contact_info),
+        language_hint=_turn_language_hint(str(user_msg_now), contact_info, chat_id=chat_id),
     )
 
 

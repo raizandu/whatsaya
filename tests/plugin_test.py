@@ -8995,6 +8995,39 @@ class TestConversationStateBlock(unittest.TestCase):
 class TestTurnLanguageHint(unittest.TestCase):
     """Melhoria 2: lead em português recebeu turno em inglês ('Yes.' + parágrafo)."""
 
+    def test_log_do_hint_diz_presenca_e_fonte(self):
+        """Pedido do auditor (24/08): sem sinal observável não dá para distinguir
+        'dica não emitida' de 'emitida e ignorada'. Uma linha por turno, com a
+        fonte separando limite do detector de cadastro vazio."""
+        with self.assertLogs("whatsapp_manager", level="INFO") as logs:
+            whatsapp_manager._turn_language_hint(
+                "how much does it cost for my company?", {}, chat_id="1@s.whatsapp.net"
+            )
+        self.assertTrue(any("[language-hint]" in linha and "fonte=" in linha for linha in logs.output))
+        with self.assertLogs("whatsapp_manager", level="INFO") as logs2:
+            whatsapp_manager._turn_language_hint("ok", {}, chat_id="1@s.whatsapp.net")
+        joined = "\n".join(logs2.output)
+        self.assertIn("hint=False", joined)
+        self.assertIn("fonte=nenhuma", joined)
+        with self.assertLogs("whatsapp_manager", level="INFO") as logs3:
+            whatsapp_manager._turn_language_hint(
+                "ok", {"language": "pt"}, chat_id="1@s.whatsapp.net"
+            )
+        self.assertIn("fonte=cadastro", "\n".join(logs3.output))
+
+    def test_sem_chat_id_nao_loga(self):
+        import logging as _logging
+        logger = _logging.getLogger("whatsapp_manager")
+        registros = []
+        handler = _logging.Handler()
+        handler.emit = lambda record: registros.append(record.getMessage())
+        logger.addHandler(handler)
+        try:
+            whatsapp_manager._turn_language_hint("ok", {})
+        finally:
+            logger.removeHandler(handler)
+        self.assertFalse(any("[language-hint]" in msg for msg in registros))
+
     def test_portugues_claro_pede_resposta_em_portugues(self):
         dica = whatsapp_manager._turn_language_hint(
             "Tenho uma empresa de limpeza e quero avançar.",
