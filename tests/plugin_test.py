@@ -6515,8 +6515,93 @@ class TestOnboardingGate(unittest.TestCase):
         self.assertEqual(out, texto)
 
 
+TABELA_PRECOS_MIN = (
+    "| Mercado | Implementação | Mensalidade |\n| --- | --- | --- |\n"
+    "| Estados Unidos | US$ 497 | US$ 99/mês |\n"
+)
+
+
 class TestPriceFallbacks(unittest.TestCase):
     """Defeitos dos fallbacks da guarda, introduzidos em 99931f6 e medidos no QA de 24/08."""
+
+    def _fallback(self, msg, reason="market_mismatch", historico="", **kwargs):
+        with patch("whatsapp_manager._fetch_chat_history", return_value=historico):
+            return whatsapp_manager._payment_gate_fallback(
+                msg,
+                {"market_id": "US", "language": "pt"},
+                reason,
+                rules_content=TABELA_PRECOS_MIN,
+                chat_id="12025550199@s.whatsapp.net",
+                **kwargs,
+            )
+
+    def test_pagar_contas_do_negocio_nao_e_intencao(self):
+        """Review de 24/08 (crítico): 'como eu pago meus funcionários' virava
+        intenção explícita e liberava o bloco de credencial."""
+        for msg in (
+            "hoje nem sei como eu pago meus funcionários",
+            "como pago meus fornecedores todo mês",
+            "não sei como eu pago as contas",
+        ):
+            with self.subTest(msg=msg):
+                self.assertFalse(whatsapp_manager._has_explicit_purchase_intent(msg))
+        self.assertTrue(whatsapp_manager._has_explicit_purchase_intent("Como faço o pagamento?"))
+        self.assertTrue(whatsapp_manager._has_explicit_purchase_intent("como eu pago vocês?"))
+
+    def test_objecao_feminina_e_fora_do_nosso_orcamento(self):
+        for msg in (
+            "achei a implementação muito cara",
+            "a mensalidade tá cara",
+            "isso está fora do nosso orçamento",
+        ):
+            with self.subTest(msg=msg):
+                self.assertTrue(whatsapp_manager._is_price_objection(msg))
+
+    def test_objecao_negada_ou_vocativo_nao_e_objecao(self):
+        for msg in (
+            "não achei caro",
+            "no es caro para lo que entrega",
+            "Caro atendente, pode me ajudar?",
+            "mi antiguo proveedor era muy caradura",
+        ):
+            with self.subTest(msg=msg):
+                self.assertFalse(whatsapp_manager._is_price_objection(msg))
+
+    def test_pergunta_direta_vence_a_objecao(self):
+        """'tá salgado... mas quanto fica no total?' tem que responder o preço."""
+        for msg in (
+            "tá meio salgado... mas quanto fica no total?",
+            "não achei caro, quanto custa a mensalidade mesmo?",
+            "Caro atendente, quanto custa?",
+        ):
+            with self.subTest(msg=msg):
+                out = self._fallback(msg)
+                self.assertIn("US$ 497", out)
+
+    def test_quanto_voce_cobra_singular_e_invertido(self):
+        for msg in ("quanto você cobra?", "vocês cobram quanto?"):
+            with self.subTest(msg=msg):
+                self.assertTrue(whatsapp_manager._asks_about_price(msg))
+
+    def test_objecao_em_intent_missing_recebe_tratamento_nao_oferta_de_pagamento(self):
+        out = self._fallback("tá muito caro pra mim", reason="intent_missing")
+        self.assertIn("implementação", out.lower())
+        self.assertNotIn("dados de pagamento", out)
+
+    def test_objecao_repetida_nao_reenvia_o_mesmo_paragrafo(self):
+        paragrafo = whatsapp_manager._PRICE_OBJECTION_RESPONSE["pt"]
+        out = self._fallback("continuo achando caro", historico=f"AYA: {paragrafo}")
+        self.assertNotIn("entrar funcionando do seu jeito", out)
+        self.assertTrue(out.strip())
+
+    def test_cta_nao_repete_nem_sai_no_caminho_de_recorte(self):
+        cta = whatsapp_manager._PRICE_CTA["pt"]
+        out = self._fallback("quanto custa?", historico=f"AYA: {cta}")
+        self.assertIn("US$ 497", out)
+        self.assertNotIn("como começamos", out)
+        out2 = self._fallback("quanto custa?", include_cta=False)
+        self.assertIn("US$ 497", out2)
+        self.assertNotIn("como começamos", out2)
 
     def test_quanto_que_custa_coloquial_e_pergunta_de_preco(self):
         """Turno real do QA de 24/08 à noite: "e quanto q custa?" caiu no ramo
@@ -6539,20 +6624,15 @@ class TestPriceFallbacks(unittest.TestCase):
             with self.subTest(msg=msg):
                 self.assertTrue(whatsapp_manager._has_explicit_purchase_intent(msg))
 
-    def test_objecao_recebe_tratamento_nao_repeticao_de_preco(self):
-        """QA Final 4.0, ajuste 3: objeção não pode só repetir o preço — conecta o
-        valor ao que a implementação entrega. E não usa a frase de continuação."""
-        out = whatsapp_manager._payment_gate_fallback(
-            "Achei o valor de implementação um pouco caro",
-            {"market_id": "US", "language": "pt"},
-            "market_mismatch",
-            rules_content=(
-                "| Mercado | Implementação | Mensalidade |\n| --- | --- | --- |\n"
-                "| Estados Unidos | US$ 497 | US$ 99/mês |\n"
-            ),
-        )
-        self.assertNotIn("US$", out)
+    def test_objecao_recebe_tratamento_com_correcao_do_valor(self):
+        """QA Final 4.0, ajuste 3 + review F4: objeção não pode SÓ repetir o preço
+        (conecta o valor ao que a implementação entrega), mas em market_mismatch o
+        lead acabou de ver um número errado — a correção oficial vem junto, senão o
+        valor errado fica de pé. Sem CTA e sem frase de continuação."""
+        out = self._fallback("Achei o valor de implementação um pouco caro")
         self.assertIn("implementação", out.lower())
+        self.assertIn("US$ 497", out)
+        self.assertNotIn("como começamos", out)
         self.assertNotIn("Me conta como funciona", out)
 
     def test_preco_sai_com_conducao_de_proximo_passo(self):
@@ -8870,17 +8950,37 @@ class TestConversationStateBlock(unittest.TestCase):
         bloco = self._bloco(history)
         self.assertNotIn("Objeção de preço já levantada", bloco)
 
-    def test_lead_pediu_humano_com_horario_do_handoff(self):
-        from datetime import datetime
-        from zoneinfo import ZoneInfo
-        ts = datetime(2026, 8, 24, 14, 32, tzinfo=ZoneInfo("America/Sao_Paulo")).timestamp()
-        whatsapp_manager._handoff_sent_at[_QA_CHAT] = ts
+    def test_lead_pediu_humano_vem_do_historico_nao_do_cooldown(self):
+        """Review 24/08 (achado 1): _handoff_sent_at é cache de cooldown de 15 min do
+        processo, não memória de conversa — o fato tem que vir do histórico, que
+        sobrevive a restart e expira com a janela da conversa."""
+        history = "Lead: Quero falar com uma pessoa"
+        self.assertIn("Lead pediu humano", self._bloco(history))
+        # cooldown vivo sem pedido no histórico não fabrica o fato
+        whatsapp_manager._handoff_sent_at[_QA_CHAT] = 1234567890.0
         try:
-            history = "Lead: Quero falar com uma pessoa"
-            bloco = self._bloco(history)
+            bloco = self._bloco("Lead: quero entender como a AYA funciona")
         finally:
             whatsapp_manager._handoff_sent_at.pop(_QA_CHAT, None)
-        self.assertIn("Lead pediu humano (14:32)", bloco)
+        self.assertNotIn("Lead pediu humano", bloco)
+
+    def test_rotulo_desconhecido_conta_como_aya_nao_como_lead(self):
+        """Review 24/08 (achado 2): o servidor HTTP rotula a AYA de outros jeitos
+        (Assistant, push name). Linha não reconhecida como lead é nossa — senão a
+        oferta da própria AYA ("posso te conectar com uma pessoa") vira
+        'Lead pediu humano' em todo turno seguinte."""
+        history = (
+            "Assistant: Posso te conectar com uma pessoa do time.\n"
+            "Lead: legal, obrigado"
+        )
+        self.assertNotIn("Lead pediu humano", self._bloco(history))
+
+    def test_linha_do_lead_rotulada_pelo_nome_continua_sendo_lead(self):
+        history = "Gustavo: Quero falar com uma pessoa"
+        bloco = self._bloco(
+            history, contact={"market_id": "US", "language": "pt", "name": "Gustavo"}
+        )
+        self.assertIn("Lead pediu humano", bloco)
 
     def test_pergunta_de_continuacao_ja_feita_nao_repete(self):
         # Teste #05 do QA: no 7º turno o lead recebeu a mesma pergunta do 1º.

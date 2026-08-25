@@ -7726,6 +7726,8 @@ def _has_explicit_purchase_intent(text: str) -> bool:
         return False
     negative_patterns = (
         r"\bnao\s+quero\s+(?:contratar|avancar|comecar|fechar|pagar|receber)\b",
+        # "não sei como eu pago meus boletos" é desabafo, não fechamento (review 24/08).
+        r"\b(?:nao|nem)\s+sei\s+como\b",
         r"\b(?:nao|no)\s+vamos\s+(?:fechar|avancar|comecar|a\s+cerrar)\b",
         r"\bnao\s+(?:me\s+)?(?:mande|manda|envie|envia)\b.{0,35}"
         r"\b(?:pix|zelle|pagamento|dados|chave)\b",
@@ -7780,7 +7782,12 @@ def _has_explicit_purchase_intent(text: str) -> bool:
         # "como faço o pagamento" coloquial: só "como fazer o pagamento" deixava
         # o lead quente com intent=False (QA de 24/08 à noite).
         r"\bcomo\s+(?:eu\s+)?(?:posso\s+|faco\s+(?:para\s+|pra\s+)?)?"
-        r"(?:pagar|pago\b|fazer\s+o\s+pagamento|o\s+pagamento)\b",
+        # "como eu pago" é intenção quando o objeto somos nós — "como eu pago meus
+        # funcionários/fornecedores/contas" é o lead falando do negócio dele, e
+        # intenção falsa aqui LIBERA credencial (review de 24/08, crítico).
+        r"(?:pagar|pago(?!\s+(?:mei?s|meus?|minhas?|nossos?|nossas?|os\s|as\s|"
+        r"funcionari\w*|colaborador\w*|fornecedor\w*|salari\w*|contas?|boletos?|"
+        r"imposto\w*|aluguel|equipe|gente))|fazer\s+o\s+pagamento|o\s+pagamento)\b",
         r"\b(?:pode|poderia)\s+me\s+(?:mandar|enviar)\b.{0,25}\b(?:pix|chave|pagamento)\b",
         r"\b(?:me\s+)?(?:manda|mande|envia|envie)\b.{0,25}\bpagamento\b",
         r"\b(?:me\s+)?(?:manda|mande|envia|envie)\b.{0,25}\bpix\b",
@@ -11278,21 +11285,37 @@ def _payment_gate_language(user_message: str, contact_info: dict) -> str:
     return "pt"
 
 
-_PRICE_QUESTION_RE = re.compile(
-    # "valor(?:es)?", não "valores?": a grafia antiga só casava "valores"/"valore",
-    # e "achei o valor caro" caía fora do assunto preço (QA de 24/08).
-    # "quanto q(ue) custa" coloquial: sem o grupo opcional, o "q" quebrava o match
-    # e a pergunta de preço real caía no ramo sem preço (QA de 24/08 à noite).
-    r"\b(?:quanto\s+(?:e\s+)?(?:q(?:ue)?\s+)?(?:voces\s+|vcs\s+)?(?:custa|fica|sai|vale|seria|cobram?|e\b)|"
+# Pergunta DIRETA de preço e OBJEÇÃO são fragmentos separados (review de 24/08):
+# manter dois vocabulários à mão já divergiu uma vez, e o fallback precisa saber
+# distinguir "quanto custa?" (responde preço) de "tá caro" (trata a objeção) —
+# inclusive quando a mesma mensagem tem os dois ("tá salgado, mas quanto fica?").
+# "valor(?:es)?", não "valores?": a grafia antiga só casava "valores"/"valore".
+# "quanto q(ue) custa" coloquial: sem o grupo opcional, o "q" quebrava o match.
+_PRICE_DIRECT_QUESTION_FRAGMENT = (
+    # Só formas de PERGUNTA: "achei o valor caro" cita o tópico "valor" mas não é
+    # pergunta direta — não pode vencer a objeção.
+    r"quanto\s+(?:e\s+)?(?:q(?:ue)?\s+)?(?:voces?\s+|vcs?\s+)?(?:custa|fica|sai|vale|seria|cobram?|e\b)|"
+    r"cobram?\s+quanto\b|"
     r"qual\s+(?:o\s+)?(?:valor|preco|investimento)|"
     r"(?:what|how\s+much)\s+do\s+you\s+charge|"
-    r"valor(?:es)?|precos?|investimento|orcamento|mensalidade|implantacao|"
-    # Objeção é assunto de preço. "cara" fica de fora: é vocativo em pt-BR ("e aí cara"),
-    # e só conta como caro quando qualificada ("es muy cara", "tá cara").
-    r"caros?|caris+im[oa]s?|salgad[oa]|"
-    r"(?:muito|muy|meio|medio|bem|tao|tan|um\s+pouco|un\s+poco|esta|es|ta)\s+cara|"
-    r"how\s+much|price|pricing|cost|budget|expensive|pricey|costly|"
-    r"cuanto\s+(?:cuesta|sale|es)|precios?|inversion)\b"
+    r"how\s+much|cuanto\s+(?:cuesta|sale|es)"
+)
+_PRICE_TOPIC_FRAGMENT = (
+    r"valor(?:es)?\b|precos?\b|investimento\b|orcamento\b|mensalidade\b|implantacao\b|"
+    r"price\b|pricing\b|cost\b|budget\b|precios?\b|inversion\b"
+)
+# "cara" solta fica de fora: é vocativo em pt-BR ("e aí cara") — só conta
+# qualificada ("tá cara", "muy cara"). "Caro atendente/amigo" também é vocativo.
+_PRICE_OBJECTION_FRAGMENT = (
+    r"(?:caros?|caris+im[oa]s?|salgad[oa]s?|expensive|pricey|costly)\b"
+    r"(?!\s+(?:atendente|amig[oa]|senhor|senhora|cliente|lead))|"
+    r"fora\s+do\s+(?:\w+\s+)?orcamento|out\s+of\s+(?:\w+\s+)?budget|"
+    r"(?:muito|muy|meio|medio|bem|tao|tan|um\s+pouco|un\s+poco|esta|es|ta)\s+car[oa]s?\b"
+)
+_PRICE_DIRECT_RE = re.compile(r"\b(?:" + _PRICE_DIRECT_QUESTION_FRAGMENT + r")")
+_PRICE_QUESTION_RE = re.compile(
+    r"\b(?:" + _PRICE_DIRECT_QUESTION_FRAGMENT + r"|" + _PRICE_TOPIC_FRAGMENT
+    + r"|" + _PRICE_OBJECTION_FRAGMENT + r")"
 )
 _NO_PRICE_CONTINUATION = {
     "pt": "Me conta como funciona seu atendimento hoje que eu te explico como a AYA se encaixa.",
@@ -11315,9 +11338,11 @@ def _asks_about_price(user_message: str) -> bool:
 
 # QA Final 4.0, ajuste 3: objeção não pode ser respondida só repetindo o preço —
 # a resposta conecta o valor ao que a implementação entrega. Texto do próprio QA.
-_PRICE_OBJECTION_RE = re.compile(
-    r"\b(?:caros?|caris+im[oa]s?|salgad[oa]|expensive|pricey|costly)\b|"
-    r"fora\s+do\s+orcamento|out\s+of\s+(?:my\s+|our\s+)?budget|muy\s+car[oa]"
+_PRICE_OBJECTION_RE = re.compile(r"\b(?:" + _PRICE_OBJECTION_FRAGMENT + r")")
+# "não achei caro" / "no es caro" não é objeção — é o contrário dela.
+_PRICE_OBJECTION_NEGATED_RE = re.compile(
+    r"\b(?:nao|not|no)\s+(?:achei|acho|achamos|e|es|esta|ta|is|it['’]?s)?\s*(?:tao\s+|tan\s+)?"
+    r"(?:car[oa]|salgad|expensive|pricey|costly)"
 )
 _PRICE_OBJECTION_RESPONSE = {
     "pt": "Entendo. A implementação é justamente onde a AYA é configurada para a sua "
@@ -11340,7 +11365,21 @@ _PRICE_CTA = {
 
 
 def _is_price_objection(user_message: str) -> bool:
-    return bool(_PRICE_OBJECTION_RE.search(_normalize_text(str(user_message or ""))))
+    normalized = _normalize_text(str(user_message or ""))
+    if _PRICE_OBJECTION_NEGATED_RE.search(normalized):
+        return False
+    return bool(_PRICE_OBJECTION_RE.search(normalized))
+
+
+def _already_sent_to_chat(chat_id: str, frase: str) -> bool:
+    """A frase pronta já saiu nesta conversa? Fallback não pode soar de script."""
+    if not chat_id or not frase:
+        return False
+    try:
+        historico = _normalize_text(_fetch_chat_history(chat_id, limit=40))
+    except Exception:
+        return False
+    return _normalize_text(frase) in historico
 
 
 def _no_price_continuation(language: str, chat_id: str) -> str:
@@ -11380,12 +11419,22 @@ def _aya_market_price_line(market: str, language: str, rules_content: str) -> st
     return template.format(setup=setup, monthly=monthly)
 
 
-def _history_from_me_and_lead(history: str) -> tuple[str, list[str]]:
+def _history_from_me_and_lead(
+    history: str, lead_names: tuple[str, ...] = ()
+) -> tuple[str, list[str]]:
     """Separa falas da AYA (from_me) e do lead a partir do texto de `_fetch_chat_history`.
 
-    O fallback SQLite rotula from_me como ``AYA``. O servidor HTTP às vezes usa o
-    nome do dono (ex.: ``André: ...``). Os dois contam como mensagem nossa.
+    O fallback SQLite rotula from_me como ``AYA`` e o lead como ``Lead``/sender_name;
+    o servidor HTTP às vezes rotula a AYA de outros jeitos (nome do dono, Assistant).
+    Rótulo NÃO reconhecido como lead conta como NOSSO — o custo dos dois erros é
+    assimétrico (review de 24/08): fala da AYA lida como lead fabrica fato falso
+    ("Lead pediu humano" a partir da nossa própria oferta de conexão) que suprime
+    comportamento dali em diante; fala do lead lida como nossa só deixa de registrar
+    um fato.
     """
+    lead_labels = {"lead"} | {
+        _normalize_text(str(name)) for name in lead_names if str(name or "").strip()
+    }
     from_me_parts: list[str] = []
     lead_parts: list[str] = []
     for raw in str(history or "").splitlines():
@@ -11395,11 +11444,10 @@ def _history_from_me_and_lead(history: str) -> tuple[str, list[str]]:
         body = body.strip()
         if not body:
             continue
-        label = speaker.strip()
-        if label == "AYA" or _is_owner_name(label):
-            from_me_parts.append(body)
-        else:
+        if _normalize_text(speaker.strip()) in lead_labels:
             lead_parts.append(body)
+        else:
+            from_me_parts.append(body)
     return "\n".join(from_me_parts), lead_parts
 
 
@@ -11433,17 +11481,6 @@ def _official_payment_already_sent(from_me: str, rules_content: str, market: str
     return False
 
 
-def _conversation_state_clock(ts: float) -> str:
-    from datetime import datetime as _dt
-    try:
-        from zoneinfo import ZoneInfo as _ZoneInfo
-        tz_name = os.getenv("TZ", "America/Sao_Paulo")
-        moment = _dt.fromtimestamp(float(ts), _ZoneInfo(tz_name))
-    except Exception:
-        moment = _dt.fromtimestamp(float(ts))
-    return moment.strftime("%H:%M")
-
-
 def _conversation_state_block(
     chat_id: str,
     rules_content: str = "",
@@ -11469,7 +11506,11 @@ def _conversation_state_block(
     if contact_info is None and chat_id:
         contact_info = _contact_record_for_chat(chat_id)
 
-    from_me, lead_msgs = _history_from_me_and_lead(history)
+    record = contact_info or {}
+    from_me, lead_msgs = _history_from_me_and_lead(
+        history,
+        lead_names=(record.get("name"), record.get("nickname"), record.get("pet_name")),
+    )
     facts: list[str] = []
 
     if _official_price_already_sent(from_me, rules_content):
@@ -11482,15 +11523,12 @@ def _conversation_state_block(
     if any(_asks_about_price(msg) and _is_price_objection(msg) for msg in lead_msgs):
         facts.append("Objeção de preço já levantada")
 
-    handoff_at = _handoff_sent_at.get(chat_id) if chat_id else None
-    if any(_lead_requests_human(msg) for msg in lead_msgs) or handoff_at:
-        if handoff_at:
-            try:
-                facts.append(f"Lead pediu humano ({_conversation_state_clock(handoff_at)})")
-            except (TypeError, ValueError, OSError):
-                facts.append("Lead pediu humano")
-        else:
-            facts.append("Lead pediu humano")
+    # O fato vem do histórico (durável, sobrevive a restart, expira com a janela da
+    # conversa) — nunca de _handoff_sent_at, que é cache de cooldown de 15 min do
+    # processo: lia-se um pedido de semanas atrás como atual, e um restart o apagava
+    # (review de 24/08).
+    if any(_lead_requests_human(msg) for msg in lead_msgs):
+        facts.append("Lead pediu humano")
 
     historico_norm = _normalize_text(history)
     if historico_norm and any(
@@ -11572,8 +11610,10 @@ def _payment_gate_fallback(
     *,
     rules_content: str = "",
     chat_id: str = "",
+    include_cta: bool = True,
 ) -> str:
     language = _payment_gate_language(user_message, contact_info)
+    normalized_message = _normalize_text(str(user_message or ""))
     # Lead com intenção explícita e mercado conhecido não pode ficar sem caminho de
     # pagamento só porque o modelo errou: entrega-se o bloco oficial do PRÓPRIO
     # mercado — a mesma liberação que o prompt faria, agora determinística.
@@ -11585,6 +11625,29 @@ def _payment_gate_fallback(
                 return bloco
     if reason == "market_unknown":
         return _PAYMENT_GATE_ASK_MARKET.get(language) or _PAYMENT_GATE_ASK_MARKET["pt"]
+    # Objeção vem antes dos ramos por reason (review de 24/08): "tá caro" com o modelo
+    # tentando mandar Pix caía em intent_missing e o lead objetando recebia uma OFERTA
+    # de dados de pagamento. Pergunta direta na mesma mensagem vence a objeção
+    # ("tá salgado, mas quanto fica?" responde o preço, não a defesa do valor).
+    if (
+        reason in ("market_mismatch", "wrong_price", "intent_missing")
+        and _is_price_objection(user_message)
+        and not _PRICE_DIRECT_RE.search(normalized_message)
+        and not _has_explicit_purchase_intent(user_message)
+    ):
+        market = _canonical_commercial_market(contact_info)
+        resposta = _PRICE_OBJECTION_RESPONSE.get(language) or _PRICE_OBJECTION_RESPONSE["pt"]
+        if _already_sent_to_chat(chat_id, resposta):
+            resposta = ""
+        linha = ""
+        if reason != "intent_missing":
+            # Em market_mismatch/wrong_price o lead acabou de ver um valor errado:
+            # a objeção não pode deixar o número errado de pé — a correção vem junto.
+            linha = _aya_market_price_line(market, language, rules_content)
+        partes = [parte for parte in (resposta, linha) if parte]
+        if partes:
+            return "\n\n".join(partes)
+        return _no_price_continuation(language, chat_id)
     if reason == "intent_missing":
         return _PAYMENT_GATE_INTENT_MISSING.get(language) or _PAYMENT_GATE_INTENT_MISSING["pt"]
     if reason in ("market_mismatch", "wrong_price"):
@@ -11601,12 +11664,14 @@ def _payment_gate_fallback(
         # Mas só quando o lead puxou o assunto. Em 24/08 um lead abriu com "quero
         # entender como a AYA funcionaria" e recebeu um preço seco como primeira
         # resposta, porque a guarda derrubou a resposta inteira do modelo.
-        if _is_price_objection(user_message) and not _has_explicit_purchase_intent(user_message):
-            return _PRICE_OBJECTION_RESPONSE.get(language) or _PRICE_OBJECTION_RESPONSE["pt"]
         if _asks_about_price(user_message) or _has_explicit_purchase_intent(user_message):
             linha = _aya_market_price_line(market, language, rules_content)
             if linha:
                 cta = _PRICE_CTA.get(language) or _PRICE_CTA["pt"]
+                # Sem CTA no caminho de recorte (a sobra do modelo costuma terminar com
+                # a própria pergunta de condução) e sem repetir CTA já enviada.
+                if not include_cta or _already_sent_to_chat(chat_id, cta):
+                    return linha
                 return f"{linha} {cta}"
         else:
             return _no_price_continuation(language, chat_id)
@@ -12100,9 +12165,12 @@ def _enforce_aya_payment_output_gate(
                 sorted(mentioned_markets),
                 len(restante),
             )
+            # Sem CTA aqui: a sobra do modelo costuma terminar com a própria pergunta
+            # de condução, e duas chamadas de próximo passo na mesma mensagem
+            # competem entre si (review de 24/08).
             correcao = _payment_gate_fallback(
                 user_message, contact_info, reason,
-                rules_content=rules_content, chat_id=chat_id,
+                rules_content=rules_content, chat_id=chat_id, include_cta=False,
             )
             return f"{restante}\n\n{correcao}".strip()
 
