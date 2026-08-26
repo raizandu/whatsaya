@@ -13535,9 +13535,21 @@ _SPANISH_OFFER_RES = (
     re.compile(r"\bSpanish\b", re.IGNORECASE),
     re.compile(r"\bespa[nñ]ol\b", re.IGNORECASE),
 )
-_BULLET_LINE_RE = re.compile(r"(?m)^\s*(?:[-*•·–—]|\d+[.)])\s+\S")
-_PAYMENT_LIST_KEEP_RE = re.compile(
-    r"\b(?:pix|zelle|cnpj|recipient|titular|chave)\b", re.IGNORECASE
+_BULLET_PREFIX_RE = re.compile(
+    r"^\s*(?:[-*•·–—](?:\s+|$)|\d+[.)](?:\s+|$))"
+)
+_PAYMENT_DETAIL_LINE_RE = re.compile(
+    r"^\s*(?:[-*•·–—]\s+)?(?:\*{1,2}|_{1,2})?\s*"
+    r"(?:pix(?:\s+cnpj)?|cnpj|titular|zelle|recipient|chave(?:\s+pix)?|"
+    r"e-?mail|email)\s*:\s*(?:\*{1,2}|_{1,2})?",
+    re.IGNORECASE,
+)
+_EXTRA_QUESTION_CLAUSE_RE = re.compile(
+    r"(?:[,;]\s*|\s+(?:e|ou|and|or|y|o)\s+)"
+    r"(?=(?:qual(?:is)?|como|onde|de\s+onde|quando|quanto(?:s|as)?|quem|"
+    r"por\s+que|what|which|how|where|when|who|cu[aá]l(?:es)?|c[oó]mo|"
+    r"d[oó]nde|cu[aá]ndo|cu[aá]nt[oa]s?|qui[eé]n)\b)",
+    re.IGNORECASE,
 )
 _COMMERCIAL_CHAT_FALLBACK = dict(_HOURS_GATE_FALLBACK)
 _UX_JARGON_REWRITE = (
@@ -13607,42 +13619,80 @@ def _strip_spanish_offer_mentions(text: str) -> str:
 
 
 def _collapse_commercial_lists(text: str) -> str:
-    """Lista de funcionalidades/implantação não é conversa de WhatsApp."""
+    """Lista não é conversa de WhatsApp. Conta o recado inteiro, não o parágrafo.
+
+    O modelo manda `1.` / `2.` em linhas (ou blocos) separados; o limiar antigo
+    (≥3 itens no MESMO parágrafo) deixava SOP passar.
+    """
     value = str(text or "").strip()
     if not value:
         return value
-    kept: list[str] = []
-    removed = 0
-    for paragraph in re.split(r"\n\s*\n+", value):
-        if _PAYMENT_LIST_KEEP_RE.search(paragraph):
-            kept.append(paragraph)
-            continue
-        if len(_BULLET_LINE_RE.findall(paragraph)) >= 3:
-            removed += 1
-            continue
-        kept.append(paragraph)
-    if not removed:
+    parsed: list[tuple[str, bool]] = []
+    for line in value.splitlines():
+        raw = line.rstrip()
+        is_commercial_item = bool(
+            raw.strip()
+            and _BULLET_PREFIX_RE.match(raw)
+            and not _PAYMENT_DETAIL_LINE_RE.match(raw)
+        )
+        parsed.append((raw, is_commercial_item))
+
+    list_lines = sum(1 for _raw, is_item in parsed if is_item)
+    if not list_lines:
         return value
-    restante = "\n\n".join(part.strip() for part in kept if part.strip()).strip()
+    kept: list[str] = []
+    for raw, is_item in parsed:
+        if not is_item:
+            kept.append(raw)
+            continue
+        # Um único marcador pode ser apenas ênfase casual. Mantém o conteúdo em
+        # prosa; dois ou mais itens caracterizam checklist/SOP e saem inteiros.
+        if list_lines == 1:
+            unmarked = _BULLET_PREFIX_RE.sub("", raw, count=1).strip()
+            if unmarked:
+                kept.append(unmarked)
+    restante = re.sub(r"\n{3,}", "\n\n", "\n".join(kept)).strip()
     logger.warning(
         "[contact-reply] lista comercial removida n=%d restante=%d",
-        removed,
+        list_lines,
         len(restante),
     )
-    if restante:
+    if restante and not _reply_remnant_is_incomplete(restante):
         return restante
     return _COMMERCIAL_CHAT_FALLBACK["pt"]
 
 
 def _shape_whatsapp_reply(text: str) -> str:
-    """Camada de conversa: 2–4 frases, uma pergunta. Bloco de pagamento fica."""
+    """Camada final de conversa: no máximo 4 frases e uma pergunta principal."""
     value = str(text or "").strip()
-    if not value or _PAYMENT_LIST_KEEP_RE.search(value):
+    if not value:
         return value
     shaped = value
     if shaped.count("?") > 1:
         shaped = shaped[: shaped.find("?") + 1].strip()
         logger.warning("[contact-reply] perguntas extras removidas")
+
+    question_end = shaped.find("?")
+    if question_end >= 0:
+        boundary_index, boundary_width = max(
+            (
+                (shaped.rfind(". ", 0, question_end), 2),
+                (shaped.rfind("! ", 0, question_end), 2),
+                (shaped.rfind("… ", 0, question_end), 2),
+                (shaped.rfind("\n", 0, question_end), 1),
+            ),
+            key=lambda item: item[0],
+        )
+        question_start = (
+            boundary_index + boundary_width if boundary_index >= 0 else 0
+        )
+        question = shaped[question_start:question_end]
+        extra_clause = _EXTRA_QUESTION_CLAUSE_RE.search(question)
+        if extra_clause:
+            primary = question[: extra_clause.start()].rstrip(" ,;:")
+            shaped = f"{shaped[:question_start]}{primary}?".strip()
+            logger.warning("[contact-reply] pergunta composta reduzida")
+
     sentences = [
         part.strip()
         for part in re.split(r"(?<=[.!?…])\s+", shaped)

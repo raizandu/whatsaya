@@ -7337,6 +7337,81 @@ class TestPrepareContactReply(BaseWhatsAppManagerTest):
         self.assertTrue(out.strip())
         self.assertLessEqual(out.count("?"), 1)
 
+    def test_lista_numerada_em_blocos_separados_nao_chega(self):
+        """QA 26/08: Terra mandou 1. / 2. com linha em branco — o limiar por
+        parágrafo deixava o SOP passar."""
+        import whatsapp_manager
+        texto = (
+            "1. *Diagnóstico rápido*\n\n"
+            "Você passa serviço, público, principais dúvidas, objeções "
+            "e como hoje fecha as vendas.\n\n"
+            "2. *Fluxo no WhatsApp*\n\n"
+            "A AYA responde quem chama e conduz o orçamento."
+        )
+        with patch("whatsapp_manager._load_sales", return_value={}):
+            gated = whatsapp_manager._enforce_aya_onboarding_output_gate(
+                texto, user_message="e como faz?", chat_id="12025550199@s.whatsapp.net"
+            )
+        out = whatsapp_manager._prepare_contact_reply(gated)
+        folded = whatsapp_manager._normalize_text(out)
+        self.assertNotRegex(out, r"(?m)^\s*\d+[.)]\s+")
+        self.assertNotIn("diagnostico rapido", folded)
+        self.assertNotIn("passa servico", folded)
+        self.assertTrue(out.strip())
+        self.assertLessEqual(out.count("?"), 1)
+
+    def test_palavra_chave_nao_desarma_guarda_de_formato(self):
+        """"chave" em texto comum não transforma toda a resposta em pagamento."""
+        import re
+        import whatsapp_manager
+        out = whatsapp_manager._prepare_contact_reply(
+            "Tenho a chave para explicar isso. Frase dois. Frase três. "
+            "Frase quatro. Frase cinco. Qual o volume? De onde vocês atendem?"
+        )
+        self.assertLessEqual(len(re.findall(r"[.!?…](?:\s|$)", out)), 4)
+        self.assertEqual(out.count("?"), 1)
+        self.assertNotIn("De onde", out)
+
+    def test_palavra_chave_nao_preserva_lista_comercial(self):
+        import whatsapp_manager
+        out = whatsapp_manager._prepare_contact_reply(
+            "Tenho a chave do contexto.\n"
+            "1. diagnóstico completo\n"
+            "2. fluxo no WhatsApp\n"
+            "3. configuração da operação"
+        )
+        self.assertNotRegex(out, r"(?m)^\s*\d+[.)](?:\s+|$)")
+        self.assertNotIn("configuração da operação", out)
+        self.assertTrue(out.strip())
+
+    def test_bloco_pix_estruturado_continua_copiavel(self):
+        import whatsapp_manager
+        text = (
+            "- **Pix CNPJ:** 44.249.819/0001-62\n"
+            "- **Titular:** Titular Brasil"
+        )
+        self.assertEqual(whatsapp_manager._prepare_contact_reply(text), text)
+
+    def test_perguntas_compostas_no_mesmo_periodo_sao_reduzidas(self):
+        import whatsapp_manager
+        out = whatsapp_manager._prepare_contact_reply(
+            "Funciona bem para esse cenário. "
+            "Qual é o seu ramo, onde vocês atendem e quantos contatos recebem?"
+        )
+        self.assertEqual(out.count("?"), 1)
+        self.assertIn("Qual é o seu ramo?", out)
+        self.assertNotIn("onde vocês", out)
+        self.assertNotIn("quantos contatos", out)
+
+    def test_pergunta_composta_apos_quebra_de_linha_mantem_primeira_letra(self):
+        import whatsapp_manager
+        out = whatsapp_manager._prepare_contact_reply(
+            "Funciona bem para esse cenário.\n"
+            "Qual é o seu ramo e onde vocês atendem?"
+        )
+        self.assertIn("Qual é o seu ramo?", out)
+        self.assertNotIn("onde vocês", out)
+
     def test_uma_pergunta_principal_por_turno(self):
         import whatsapp_manager
         out = whatsapp_manager._prepare_contact_reply(
