@@ -1806,12 +1806,23 @@ function isCoreStatusNotice(message) {
   return CORE_NOTICE_PHRASES.some((phrase) => lower.includes(phrase));
 }
 
+function isInternalQaObservation(message) {
+  if (!message || typeof message !== 'string') return false;
+  const value = message.trim();
+  if (!value) return false;
+  const ayaDiagnosis = /\b(?:vi|notei|percebi|observei|identifiquei)\s+que\s+(?:a\s+)?aya\b[\s\S]{0,180}\b(?:mistur|respostas?\s+de\s+teste|teste|qa|fluxo|contexto)\b/i.test(value);
+  const reviewBeforeProduction = /\b(?:vale|precisa|recomendo)\s+(?:revisar|corrigir|ajustar)\b[\s\S]{0,180}\b(?:antes\s+de\s+(?:colocar|ir)\s+em\s+produ[cç][aã]o|(?:esse|este|o)\s+(?:contexto|fluxo))\b/i.test(value);
+  const internalLabel = /\b(?:observa[cç][aã]o|an[aá]lise|nota)\s+interna\b/i.test(value);
+  return ayaDiagnosis || reviewBeforeProduction || internalLabel;
+}
+
 function isSystemError(message) {
   if (!message || typeof message !== 'string') return false;
   const trimmedMessage = message.trim();
   const lowercaseMsg = trimmedMessage.toLowerCase();
 
   if (isCoreStatusNotice(trimmedMessage)) return true;
+  if (isInternalQaObservation(trimmedMessage)) return true;
 
   // Block "Auxiliary title generation failed" and other API key/login/credential leakage
   if (lowercaseMsg.includes('auxiliary title') || 

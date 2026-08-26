@@ -271,6 +271,20 @@ class FollowupPluginIntegrationTest(unittest.TestCase):
         self.assertEqual(ids, [])
         self.assertIsNone(engine.get_lead(chat))
 
+    def test_personal_greeting_never_arms_commercial_followup(self):
+        from commercial_followups import FollowupEngine
+
+        chat = "5511666666666@s.whatsapp.net"
+        db = Path(self._policy_tmp.name) / "followups-personal.db"
+        engine = FollowupEngine(db)
+        with patch.object(wm, "_followup_engine", return_value=engine), \
+             patch.object(wm, "_followup_skip_contact", return_value=False):
+            wm._followup_remember_turn(chat, "Fala aí, suave?", "wamid-in-personal")
+            ids = wm._followup_register_outbound(chat, "wamid-out-personal")
+
+        self.assertEqual(ids, [])
+        self.assertIsNone(engine.get_lead(chat))
+
     def test_crm_outbox_drain_is_fail_closed_without_leads_db(self):
         with patch.dict(wm.os.environ, {"NOTION_API_KEY": "secret_x", "NOTION_LEADS_DB": ""}, clear=False), \
              patch.object(wm, "_notion_post") as post:

@@ -7416,6 +7416,23 @@ class TestPrepareContactReply(BaseWhatsAppManagerTest):
         ))
         self.assertFalse(whatsapp_manager.isSystemError("Fechou! Te mando o Pix então"))
 
+    def test_internal_qa_observation_is_removed_from_contact_reply(self):
+        """Incidente real de 26/08: autoavaliação do modelo virou segunda bolha."""
+        import whatsapp_manager
+        text = (
+            "Suave.\n\n"
+            "Vi que a AYA está misturando respostas de teste com o fluxo de agendamento — "
+            "vale revisar esse contexto antes de colocar em produção."
+        )
+        self.assertEqual(whatsapp_manager._prepare_contact_reply(text), "Suave.")
+        self.assertTrue(whatsapp_manager.isSystemError(text.split("\n\n")[1]))
+
+    def test_normal_commercial_testing_language_is_preserved(self):
+        import whatsapp_manager
+        text = "A gente testa o fluxo antes de colocar em produção. Quer ver uma demonstração?"
+        self.assertEqual(whatsapp_manager._prepare_contact_reply(text), text)
+        self.assertFalse(whatsapp_manager.isSystemError(text))
+
     def test_commercial_reply_preserved(self):
         import whatsapp_manager
         text = "Hoje são R$997 de implementação e R$397/mês. Quer fechar por Pix ou prefere uma call de 15 min?"
@@ -7732,6 +7749,21 @@ class TestTransformLlmOutput(BaseWhatsAppManagerTest):
         mock_send.assert_called_once_with(
             "5511888888888@s.whatsapp.net",
             text,
+            automation=True,
+        )
+
+    @patch("whatsapp_manager._human_send")
+    def test_internal_qa_observation_never_reaches_delivery(self, mock_send):
+        text = (
+            "Suave.\n\n"
+            "Vi que a AYA está misturando respostas de teste com o fluxo de agendamento — "
+            "vale revisar esse contexto antes de colocar em produção."
+        )
+        result = self._call("5511888888888@s.whatsapp.net", text)
+        self.assertEqual(result, "\n")
+        mock_send.assert_called_once_with(
+            "5511888888888@s.whatsapp.net",
+            "Suave.",
             automation=True,
         )
 

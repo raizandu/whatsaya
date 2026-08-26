@@ -677,6 +677,10 @@ def _followup_remember_turn(
         return
     if not inbound_message_id or not str(inbound_message_id).strip():
         return
+    # Follow-up comercial exige evidência comercial no próprio turno. Uma saudação
+    # pessoal pode receber uma resposta neutra, mas nunca vira contexto/cadência.
+    if not _has_commercial_scope_signal(inbound_text):
+        return
     fact = sanitize_followup_fact(inbound_text)
     if not fact:
         return
@@ -1696,6 +1700,8 @@ def isSystemError(message: str) -> bool:
     if _CORE_NOTICE_GLYPH_RE.match(blob):
         return True
     if _HERMES_STATUS_RE.search(blob):
+        return True
+    if _INTERNAL_QA_OBSERVATION_RE.search(blob):
         return True
     if "💾" in blob and _SYSTEM_STATUS_RE.search(blob):
         return True
@@ -6549,7 +6555,8 @@ _COMMERCIAL_SCOPE_SUBJECT_RE = re.compile(
 _COMMERCIAL_SCOPE_INTENT_RE = re.compile(
     r"\b(?:contratar|orcamento|proposta|demonstracao|demo|preco|valor|quanto\s+custa|"
     r"planos?|integrar|automatizar|melhorar|otimizar|como\s+funciona|quer[oi]|queria|"
-    r"gostaria|preciso|interessad[oa]|conhecer|entender|agendar|reuniao|call)\b",
+    r"gostaria|preciso|interessad[oa]|conhecer|entender|agendar|reuniao|call|"
+    r"receb[oa]\b.{0,60}\b(?:mensagens?|gente|clientes?|perguntas?))\b",
     re.IGNORECASE,
 )
 _COMMERCIAL_SCOPE_PAYMENT_RE = re.compile(
@@ -11626,6 +11633,16 @@ _CORE_NOTICE_PHRASES = (
 )
 # 🔄 ↻ 🗜️ ⏳ abrem só aviso interno do core — o plugin nunca começa mensagem com eles.
 _CORE_NOTICE_GLYPH_RE = re.compile(r"^(?:🔄|↻|🗜️|⏳)")
+_INTERNAL_QA_OBSERVATION_RE = re.compile(
+    r"(?:"
+    r"\b(?:vi|notei|percebi|observei|identifiquei)\s+que\s+(?:a\s+)?AYA\b"
+    r".{0,180}\b(?:mistur|respostas?\s+de\s+teste|teste|QA|fluxo|contexto)\b"
+    r"|\b(?:vale|precisa|recomendo)\s+(?:revisar|corrigir|ajustar)\b.{0,180}"
+    r"\b(?:antes\s+de\s+(?:colocar|ir)\s+em\s+produ[cç][aã]o|(?:esse|este|o)\s+(?:contexto|fluxo))\b"
+    r"|\b(?:observa[cç][aã]o|an[aá]lise|nota)\s+interna\b"
+    r")",
+    re.IGNORECASE,
+)
 # Prompt Mestre §17 — vazamento técnico/interno (filtro por linha).
 _INTERNAL_LEAK_PATTERNS = [
     r"self[- \u2010-\u2015]?improvement",
@@ -11787,6 +11804,8 @@ def _strip_internal_leak_lines(text: str) -> str:
     leak_patterns = (*_INTERNAL_LEAK_PATTERNS, *approval_party_patterns)
     kept: list[str] = []
     for line in text.splitlines():
+        if _INTERNAL_QA_OBSERVATION_RE.search(line):
+            continue
         if any(re.search(p, line, re.IGNORECASE) for p in leak_patterns):
             continue
         kept.append(line)

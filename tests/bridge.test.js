@@ -506,12 +506,14 @@ test('WhatsApp Bridge Regression Tests', async (t) => {
     assert.ok(isSystemError('{"error": "Unauthorized Access", "status": 401}'), 'Should block JSON errors');
     assert.ok(isSystemError('⚠️ Auxiliary title generation failed: HTTP 401: login fail: Please carry the API secret key in the \'X-Api-Key\' field of the request header'), 'Should block auxiliary title generation errors');
     assert.ok(isSystemError('HTTP 401: login fail: Please carry the API secret key in the \'X-Api-Key\' field'), 'Should block Minimax login/X-Api-Key warnings');
+    assert.ok(isSystemError('Vi que a AYA está misturando respostas de teste com o fluxo de agendamento — vale revisar esse contexto antes de colocar em produção.'), 'Should block internal QA observations');
 
     // Allowed normal client/owner messages
     assert.ok(!isSystemError('Oi André, tudo bem?'), 'Should allow simple greeting');
     assert.ok(!isSystemError('Oi, o cliente está sem créditos no painel de Chatcommerce?'), 'Should allow normal credit discussion in Portuguese');
     assert.ok(!isSystemError('Preciso resolver um problema de integração com a API'), 'Should allow normal developer API discussion in Portuguese');
     assert.ok(!isSystemError('⚠️ Obrigado por avisar!'), 'Should allow regular emoji messages without technical keywords');
+    assert.ok(!isSystemError('A gente testa o fluxo antes de colocar em produção. Quer ver uma demonstração?'), 'Should allow normal commercial testing language');
   });
 
   await t.test('13b. isSystemError blocks the core retry/fallback notice family', () => {
