@@ -23,14 +23,21 @@ TERMINAL_STAGES = {"ganho", "perdido", "cancelado", "concluido", "concluída", "
 CONTEXT_KINDS = {"business", "pain", "question", "objection", "proposal", "payment", "next_step"}
 _EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
 _LONG_DIGITS_RE = re.compile(r"\d{6,}")
+_FOLLOWUP_GREETING_RE = re.compile(
+    r"^(?:(?:oi|ol[aá]|opa|bom\s+dia|boa\s+tarde|boa\s+noite)[!,.\s:—-]*)+",
+    re.IGNORECASE,
+)
+_FOLLOWUP_INTENT_RE = re.compile(
+    r"^(?:eu\s+)?(?:queria|quero|gostaria(?:\s+de)?|"
+    r"preciso(?:\s+de)?|precisava(?:\s+de)?)\s+(?P<subject>.+)$",
+    re.IGNORECASE,
+)
+_FOLLOWUP_POSSESSION_RE = re.compile(
+    r"^tenho\s+(?P<article>uma|um)\s+(?P<topic>.+)$",
+    re.IGNORECASE,
+)
 # Copy por (stage, kind, step). Sempre cita o fato verificado; nunca ping genérico.
 _FOLLOWUP_COPY = {
-    ("qualification", "business", 1):
-        "Você comentou {fact}. Se ainda estiver na pauta, me diz o que mais trava no atendimento hoje.",
-    ("qualification", "business", 2):
-        "Retomando: {fact}. Faz sentido a gente olhar isso numa call curta?",
-    ("qualification", "business", 3):
-        "Último toque sobre {fact}. Se não for o momento, é só falar.",
     ("qualification", "pain", 1):
         "Você falou de {fact}. Posso te mostrar como a AYA entra nisso, sem enrolação.",
     ("qualification", "pain", 2):
@@ -249,6 +256,76 @@ def _stage_from_kind(kind: str) -> str:
     }.get(kind, "qualification")
 
 
+def _short_followup_topic(value: str) -> str:
+    """Primeiro assunto verificável, sem repetir a fala inteira do lead."""
+    topic = re.split(
+        r"[,.;!?]|\s+(?:mas|porque)\s+|\s+e\s+(?=(?:eu\s+)?(?:recebo|tenho|"
+        r"preciso|quero|gostaria|estou)\b)",
+        str(value or "").strip(),
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0].strip(" \"'.,;:!?—-")
+    if len(topic) > 96:
+        topic = topic[:96].rsplit(" ", 1)[0].rstrip(".,;:")
+    return topic
+
+
+def _business_followup_recap(fact: str) -> tuple[str, str]:
+    """Converte a fala bruta em intenção ou tópico para uma retomada coloquial."""
+    clean = _FOLLOWUP_GREETING_RE.sub("", str(fact or "").strip())
+    clean = clean.strip(" \"'.,;:!?—-")
+
+    intent = _FOLLOWUP_INTENT_RE.match(clean)
+    if intent:
+        subject = _short_followup_topic(intent.group("subject"))
+        if subject:
+            return "intent", subject
+
+    possession = _FOLLOWUP_POSSESSION_RE.match(clean)
+    if possession:
+        topic = _short_followup_topic(possession.group("topic"))
+        if topic:
+            prefix = "sua" if possession.group("article").lower() == "uma" else "seu"
+            return "topic", f"{prefix} {topic}"
+
+    possessive = re.match(r"^(?P<owner>minha|meu)\s+(?P<topic>.+)$", clean, re.IGNORECASE)
+    if possessive:
+        topic = _short_followup_topic(possessive.group("topic"))
+        if topic:
+            prefix = "sua" if possessive.group("owner").lower() == "minha" else "seu"
+            return "topic", f"{prefix} {topic}"
+
+    return "topic", _short_followup_topic(clean)
+
+
+def _render_business_followup(fact: str, step: int) -> str:
+    mode, subject = _business_followup_recap(fact)
+    if mode == "intent":
+        if step == 1:
+            return (
+                f"Opa! Você queria {subject}, né? Então, antes de tudo, "
+                "me diz o que mais trava no atendimento hoje."
+            )
+        if step == 2:
+            return f"Retomando o que você queria: {subject}. Faz sentido olhar isso numa call curta?"
+        return f"Último toque sobre {subject}. Se não for o momento, é só falar."
+
+    if subject.lower().startswith("sua "):
+        talking_about = f"da {subject}"
+    elif subject.lower().startswith("seu "):
+        talking_about = f"do {subject}"
+    else:
+        talking_about = f"sobre {subject}"
+    if step == 1:
+        return (
+            f"Opa! A gente estava falando {talking_about}, né? Antes de tudo, "
+            "me diz o que mais trava no atendimento hoje."
+        )
+    if step == 2:
+        return f"Retomando o assunto {talking_about}. Faz sentido olhar isso numa call curta?"
+    return f"Último toque sobre {subject}. Se não for o momento, é só falar."
+
+
 def render_contextual_message(job: dict[str, Any]) -> str:
     """Copy determinística; nunca gera promessa, desconto ou dado não verificado."""
     kind, fact, _source = validate_context(
@@ -259,6 +336,9 @@ def render_contextual_message(job: dict[str, Any]) -> str:
     )
     step = max(1, min(int(job.get("step_no") or 1), 3))
     stage = str(job.get("stage") or "").strip().lower() or _stage_from_kind(kind)
+    fact = fact.rstrip(" .!?;:")
+    if stage == "qualification" and kind == "business":
+        return _render_business_followup(fact, step)
     template = _FOLLOWUP_COPY.get((stage, kind, step))
     if not template:
         template = "{fact} — se ainda estiver na pauta, me diz por onde retomar."

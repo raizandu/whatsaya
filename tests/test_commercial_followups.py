@@ -279,6 +279,54 @@ class FollowupEngineTest(unittest.TestCase):
         self.assertNotIn("qualquer coisa é só chamar", message.lower())
         self.assertNotIn("quer que eu continue daqui", message.lower())
 
+    def test_business_followup_reframes_intent_instead_of_quoting_lead(self):
+        message = render_contextual_message({
+            "stage": "qualification",
+            "context_kind": "business",
+            "context_fact": "Oi! Queria entender como a AYA funciona.",
+            "context_source_message_id": "in-aya-question-1",
+            "context_verified": 1,
+            "step_no": 1,
+        })
+        self.assertEqual(
+            message,
+            "Opa! Você queria entender como a AYA funciona, né? "
+            "Então, antes de tudo, me diz o que mais trava no atendimento hoje.",
+        )
+        self.assertNotIn("você comentou", message.lower())
+        self.assertNotIn("oi! queria", message.lower())
+
+    def test_business_followup_turns_possession_into_short_topic(self):
+        message = render_contextual_message({
+            "stage": "qualification",
+            "context_kind": "business",
+            "context_fact": (
+                "Tenho uma clínica odontológica e recebo bastante gente "
+                "perguntando sobre procedimentos e querendo marcar avaliação"
+            ),
+            "context_source_message_id": "in-clinic-topic-1",
+            "context_verified": 1,
+            "step_no": 1,
+        })
+        folded = message.lower()
+        self.assertIn("a gente estava falando da sua clínica odontológica, né?", folded)
+        self.assertNotIn("tenho uma clínica", folded)
+        self.assertNotIn("você comentou", folded)
+
+        for step in (2, 3):
+            later = render_contextual_message({
+                "stage": "qualification",
+                "context_kind": "business",
+                "context_fact": "Tenho uma clínica odontológica e recebo muitos contatos",
+                "context_source_message_id": f"in-clinic-topic-{step}",
+                "context_verified": 1,
+                "step_no": step,
+            }).lower()
+            self.assertIn("sua clínica odontológica", later)
+            self.assertNotIn("tenho uma clínica", later)
+            self.assertNotIn("retomando da", later)
+            self.assertNotIn("último toque da", later)
+
     def test_clinic_inbound_becomes_personal_silence_followup(self):
         fact = sanitize_followup_fact(
             "Tenho uma clínica odontológica e recebo bastante gente "
