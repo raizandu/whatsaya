@@ -6,3 +6,4 @@ node_modules/
 /tmp/
 __pycache__/
 *.pyc
+reports/aya-v1/

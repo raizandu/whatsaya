@@ -587,6 +587,20 @@ def classify_reply(reply: Reply) -> str:
 BUBBLE_CAP = 3
 BUBBLE_MAX_CHARS = 400
 _LIST_LINE = re.compile(r"^\s*(?:[-*•·–—]|\d+[.)])\s+\S", re.M)
+_SENTENCE_END = re.compile(r"[.!?…]+(?:[\"'”’»)]*)\s*")
+_INTERNAL_OUTPUT_RE = re.compile(
+    r"(?:"
+    r"\[\[\s*HANDOFF\b|^\s*EXEC\s*:|\btool[_\s-]*result\b|"
+    r"\bpr[oó]ximo\s+passo\s+interno\b|\b(?:intent|fallback)\s*[:=]|"
+    r"\b(?:observa[cç][aã]o|an[aá]lise|nota)\s+interna\b|"
+    r"\b(?:vi|notei|percebi|observei|identifiquei)\s+que\s+(?:a\s+)?AYA\b"
+    r".{0,180}\b(?:mistur|respostas?\s+de\s+teste|teste|QA|fluxo|contexto)\b|"
+    r"\b(?:vale|precisa|recomendo)\s+(?:revisar|corrigir|ajustar)\b.{0,180}"
+    r"\b(?:antes\s+de\s+(?:colocar|ir)\s+em\s+produ[cç][aã]o|"
+    r"(?:esse|este|o)\s+(?:contexto|fluxo))\b"
+    r")",
+    re.IGNORECASE | re.MULTILINE,
+)
 _PAYMENT_INTROS = tuple(
     _fold(p) for p in (
         "Perfeito — seguem os dados oficiais para o pagamento:",
@@ -618,6 +632,7 @@ def find_format_violations(reply: Reply) -> list[FormatViolation]:
         achados.append(FormatViolation(kind, reply.chat_id, reply.at, detail))
 
     estruturado = is_payment_reply(reply)
+    texto = " ".join(reply.bubbles).strip()
     if not estruturado and len(reply.bubbles) > BUBBLE_CAP:
         achado("bolhas_demais", str(len(reply.bubbles)))
     for bolha in reply.bubbles:
@@ -625,6 +640,46 @@ def find_format_violations(reply: Reply) -> list[FormatViolation]:
             achado("bolha_longa", str(len(bolha)))
     if not estruturado and any(_LIST_LINE.search(b) for b in reply.bubbles):
         achado("lista_em_conversa_comum")
+    perguntas = texto.count("?")
+    if perguntas > 1:
+        achado("perguntas_demais", str(perguntas))
+    if not estruturado:
+        frases = len([parte for parte in _SENTENCE_END.split(texto) if parte.strip()])
+        if frases > 4:
+            achado("frases_demais", str(frases))
+    if _INTERNAL_OUTPUT_RE.search(texto):
+        achado("conteudo_interno")
+    return achados
+
+
+def find_repeated_questions(replies) -> list[FormatViolation]:
+    """Detecta a mesma pergunta objetiva repetida no mesmo chat no mesmo dia."""
+    def questions(text: str) -> set[str]:
+        found: set[str] = set()
+        start = 0
+        for boundary in re.finditer(r"[.!?…\n]+", text):
+            sentence = text[start:boundary.start()].strip()
+            if "?" in boundary.group(0):
+                normalized = _fold(sentence)
+                if len(normalized) >= 8:
+                    found.add(normalized)
+            start = boundary.end()
+        return found
+
+    anteriores: dict[str, set[str]] = {}
+    achados: list[FormatViolation] = []
+    for reply in sorted(replies, key=lambda item: item.at):
+        vistas = anteriores.setdefault(reply.chat_id, set())
+        atuais = questions(" ".join(reply.bubbles))
+        repetidas = atuais & vistas
+        if repetidas:
+            achados.append(FormatViolation(
+                "pergunta_repetida",
+                reply.chat_id,
+                reply.at,
+                str(len(repetidas)),
+            ))
+        vistas.update(atuais)
     return achados
 
 
@@ -776,6 +831,7 @@ def build_day_audit(day: date, events, turns, infer_language, *, gateway_turns=(
         achado = find_language_mismatch(resposta, infer_language)
         if achado:
             dia.language_mismatches.append(achado)
+    dia.format_violations.extend(find_repeated_questions(respostas))
     return dia
 
 

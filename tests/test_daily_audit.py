@@ -577,6 +577,30 @@ class FormatViolationsTest(unittest.TestCase):
 
         self.assertIn("lista_em_conversa_comum", tipos)
 
+    def test_mais_de_uma_pergunta_principal_e_violacao(self):
+        resposta = self._resposta("Como funciona? Quanto custa?")
+
+        tipos = {v.kind for v in find_format_violations(resposta)}
+
+        self.assertIn("perguntas_demais", tipos)
+
+    def test_mais_de_quatro_frases_e_violacao(self):
+        resposta = self._resposta("Uma. Duas. Três. Quatro. Cinco.")
+
+        tipos = {v.kind for v in find_format_violations(resposta)}
+
+        self.assertIn("frases_demais", tipos)
+
+    def test_observacao_interna_de_qa_e_vazamento(self):
+        resposta = self._resposta(
+            "Vi que a AYA está misturando respostas de teste com o fluxo. "
+            "Vale revisar esse contexto antes de colocar em produção."
+        )
+
+        tipos = {v.kind for v in find_format_violations(resposta)}
+
+        self.assertIn("conteudo_interno", tipos)
+
     def test_dados_de_pagamento_podem_passar_de_tres_bolhas_e_usar_lista(self):
         # O bloco oficial é entregue em lista de propósito; cobrá-lo pelas regras
         # de conversa comum encheria o relatório de falso positivo todo dia.
@@ -591,7 +615,7 @@ class FormatViolationsTest(unittest.TestCase):
         self.assertEqual(find_format_violations(resposta), [])
 
     def test_turno_normal_de_tres_bolhas_curtas_nao_gera_achado(self):
-        self.assertEqual(find_format_violations(self._resposta("oi", "tudo bem?", "como posso ajudar?")), [])
+        self.assertEqual(find_format_violations(self._resposta("oi", "tudo bem.", "como posso ajudar?")), [])
 
 
 class LanguageMismatchTest(unittest.TestCase):
@@ -756,6 +780,18 @@ class BuildDayAuditTest(unittest.TestCase):
         self.assertEqual([m.reply_language for m in dia.language_mismatches], ["en"])
         self.assertEqual(len(dia.unanswered), 1)
         self.assertEqual(len(dia.handoffs), 1)
+
+    def test_pergunta_identica_repetida_na_mesma_conversa_e_loop(self):
+        turnos = [
+            _turn(0, False, "quero entender"),
+            _turn(1, True, "Certo. Como funciona seu atendimento hoje?"),
+            _turn(2, False, "somos uma clínica"),
+            _turn(3, True, "Entendi. Como funciona seu atendimento hoje?"),
+        ]
+
+        dia = build_day_audit(date(2026, 8, 24), [], turnos, _pt)
+
+        self.assertIn("pergunta_repetida", {v.kind for v in dia.format_violations})
 
     def test_conta_conversas_e_mensagens_de_lead_do_dia(self):
         turnos = [

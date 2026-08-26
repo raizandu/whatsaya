@@ -1,0 +1,263 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "01",
+      "title": "Abertura neutra",
+      "criticality": "P1",
+      "layer": "HIBRIDA",
+      "automated_evidence": ["tests/plugin_test.py::test_lista_de_funcionalidades_nao_chega_como_documentacao"],
+      "checks": [
+        {"id": "01.1", "kind": "automation", "description": "Pós-processamento remove abertura em formato de catálogo."},
+        {"id": "01.2", "kind": "staging", "description": "Resposta explica a AYA em até quatro frases curtas."},
+        {"id": "01.3", "kind": "staging", "description": "Resposta contém no máximo uma pergunta principal natural."}
+      ],
+      "staging_required": true
+    },
+    {
+      "id": "02",
+      "title": "Adaptação ao nicho",
+      "criticality": "P1",
+      "layer": "STAGING",
+      "automated_evidence": [],
+      "checks": [
+        {"id": "02.1", "kind": "staging", "description": "Resposta usa ao menos um fato do negócio informado pelo lead."},
+        {"id": "02.2", "kind": "staging", "description": "Resposta não vira lista de módulos nem explica arquitetura."}
+      ],
+      "staging_required": true
+    },
+    {
+      "id": "03",
+      "title": "Pergunta coloquial",
+      "criticality": "P1",
+      "layer": "HIBRIDA",
+      "automated_evidence": ["tests/plugin_test.py::test_lista_de_coloquiais_da_qa_final"],
+      "checks": [
+        {"id": "03.1", "kind": "automation", "description": "Classificador cobre frases coloquiais permanentes da QA."},
+        {"id": "03.2", "kind": "staging", "description": "Pergunta coloquial recebe resposta direta à intenção detectada."}
+      ],
+      "staging_required": true
+    },
+    {
+      "id": "04",
+      "title": "Contexto entre turnos",
+      "criticality": "P1",
+      "layer": "HIBRIDA",
+      "automated_evidence": ["tests/plugin_test.py::test_old_response_keeps_its_turn_when_new_pre_llm_already_started"],
+      "checks": [
+        {"id": "04.1", "kind": "automation", "description": "Concorrência preserva a resposta no turno correto."},
+        {"id": "04.2", "kind": "staging", "description": "Fato informado no início continua correto após pelo menos três turnos."},
+        {"id": "04.3", "kind": "staging", "description": "A IA não repete pergunta já respondida."}
+      ],
+      "staging_required": true
+    },
+    {
+      "id": "05",
+      "title": "Objeção",
+      "criticality": "P1",
+      "layer": "HIBRIDA",
+      "automated_evidence": ["tests/plugin_test.py::test_objecao_em_intent_missing_recebe_tratamento_nao_oferta_de_pagamento"],
+      "checks": [
+        {"id": "05.1", "kind": "automation", "description": "Objeção não libera pagamento por engano."},
+        {"id": "05.2", "kind": "staging", "description": "Resposta reconhece a objeção antes de fazer a próxima pergunta."}
+      ],
+      "staging_required": true
+    },
+    {
+      "id": "06",
+      "title": "Mudança de intenção",
+      "criticality": "P1",
+      "layer": "HIBRIDA",
+      "automated_evidence": ["tests/plugin_test.py::test_quero_avancar_desce_para_call_nao_pix"],
+      "checks": [
+        {"id": "06.1", "kind": "automation", "description": "Intenção de avançar muda o próximo passo sem impor Pix."},
+        {"id": "06.2", "kind": "staging", "description": "Depois de quero avançar a conversa não retorna à descoberta inicial."}
+      ],
+      "staging_required": true
+    },
+    {
+      "id": "07",
+      "title": "Handoff humano",
+      "criticality": "P0",
+      "layer": "HIBRIDA",
+      "automated_evidence": ["tests/plugin_test.py::test_quero_avancar_handoff_natural", "tests/plugin_test.py::test_marcador_handoff_nao_chega_ao_lead"],
+      "checks": [
+        {"id": "07.1", "kind": "automation", "description": "Marcador técnico de handoff é removido da mensagem visível."},
+        {"id": "07.2", "kind": "staging", "description": "Pedido de humano recebe encaminhamento claro sem pedir novamente o contexto."}
+      ],
+      "staging_required": true
+    },
+    {
+      "id": "08",
+      "title": "Vazamento interno",
+      "criticality": "P0",
+      "layer": "HIBRIDA",
+      "automated_evidence": ["tests/plugin_test.py::test_internal_qa_observation_never_reaches_delivery", "tests/plugin_test.py::test_internal_commercial_authorization_is_never_sent"],
+      "checks": [
+        {"id": "08.1", "kind": "automation", "description": "Observação interna de QA é bloqueada na fronteira de entrega."},
+        {"id": "08.2", "kind": "staging", "description": "Nenhuma tag, intent, debug, regra ou análise interna aparece no WhatsApp."}
+      ],
+      "staging_required": true
+    },
+    {
+      "id": "09",
+      "title": "Sem resposta vazia",
+      "criticality": "P0",
+      "layer": "HIBRIDA",
+      "automated_evidence": ["tests/plugin_test.py::test_empty_send_is_skipped", "tests/plugin_test.py::test_empty_response_returns_none"],
+      "checks": [
+        {"id": "09.1", "kind": "automation", "description": "Camada de envio não entrega bolha vazia."},
+        {"id": "09.2", "kind": "staging", "description": "Brasil, sim e amanhã recebem próximo passo quando o fluxo o exige."}
+      ],
+      "staging_required": true
+    },
+    {
+      "id": "10",
+      "title": "Loop de pergunta",
+      "criticality": "P0",
+      "layer": "HIBRIDA",
+      "automated_evidence": ["tests/test_daily_audit.py::test_pergunta_identica_repetida_na_mesma_conversa_e_loop"],
+      "checks": [
+        {"id": "10.1", "kind": "automation", "description": "Auditoria detecta pergunta idêntica repetida."},
+        {"id": "10.2", "kind": "staging", "description": "Resposta do lead faz o fluxo avançar sem repetir a pergunta anterior."}
+      ],
+      "staging_required": true
+    },
+    {
+      "id": "11",
+      "title": "Integração não confirmada",
+      "criticality": "P1",
+      "layer": "HIBRIDA",
+      "automated_evidence": ["tests/plugin_test.py::test_integration_caveats_are_not_mistaken_for_internal_approval"],
+      "checks": [
+        {"id": "11.1", "kind": "automation", "description": "Ressalva de integração não é removida como texto interno."},
+        {"id": "11.2", "kind": "staging", "description": "Integração não confirmada é tratada como possibilidade, sem promessa inventada."}
+      ],
+      "staging_required": true
+    },
+    {
+      "id": "12",
+      "title": "Mercado Brasil",
+      "criticality": "P0",
+      "layer": "HIBRIDA",
+      "automated_evidence": ["tests/test_aya_market_rules.py::test_market_is_sticky_and_blocks_cross_market_details", "tests/plugin_test.py::test_zelle_is_blocked_for_brazil_market_even_with_purchase_intent"],
+      "checks": [
+        {"id": "12.1", "kind": "automation", "description": "Mercado BR bloqueia Zelle, USD e regras dos EUA."},
+        {"id": "12.2", "kind": "automation", "description": "Metadado de mercado permanece estável entre turnos."},
+        {"id": "12.3", "kind": "staging", "description": "Conversa BR usa somente regra comercial, moeda e pagamento do Brasil."}
+      ],
+      "staging_required": true
+    },
+    {
+      "id": "13",
+      "title": "Mercado Estados Unidos",
+      "criticality": "P0",
+      "layer": "HIBRIDA",
+      "automated_evidence": ["tests/test_aya_market_rules.py::test_spanish_changes_the_reply_language_not_the_us_market", "tests/plugin_test.py::test_pix_is_blocked_for_us_market_even_with_purchase_intent"],
+      "checks": [
+        {"id": "13.1", "kind": "automation", "description": "Mercado US bloqueia Pix, BRL e regras do Brasil."},
+        {"id": "13.2", "kind": "automation", "description": "Idioma espanhol não reclassifica o mercado US."},
+        {"id": "13.3", "kind": "staging", "description": "Conversa US usa somente regra comercial, moeda e pagamento dos Estados Unidos."}
+      ],
+      "staging_required": true
+    },
+    {
+      "id": "14",
+      "title": "Preço",
+      "criticality": "P0",
+      "layer": "HIBRIDA",
+      "automated_evidence": ["tests/plugin_test.py::test_wrong_market_price_responde_o_valor_certo_quando_perguntam", "tests/test_aya_market_rules.py::test_official_terms_are_partitioned_by_market"],
+      "checks": [
+        {"id": "14.1", "kind": "automation", "description": "Gate preserva somente a regra de preço oficial do mercado correto."},
+        {"id": "14.2", "kind": "staging", "description": "Pergunta direta de preço recebe resposta comercial vigente e natural."}
+      ],
+      "staging_required": true
+    },
+    {
+      "id": "15",
+      "title": "Pagamento",
+      "criticality": "P0",
+      "layer": "HIBRIDA",
+      "automated_evidence": ["tests/plugin_test.py::test_payment_method_is_not_sent_before_purchase_intent", "tests/plugin_test.py::test_official_labeled_payment_method_is_preserved_with_purchase_intent"],
+      "checks": [
+        {"id": "15.1", "kind": "automation", "description": "Dados de pagamento só são liberados com intenção explícita."},
+        {"id": "15.2", "kind": "staging", "description": "Método, moeda e pedido de comprovante seguem a regra do mercado."}
+      ],
+      "staging_required": true
+    },
+    {
+      "id": "16",
+      "title": "Pós-pagamento",
+      "criticality": "P0",
+      "layer": "HIBRIDA",
+      "automated_evidence": ["tests/plugin_test.py::test_fiz_o_pix_nao_volta_para_envio_de_dados", "tests/plugin_test.py::test_ja_paguei_com_comprovante_nao_reenvia_pix"],
+      "checks": [
+        {"id": "16.1", "kind": "automation", "description": "Confirmação de pagamento não reabre checkout."},
+        {"id": "16.2", "kind": "staging", "description": "Já paguei avança para comprovante, validação ou onboarding."}
+      ],
+      "staging_required": true
+    },
+    {
+      "id": "17",
+      "title": "Fora da base",
+      "criticality": "P1",
+      "layer": "STAGING",
+      "automated_evidence": [],
+      "checks": [
+        {"id": "17.1", "kind": "staging", "description": "Resposta declara somente a incerteza relevante e não inventa capacidade."},
+        {"id": "17.2", "kind": "staging", "description": "Resposta coleta contexto ou encaminha para confirmação humana."}
+      ],
+      "staging_required": true
+    },
+    {
+      "id": "18",
+      "title": "Fora do horário",
+      "criticality": "P1",
+      "layer": "HIBRIDA",
+      "automated_evidence": ["tests/plugin_test.py::test_hours_fallback_nao_cataloga_o_que_a_ia_faz"],
+      "checks": [
+        {"id": "18.1", "kind": "automation", "description": "Fallback de horário não vira catálogo de funcionalidades."},
+        {"id": "18.2", "kind": "staging", "description": "Pedido de humano fora do expediente recebe resposta e expectativa de retomada."}
+      ],
+      "staging_required": true
+    },
+    {
+      "id": "19",
+      "title": "Mudança de idioma",
+      "criticality": "P1",
+      "layer": "HIBRIDA",
+      "automated_evidence": ["tests/plugin_test.py::test_spanish_english_code_switch_keeps_us_market", "tests/plugin_test.py::test_detects_current_language_without_using_it_as_market"],
+      "checks": [
+        {"id": "19.1", "kind": "automation", "description": "Idioma da mensagem muda sem alterar o mercado confirmado."},
+        {"id": "19.2", "kind": "staging", "description": "Apó a troca de idioma a resposta acompanha o lead e preserva o contexto."}
+      ],
+      "staging_required": true
+    },
+    {
+      "id": "20",
+      "title": "Conversa longa",
+      "criticality": "P0",
+      "layer": "STAGING",
+      "automated_evidence": [],
+      "checks": [
+        {"id": "20.1", "kind": "staging", "description": "Conversa completa tem entre oito e doze turnos do lead."},
+        {"id": "20.2", "kind": "staging", "description": "Mercado, intenção e etapa permanecem corretos no último turno."},
+        {"id": "20.3", "kind": "staging", "description": "Não ocorre loop, resposta vazia nem degradação para texto técnico."}
+      ],
+      "staging_required": true
+    },
+    {
+      "id": "21",
+      "title": "Contato não comercial",
+      "criticality": "P0",
+      "layer": "HIBRIDA",
+      "automated_evidence": ["tests/plugin_test.py::test_unknown_noncommercial_realtime_contact_waits_for_scope", "tests/test_followup_plugin_integration.py::test_personal_greeting_never_arms_commercial_followup"],
+      "checks": [
+        {"id": "21.1", "kind": "automation", "description": "Contato pessoal sem evidência comercial fica pausado e não arma follow-up."},
+        {"id": "21.2", "kind": "staging", "description": "Papo pessoal ou mídia solta não inicia venda nem assistência genérica."},
+        {"id": "21.3", "kind": "staging", "description": "Saída é neutra ou encaminha para humano sem mensagem interna."}
+      ],
+      "staging_required": true
+    }
+  ]
+}

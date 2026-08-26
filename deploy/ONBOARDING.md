@@ -186,6 +186,26 @@ Não declare o cliente no ar sem isto:
 
 Sessão de teste suja o histórico. Apague a sessão Hermes daquele JID se for repetir o teste do zero.
 
+Antes de encaminhar a versão para QA Final, execute o runbook
+[`AYA_V1_DEFINITION_OF_DONE.md`](AYA_V1_DEFINITION_OF_DONE.md). `npm test` sozinho
+valida os guards, mas não substitui os cenários de staging que dependem de modelo,
+memória, sessão e entrega real.
+
+### Reset de um contato de teste
+
+O reset é dry-run por padrão. Confira os aliases `@lid` encontrados e só aplique com o
+container parado, para o SessionStore não regravar a sessão durante o shutdown:
+
+```bash
+docker stop hermes
+WA_BASE=/opt/whatsaya/data python3 deploy/scripts/wa_reset_contact.py NUMERO_DE_TESTE
+WA_BASE=/opt/whatsaya/data python3 deploy/scripts/wa_reset_contact.py NUMERO_DE_TESTE --apply
+docker start hermes
+```
+
+O script cria backup antes dos `DELETE`. Nunca use esse procedimento em contato real ou
+sem conferir o número resolvido no dry-run.
+
 **Riscos conhecidos:**
 - Transcrição de áudio **não passa por LLM**. Desde 22/08/2026 o áudio vai para o ASR do Fish (`POST /v1/asr`, multipart, mesma `FISH_API_KEY` do TTS) e o `WHATSAPP_CLIENT_MEDIA_MODEL` cuida só de imagem. O motivo: nenhum slug de texto/visão do OpenRouter aceita entrada de áudio — a chamada volta `404 No endpoints found that support input audio` e o agente recebe `[audio received]` cru, sem saber que houve áudio. Log de sucesso: `[asr] fish ok tentativa=1 dur=... chars=...`; de falha: `[asr] transcrição não obtida para <arquivo>: ...`. **A API credit do Fish é carteira separada da plataforma**: o TTS pode continuar funcionando no modelo grátis enquanto o ASR devolve `402 Insufficient API credit` — confira em https://fish.audio/app/developers.
 - `git: dubious ownership` no boot é corrigido automaticamente pelo próprio `command:` do compose (`git config --global --add safe.directory`) — não é erro.

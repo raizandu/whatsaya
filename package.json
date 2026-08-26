@@ -3,7 +3,8 @@
   "scripts": {
     "test": "npm run test:node && npm run test:python",
     "test:node": "node --test --test-force-exit tests/bridge.test.js tests/bridge_campaign_metadata.test.js",
-    "test:python": "python3 -m unittest discover -s tests -p '*test*.py'"
+    "test:python": "python3 -m unittest discover -s tests -p '*test*.py'",
+    "regression:v1": "python3 deploy/scripts/aya_v1_regression.py"
   },
   "dependencies": {
     "@hapi/boom": "^10.0.1",

@@ -188,12 +188,21 @@ skills:
 
 ## 🧪 Testes Automatizados
 
-O projeto possui cobertura completa de testes unitários:
+Rode a suíte técnica completa:
 
 ```bash
-# Executar a suíte de testes (265 testes unitários)
-python3 -m unittest tests/plugin_test.py
+npm test
 ```
+
+Antes da QA Final da AYA, rode também o gate que combina os guards com a matriz dos
+21 cenários e gera artefatos redigidos para o card:
+
+```bash
+npm run regression:v1
+```
+
+Critérios, staging e interpretação do resultado:
+[`deploy/AYA_V1_DEFINITION_OF_DONE.md`](deploy/AYA_V1_DEFINITION_OF_DONE.md).
 
 ---
 

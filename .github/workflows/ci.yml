@@ -31,9 +31,15 @@ jobs:
 
       - run: npm ci
       - run: npm test
+      - name: Validate AYA V1 regression catalog
+        run: >-
+          python3 deploy/scripts/aya_v1_regression.py
+          --skip-suite
+          --output-dir reports/aya-v1/ci
       - name: Validate deploy scripts
         run: >-
           python3 -m py_compile
           deploy/qr-server.py
           deploy/scripts/ab_aya_score.py
+          deploy/scripts/aya_v1_regression.py
           deploy/scripts/tick_whatsapp_followups.py
