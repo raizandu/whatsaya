@@ -137,11 +137,38 @@ A URL `/whatsapp/qr` serve para **reconexão**, não para o primeiro pareamento.
 
 O card do dashboard (Bot / Self-chat) lê `WHATSAPP_MODE` do `.env` do Hermes (`/opt/data/.hermes/.env`). O número `15551234567` é só placeholder da UI — a allowlist real é `WHATSAPP_ALLOWED_USERS`. **Deixe Mode = Bot.** Self-chat nativo do Hermes atende só você mesmo e corta os clientes. Comando do dono no “mensagem para si” (`quais comandos`, `stop_bot`) já funciona em modo Bot, via plugin. O compose regrava isso no boot para não sumir no reset.
 
-Modelo persistente: clientes/WhatsApp = `WHATSAPP_CLIENT_MODEL` (padrão `gpt-5.6-luna`, `WHATSAPP_CLIENT_REASONING_EFFORT` padrão `medium`). Uso interno no perfil default = `WHATSAPP_OWNER_MODEL` (padrão `gpt-5.6-luna` também, `WHATSAPP_OWNER_REASONING_EFFORT` padrão `high` — não `max`, porque o `deepseek-v4-flash` do fallback nem sempre suporta esse nível). Sem isso o dashboard volta para o modelo que estiver no `config.yaml` antigo.
+Modelo persistente: clientes/WhatsApp = `WHATSAPP_CLIENT_MODEL` (padrão `gpt-5.6-terra`, `WHATSAPP_CLIENT_REASONING_EFFORT` padrão `medium`). Uso interno no perfil default = `WHATSAPP_OWNER_MODEL` (padrão `gpt-5.6-luna`, `WHATSAPP_OWNER_REASONING_EFFORT` padrão `high` — não `max`, porque o `deepseek-v4-flash` do fallback nem sempre suporta esse nível). Sem isso o dashboard volta para o modelo que estiver no `config.yaml` antigo.
 
 Se `/whatsapp/qr` do dashboard não gerar o primeiro QR, o fallback que funcionou em campo é o fluxo pair-only da ponte na porta `8080` (processo à parte). Depois do scan: pare esse processo, deixe só o bridge do container, confirme `connected` em `/whatsapp/status`.
 
+Para manter uma página de QR independente do dashboard, instale o serviço versionado no host:
+
+```bash
+sudo apt-get install -y python3-qrcode
+sudo install -m 0755 deploy/qr-server.py /opt/whatsaya/qr-server.py
+sudo install -m 0644 deploy/whatsaya-qr.service /etc/systemd/system/whatsaya-qr.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now whatsaya-qr.service
+curl -fsS http://127.0.0.1/whatsapp/status
+```
+
+O serviço consulta o bridge vivo dentro do container; um `creds.json` antigo não é tratado como conexão ativa. Por padrão ele escuta só em `127.0.0.1`: publique a página por um proxy reverso autenticado, porque o QR permite vincular uma nova sessão do WhatsApp.
+
 Não pareie o mesmo número em dois bridges ao mesmo tempo — Baileys cai com `440 conflict / replaced`.
+
+### Follow-up transacional
+
+O plugin copia `tick_whatsapp_followups.py` para `/opt/data/.hermes/scripts` em todo boot. Crie o ticker uma única vez e confirme que não há job duplicado:
+
+```bash
+docker compose exec hermes hermes cron list
+docker compose exec hermes hermes cron create 1m \
+  --name wa-silencio-followup \
+  --script /opt/data/.hermes/scripts/tick_whatsapp_followups.py \
+  --no-agent
+```
+
+O padrão do template é `WHATSAPP_FOLLOWUP_SILENCE_MIN=5`. O ticker só envia para lead comercial explicitamente habilitado, revalida takeover/opt-out antes do envio e não usa LLM. Contatos pessoais ou com escopo comercial não confirmado ficam pausados e têm follow-up cancelado.
 
 ---
 
@@ -161,9 +188,8 @@ Sessão de teste suja o histórico. Apague a sessão Hermes daquele JID se for r
 
 **Riscos conhecidos:**
 - Transcrição de áudio **não passa por LLM**. Desde 22/08/2026 o áudio vai para o ASR do Fish (`POST /v1/asr`, multipart, mesma `FISH_API_KEY` do TTS) e o `WHATSAPP_CLIENT_MEDIA_MODEL` cuida só de imagem. O motivo: nenhum slug de texto/visão do OpenRouter aceita entrada de áudio — a chamada volta `404 No endpoints found that support input audio` e o agente recebe `[audio received]` cru, sem saber que houve áudio. Log de sucesso: `[asr] fish ok tentativa=1 dur=... chars=...`; de falha: `[asr] transcrição não obtida para <arquivo>: ...`. **A API credit do Fish é carteira separada da plataforma**: o TTS pode continuar funcionando no modelo grátis enquanto o ASR devolve `402 Insufficient API credit` — confira em https://fish.audio/app/developers.
-- `test_find_product_matches_partial_keyword` falha por motivo desconhecido (mockado, sem dependência de path/rede). Afeta casamento parcial de nome de produto ("mini pc" vs "Mini Pc Acemagic Ryzen 7"). Confirme no ambiente Linux antes de confiar no registro automático de vendas.
 - `git: dubious ownership` no boot é corrigido automaticamente pelo próprio `command:` do compose (`git config --global --add safe.directory`) — não é erro.
-- `Cannot find package '@whiskeysockets/baileys'` ao rodar os testes locais significa que o `npm install` do bridge não rodou (o `package-lock.json` é gitignorado de propósito) — rode `npm install` antes de `npm test`.
+- `Cannot find package '@whiskeysockets/baileys'` ao rodar os testes locais significa que as dependências ainda não foram instaladas — rode `npm ci` antes de `npm test`.
 
 ---
 

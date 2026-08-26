@@ -87,7 +87,7 @@
 #   WHATSAPP_OWNER_PROVIDER           Provider do dono             (padrão openai-codex)
 #   WHATSAPP_OWNER_REASONING_EFFORT   Esforço de raciocínio do dono (padrão high — deepseek-v4-flash
 #                                     do fallback nem sempre suporta "max", varia por rota do OpenRouter)
-#   WHATSAPP_CLIENT_MODEL             WhatsApp clientes            (padrão gpt-5.6-luna)
+#   WHATSAPP_CLIENT_MODEL             WhatsApp clientes            (padrão gpt-5.6-terra)
 #   WHATSAPP_CLIENT_PROVIDER          Provider de clientes         (padrão openai-codex)
 #   WHATSAPP_CLIENT_REASONING_EFFORT  Esforço de raciocínio do cliente (padrão medium —
 #                                     mais barato que max; suba se as respostas ficarem rasas)
@@ -264,7 +264,7 @@ services:
         # Modelo e provider vem do ambiente. Antes estavam fixos em gemini aqui dentro,
         # o que sobrescrevia as variaveis do painel a cada boot e fazia o agente de
         # cliente continuar chamando o Gemini mesmo com tudo configurado para OpenRouter.
-        client_model = os.environ.get('WHATSAPP_CLIENT_MODEL') or 'gpt-5.6-luna'
+        client_model = os.environ.get('WHATSAPP_CLIENT_MODEL') or 'gpt-5.6-terra'
         client_provider = os.environ.get('WHATSAPP_CLIENT_PROVIDER') or 'openai-codex'
         client_reasoning_effort = os.environ.get('WHATSAPP_CLIENT_REASONING_EFFORT') or 'medium'
         owner_model = os.environ.get('WHATSAPP_OWNER_MODEL') or 'gpt-5.6-luna'
@@ -440,7 +440,7 @@ services:
             'WHATSAPP_OWNER_MODEL': owner_model,
             'WHATSAPP_OWNER_PROVIDER': owner_provider,
             'WHATSAPP_FOLLOWUP_ENABLED': os.environ.get('WHATSAPP_FOLLOWUP_ENABLED') or 'true',
-            'WHATSAPP_FOLLOWUP_SILENCE_MIN': os.environ.get('WHATSAPP_FOLLOWUP_SILENCE_MIN') or '30',
+            'WHATSAPP_FOLLOWUP_SILENCE_MIN': os.environ.get('WHATSAPP_FOLLOWUP_SILENCE_MIN') or '5',
         }
         _home = ''.join(c for c in (os.environ.get('WHATSAPP_OWNER_NUMBER') or '') if c.isdigit())
         if _home:
@@ -567,7 +567,7 @@ services:
       - WHATSAPP_OWNER_MODEL=${WHATSAPP_OWNER_MODEL:-gpt-5.6-luna}
       - WHATSAPP_OWNER_PROVIDER=${WHATSAPP_OWNER_PROVIDER:-openai-codex}
       - WHATSAPP_OWNER_REASONING_EFFORT=${WHATSAPP_OWNER_REASONING_EFFORT:-high}
-      - WHATSAPP_CLIENT_MODEL=${WHATSAPP_CLIENT_MODEL:-gpt-5.6-luna}
+      - WHATSAPP_CLIENT_MODEL=${WHATSAPP_CLIENT_MODEL:-gpt-5.6-terra}
       - WHATSAPP_CLIENT_PROVIDER=${WHATSAPP_CLIENT_PROVIDER:-openai-codex}
       - WHATSAPP_CLIENT_REASONING_EFFORT=${WHATSAPP_CLIENT_REASONING_EFFORT:-medium}
       - WHATSAPP_CLIENT_MEDIA_MODEL=${WHATSAPP_CLIENT_MEDIA_MODEL:-google/gemini-3.1-flash-lite}
@@ -666,7 +666,7 @@ services:
       - WHATSAPP_UNANSWERED_ALERT_S=${WHATSAPP_UNANSWERED_ALERT_S:-180}
       - WHATSAPP_INBOUND_BUFFER_S=${WHATSAPP_INBOUND_BUFFER_S:-0}
       - WHATSAPP_FOLLOWUP_ENABLED=${WHATSAPP_FOLLOWUP_ENABLED:-true}
-      - WHATSAPP_FOLLOWUP_SILENCE_MIN=${WHATSAPP_FOLLOWUP_SILENCE_MIN:-30}
+      - WHATSAPP_FOLLOWUP_SILENCE_MIN=${WHATSAPP_FOLLOWUP_SILENCE_MIN:-5}
       - WHATSAPP_HOME_CHANNEL=${WHATSAPP_HOME_CHANNEL:-}
       # Vazio de propósito: dado de operação do cliente não vai para o GitHub sem
       # decisão explícita. O default antigo apontava para um repo que nunca era criado,

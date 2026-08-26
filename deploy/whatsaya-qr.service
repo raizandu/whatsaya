@@ -1,0 +1,17 @@
+[Unit]
+Description=WhatsAYA standalone WhatsApp QR HTML page
+After=network.target docker.service
+Wants=docker.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/whatsaya
+Environment=WHATSAPP_QR_PORT=80
+Environment=WHATSAPP_QR_HOST=127.0.0.1
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 /opt/whatsaya/qr-server.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

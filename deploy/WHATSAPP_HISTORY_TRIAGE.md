@@ -127,7 +127,7 @@ Só depois de verificar o documento:
 python3 deploy/scripts/whatsapp_history_triage.py \
   --config deploy/scripts/whatsapp_history_triage.yaml send \
   --report /opt/data/.hermes/workspace/whatsapp_triagem_revisao_cliente_YYYY-MM-DD.md \
-  --chat-id 5562936180895@s.whatsapp.net
+  --chat-id <JID_DO_DONO>
 ```
 
 O bridge divide mensagens longas em partes. O script exige um destino explícito
@@ -172,5 +172,5 @@ novo snapshot e uma nova data.
 ### Preços divergentes
 
 O histórico pode conter ofertas antigas ou outro produto. Não corrija mensagens
-retroativamente. Separe o catálogo e mantenha a regra atual da WhatsAYA:
-R$ 997 de implementação + R$ 397/mês, sem desconto sem autorização.
+retroativamente. Separe o que o cliente já combinou no passado do catálogo
+atual em `support_rules.md`. Sem autorização do dono, não ofereça desconto.

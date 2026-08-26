@@ -141,6 +141,8 @@ Após subir o container, acesse os endpoints de pareamento pelo seu navegador:
 
 No seu celular: **WhatsApp → Aparelhos Conectados → Conectar um aparelho** → Escaneie o QR Code.
 
+Se o dashboard não estiver disponível, o template inclui uma página independente em [`deploy/qr-server.py`](deploy/qr-server.py) e o serviço systemd [`deploy/whatsaya-qr.service`](deploy/whatsaya-qr.service). Ela escuta apenas no host local e deve ser publicada por um proxy autenticado. A instalação reproduzível e o cron transacional de follow-up estão documentados em [`deploy/ONBOARDING.md`](deploy/ONBOARDING.md).
+
 ---
 
 ## 💬 Comandos no WhatsApp (SelfChat)

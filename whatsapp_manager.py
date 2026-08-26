@@ -9029,17 +9029,16 @@ def _build_support_prompt(
             "CONSTRAINTS ABSOLUTAS — NUNCA VIOLE:\n"
             "- Você é a IA comercial da WhatsAYA. Apresente-se como atendente comercial com IA "
             "no WhatsApp. NÃO se apresente como 'assistente virtual', 'SDR' ou 'atendente' do dono.\n"
-            "- PAPEL: atendente comercial no WhatsApp. Resposta curta, aplicada ao caso da pessoa, "
-            "no máximo UMA pergunta. Sem lista de funcionalidades e sem checklist de implantação. "
-            "No máximo DUAS perguntas na conversa inteira.\n"
-            "- PREÇO: Brasil = proposta personalizada por projeto, fecha na call, sem tabela. "
+            "- PAPEL: atendente comercial no WhatsApp. Responda ao caso sem lista de funcionalidades "
+            "ou checklist. Faça no máximo UMA pergunta agora e DUAS na conversa inteira.\n"
+            "- PREÇO E MOEDA: Brasil = proposta personalizada por projeto, fecha na call, sem tabela. "
             "Estados Unidos = use a condição oficial da base (implementação + mensalidade via "
             "Zelle). Não misture mercados. Pix/Zelle detalhado só se pedirem pagar agora.\n"
             "- LUGAR DO LEAD: quando ele disser a cidade, receba com naturalidade (maravilha) e "
             "siga na operação dele. Não diga que a sede é Goiânia.\n"
             "- HORÁRIO HUMANO: não informe expediente, 08h–18h, fuso nem horário de Goiânia, a "
             "menos que o lead pergunte. No WhatsApp a AYA atende o tempo todo.\n"
-            "- UM SÓ LUGAR: depois de saber de onde o lead atende, use só oferta, moeda e "
+            "- SEPARE OS MERCADOS: depois de saber de onde o lead atende, use só oferta, moeda e "
             "pagamento daquele bloco. Idioma não reclassifica mercado.\n"
             "- TRÊS NÍVEIS DE CERTEZA: capacidade confirmada na base deve ser afirmada com segurança; "
             "recurso específico não confirmado recebe ressalva curta somente sobre aquele recurso; regra, "
@@ -9098,13 +9097,10 @@ def _build_support_prompt(
             # Entre regras, o fim do bloco é onde o modelo obedece (688c5e5). O restante
             # variável do turno (relógio, histórico, estado, idioma) vem DEPOIS, para o
             # prefixo estável sobreviver entre turnos.
-            "- FORMATO DA RESPOSTA: no máximo 3 bolhas e 4 frases no total, somando tudo. NUNCA "
-            "responda com lista, bullets ou passos numerados numa conversa comum — nem com hífen, "
-            "nem com travessão, nem numerado, nem quebrando linha para fazer as vezes de item. "
-            "Se a explicação não couber em 4 frases, ela está grande demais: entregue só o próximo "
-            "passo e faça UMA pergunta. Enumerar etapas ou requisitos é exatamente o que está "
-            "proibido — descreva em texto corrido e curto. Única exceção: dados de pagamento, que "
-            "podem ficar em linhas separadas para o lead copiar. A ressalva obrigatória de "
+            "- FORMATO DA RESPOSTA: no máximo 3 bolhas e 4 frases no total. NUNCA use lista, bullets "
+            "ou passos numerados numa conversa comum, nem linhas separadas que simulem itens. Se não "
+            "couber, entregue só o próximo passo em texto corrido e faça UMA pergunta. Só dados de "
+            "pagamento podem ficar em linhas separadas para cópia. A ressalva obrigatória de "
             "capacidade sob configuração (ex.: 'a gente confirma na configuração como essa conexão "
             "vai funcionar') NÃO conta no limite de frases: quando faltar espaço, corte outra "
             "frase e mantenha a ressalva — nunca o contrário.\n\n"
@@ -14713,22 +14709,22 @@ def register(ctx):
             shutil.copy2(soul_email_path, profile_em_soul)
             logger.info(f"✓ Copiado SOUL_EMAIL.md para perfil de E-mail")
 
-        # 3b. Implantar o tick da auditoria diária onde o cron do Hermes o encontra.
-        # Sem isto o script fica só no clone e o `hermes cron create` aponta para um
-        # caminho que não existe — falha silenciosa, descoberta só no dia seguinte.
+        # 3b. Implantar ticks onde o cron do Hermes os encontra. Sem isto os scripts
+        # ficam só no clone e `hermes cron create` aponta para caminhos inexistentes.
         try:
             hermes_scripts_dir = Path("/opt/data/.hermes/scripts")
             hermes_scripts_dir.mkdir(parents=True, exist_ok=True)
-            source_audit_tick = plugin_dir / "deploy" / "scripts" / "tick_whatsapp_audit.py"
-            target_audit_tick = hermes_scripts_dir / "tick_whatsapp_audit.py"
-            if source_audit_tick.exists() and (
-                not target_audit_tick.exists()
-                or source_audit_tick.read_bytes() != target_audit_tick.read_bytes()
-            ):
-                shutil.copy2(source_audit_tick, target_audit_tick)
-                logger.info(f"✓ tick_whatsapp_audit.py atualizado em {target_audit_tick}")
+            for script_name in ("tick_whatsapp_audit.py", "tick_whatsapp_followups.py"):
+                source_tick = plugin_dir / "deploy" / "scripts" / script_name
+                target_tick = hermes_scripts_dir / script_name
+                if source_tick.exists() and (
+                    not target_tick.exists()
+                    or source_tick.read_bytes() != target_tick.read_bytes()
+                ):
+                    shutil.copy2(source_tick, target_tick)
+                    logger.info(f"✓ {script_name} atualizado em {target_tick}")
         except Exception as audit_tick_err:
-            logger.warning(f"[daily-audit] não consegui instalar o tick: {audit_tick_err}")
+            logger.warning(f"[runtime-scripts] não consegui instalar os ticks: {audit_tick_err}")
 
         # 4. Implantar google_api.py (módulo de autenticação Gmail)
         # O arquivo é bundled no plugin — copia para o diretório de scripts do google-workspace

@@ -16,6 +16,10 @@ plugin. Este arquivo não contém nem duplica preço, moeda ou dados de pagament
 - Pergunta de preço ou curiosidade não libera dados de pagamento.
 - Pagamento declarado pelo lead não equivale a pagamento confirmado.
 - Handoff preserva contexto e nunca obriga o lead a repetir o que já informou.
+- O runtime admite somente aquisição comercial: contato pessoal conhecido ou conversa sem
+  evidência comercial fica pausado antes de LLM, visão, ASR e follow-up.
+- Um contato pausado por escopo pode entrar depois quando mensagem ou metadado confiável
+  confirmar intenção comercial; classificação genérica como `Cliente` não basta.
 
 ## Forma da conversa
 
@@ -35,6 +39,7 @@ listas, jargão técnico, repetição de preço, múltiplas perguntas e burocrac
 - Comportamento e tom: SOUL_WHATSAPP.md.
 - Oferta, capacidades, mercado e pagamento: support_rules.md.
 - Proteções determinísticas e constraints finais: whatsapp_manager.py.
+- Admissão comercial e estado por contato: `personal_contacts.json` + policy v2 do plugin.
 - Histórico: SQLite persistente da conversa atual, com isolamento por chat.
 
 Se houver divergência, a base comercial vigente e as constraints de segurança vencem o
