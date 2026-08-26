@@ -144,6 +144,36 @@ class TestMessageRoutingAndDispatch(BaseWhatsAppManagerTest):
         self.assertEqual(res, {"action": "skip", "reason": "legacy-contact-disabled"})
         cancel.assert_called_once_with("5511888888888@s.whatsapp.net")
 
+    def test_blocked_contact_media_is_not_sent_to_vision_or_asr(self):
+        pre_dispatch = self.ctx.hooks.get("pre_gateway_dispatch")
+        event = MagicMock()
+        event.source.platform = "whatsapp"
+        event.source.user_id = "5511888888888@s.whatsapp.net"
+        event.source.chat_id = "5511888888888@s.whatsapp.net"
+        event.text = "olha o bolo"
+        event.raw = {}
+        event.raw_message = {}
+        event.has_media = True
+        event.media_type = "image"
+        event.media_urls = ["/path/to/personal-photo.jpg"]
+        event.message_id = "personal-media-1"
+
+        gateway = MagicMock()
+        gateway._session_key_for_source.return_value = "session_personal_media"
+        gateway._session_model_overrides = {}
+
+        with patch(
+            "whatsapp_manager._ensure_contact_ai_access",
+            return_value=(False, "personal-contact"),
+        ), patch("whatsapp_manager._process_media_message") as process_media, patch(
+            "whatsapp_manager._detect_and_extract_sale_from_image"
+        ) as detect_sale:
+            res = pre_dispatch("pre_gateway_dispatch", {"event": event, "gateway": gateway})
+
+        self.assertEqual(res, {"action": "skip", "reason": "personal-contact"})
+        process_media.assert_not_called()
+        detect_sale.assert_not_called()
+
     def test_pre_gateway_dispatch_does_not_rewrite_or_fetch(self):
         pre_dispatch = self.ctx.hooks.get("pre_gateway_dispatch")
 
@@ -3708,7 +3738,7 @@ class TestCallLlmApi(BaseWhatsAppManagerTest):
 
 
 class TestContactAiAccess(unittest.TestCase):
-    """Legados/importados ficam off; somente contato novo realtime entra no fluxo."""
+    """Somente contatos comerciais confirmados entram no fluxo da IA."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -3748,18 +3778,158 @@ class TestContactAiAccess(unittest.TestCase):
         self.assertTrue(allowed)
         self.assertEqual(reason, "explicit-flow")
 
-    def test_unknown_realtime_contact_enters_flow_enabled(self):
+    def test_personal_contact_is_disabled_even_if_old_policy_enabled_it(self):
+        jid = "5511666666666@s.whatsapp.net"
+        self._write({
+            jid: {
+                "name": "Contato pessoal",
+                "relationship": "AmigoProximo",
+                "ai_enabled": True,
+                "in_flow": True,
+                "flow_origin": "new_live_inbound",
+            },
+        })
+
+        allowed, reason = whatsapp_manager._ensure_contact_ai_access(
+            jid,
+            jid,
+            message_text="perfeito irmão",
+        )
+
+        self.assertFalse(allowed)
+        self.assertEqual(reason, "personal-contact")
+        row = self._read()[jid]
+        self.assertIs(row["ai_enabled"], False)
+        self.assertIs(row["in_flow"], False)
+        self.assertEqual(row["ai_disabled_reason"], "personal_contact")
+
+    @patch("whatsapp_manager._recent_inbound_has_commercial_scope", return_value=False)
+    def test_old_auto_admitted_cliente_without_commercial_evidence_is_paused(self, recent_scope):
+        jid = "5511655555555@s.whatsapp.net"
+        self._write({
+            jid: {
+                "name": "Contato classificado errado",
+                "relationship": "Cliente",
+                "summary": "Conversa inicial de suporte/atendimento.",
+                "ai_enabled": True,
+                "in_flow": True,
+                "flow_origin": "new_live_inbound",
+                "ai_policy_version": 1,
+            },
+        })
+
+        allowed, reason = whatsapp_manager._ensure_contact_ai_access(
+            jid,
+            jid,
+            message_text="perfeito irmão",
+        )
+
+        self.assertFalse(allowed)
+        self.assertEqual(reason, "commercial-scope-unconfirmed")
+        row = self._read()[jid]
+        self.assertEqual(row["flow_origin"], "scope_pending")
+        self.assertIs(row["ai_enabled"], False)
+        recent_scope.assert_called_once_with(jid, jid)
+
+    @patch("whatsapp_manager._recent_inbound_has_commercial_scope", return_value=True)
+    def test_old_auto_admitted_real_lead_is_preserved_by_inbound_history(self, recent_scope):
+        jid = "5511644444444@s.whatsapp.net"
+        self._write({
+            jid: {
+                "relationship": "Cliente",
+                "ai_enabled": True,
+                "in_flow": True,
+                "flow_origin": "new_live_inbound",
+                "ai_policy_version": 1,
+            },
+        })
+
+        allowed, reason = whatsapp_manager._ensure_contact_ai_access(
+            jid,
+            jid,
+            message_text="sim",
+        )
+
+        self.assertTrue(allowed)
+        self.assertEqual(reason, "legacy-commercial-scope-confirmed")
+        row = self._read()[jid]
+        self.assertEqual(row["flow_origin"], "legacy_scope_confirmed")
+        self.assertEqual(row["ai_policy_version"], 2)
+        recent_scope.assert_called_once_with(jid, jid)
+
+    def test_unknown_noncommercial_realtime_contact_waits_for_scope(self):
         jid = "5511666666666@s.whatsapp.net"
         self._write({})
 
-        allowed, reason = whatsapp_manager._ensure_contact_ai_access(jid, jid)
+        allowed, reason = whatsapp_manager._ensure_contact_ai_access(
+            jid,
+            jid,
+            message_text="olha as fotos do bolo",
+        )
+
+        self.assertFalse(allowed)
+        self.assertEqual(reason, "commercial-scope-unconfirmed")
+        row = self._read()[jid]
+        self.assertIs(row["ai_enabled"], False)
+        self.assertIs(row["in_flow"], False)
+        self.assertEqual(row["flow_origin"], "scope_pending")
+        self.assertEqual(row["ai_disabled_reason"], "commercial_scope_unconfirmed")
+
+    def test_unknown_commercial_realtime_contact_enters_flow(self):
+        jid = "5511666666666@s.whatsapp.net"
+        self._write({})
+
+        allowed, reason = whatsapp_manager._ensure_contact_ai_access(
+            jid,
+            jid,
+            message_text="Oi, queria entender como a AYA funciona no meu atendimento",
+        )
 
         self.assertTrue(allowed)
-        self.assertEqual(reason, "new-live-inbound")
+        self.assertEqual(reason, "new-commercial-inbound")
         row = self._read()[jid]
         self.assertIs(row["ai_enabled"], True)
         self.assertIs(row["in_flow"], True)
-        self.assertEqual(row["flow_origin"], "new_live_inbound")
+        self.assertEqual(row["flow_origin"], "new_live_commercial")
+
+    def test_external_lead_metadata_admits_a_generic_first_message(self):
+        jid = "12025550199@s.whatsapp.net"
+        self._write({})
+
+        allowed, reason = whatsapp_manager._ensure_contact_ai_access(
+            jid,
+            jid,
+            message_text="Oi",
+            commercial_metadata={"origin": "Meta Ads", "campaign": "AYA US"},
+        )
+
+        self.assertTrue(allowed)
+        self.assertEqual(reason, "new-commercial-inbound")
+
+    def test_scope_pending_contact_is_promoted_by_later_commercial_intent(self):
+        jid = "5511666666666@s.whatsapp.net"
+        self._write({
+            jid: {
+                "ai_enabled": False,
+                "in_flow": False,
+                "flow_origin": "scope_pending",
+                "ai_disabled_reason": "commercial_scope_unconfirmed",
+            },
+        })
+
+        allowed, reason = whatsapp_manager._ensure_contact_ai_access(
+            jid,
+            jid,
+            message_text="Quero contratar a AYA para minha empresa",
+        )
+
+        self.assertTrue(allowed)
+        self.assertEqual(reason, "commercial-scope-confirmed")
+        row = self._read()[jid]
+        self.assertIs(row["ai_enabled"], True)
+        self.assertIs(row["in_flow"], True)
+        self.assertEqual(row["flow_origin"], "scope_confirmed")
+        self.assertNotIn("ai_disabled_reason", row)
 
     def test_historical_unknown_contact_never_enters_flow(self):
         jid = "5511555555555@s.whatsapp.net"

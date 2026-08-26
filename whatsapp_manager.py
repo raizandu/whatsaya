@@ -6518,7 +6518,7 @@ def _load_personal_contacts() -> dict:
 
 
 _PERSONAL_CONTACTS_PATH = Path("/opt/data/personal_contacts.json")
-_CONTACT_AI_POLICY_VERSION = 1
+_CONTACT_AI_POLICY_VERSION = 2
 _CONTACT_AI_POLICY_LOCK = threading.Lock()
 _CONTACT_AI_OPERATIONAL_FIELDS = frozenset({
     "ai_enabled",
@@ -6527,7 +6527,35 @@ _CONTACT_AI_OPERATIONAL_FIELDS = frozenset({
     "ai_disabled_reason",
     "ai_policy_version",
     "first_live_inbound_at",
+    "scope_pending_at",
+    "commercial_scope_confirmed_at",
 })
+
+_PERSONAL_CONTACT_RELATIONSHIPS = frozenset({
+    "amigo", "amiga", "amigoproximo", "parente", "familiar", "filho", "filha",
+    "pessoal", "namorada", "namorado", "esposa", "marido", "mae", "pai",
+    "irmao", "irma", "avo", "avó", "avô", "tio", "tia", "primo", "prima",
+})
+_COMMERCIAL_SCOPE_BRAND_RE = re.compile(
+    r"\b(?:aya|whatsaya|chatkanban|chatcommerce|api\s+connector)\b",
+    re.IGNORECASE,
+)
+_COMMERCIAL_SCOPE_SUBJECT_RE = re.compile(
+    r"\b(?:automacao|automatizar|atendimento|leads?|vendas?|clientes?|crm|chatbot|"
+    r"agente\s+de\s+ia|inteligencia\s+artificial|whatsapp|instagram|negocio|empresa|"
+    r"clinica|grafica|equipe\s+comercial|suporte\s+ao\s+cliente)\b",
+    re.IGNORECASE,
+)
+_COMMERCIAL_SCOPE_INTENT_RE = re.compile(
+    r"\b(?:contratar|orcamento|proposta|demonstracao|demo|preco|valor|quanto\s+custa|"
+    r"planos?|integrar|automatizar|melhorar|otimizar|como\s+funciona|quer[oi]|queria|"
+    r"gostaria|preciso|interessad[oa]|conhecer|entender|agendar|reuniao|call)\b",
+    re.IGNORECASE,
+)
+_COMMERCIAL_SCOPE_PAYMENT_RE = re.compile(
+    r"\b(?:comprovante|pix|zelle|pagamento|transferencia)\b",
+    re.IGNORECASE,
+)
 
 
 def _write_personal_contacts_atomic(contacts: dict) -> None:
@@ -6570,6 +6598,94 @@ def _contact_ai_policy_fields(
     if current.get("first_live_inbound_at"):
         result["first_live_inbound_at"] = current["first_live_inbound_at"]
     return result
+
+
+def _contact_record_is_personal(record: dict | None) -> bool:
+    """Relacionamento pessoal conhecido nunca é tratado como lead por inferência."""
+    if not isinstance(record, dict):
+        return False
+    relationship = " ".join(
+        str(record.get(field) or "")
+        for field in ("relationship", "manual_relationship")
+    )
+    normalized = _normalize_text(relationship)
+    tokens = set(re.findall(r"[a-z]+", normalized))
+    compact = "".join(tokens) if len(tokens) == 1 else normalized.replace(" ", "")
+    return bool(
+        tokens.intersection(_PERSONAL_CONTACT_RELATIONSHIPS)
+        or compact in _PERSONAL_CONTACT_RELATIONSHIPS
+    )
+
+
+def _has_commercial_scope_signal(
+    message_text: str = "",
+    commercial_metadata: dict | None = None,
+) -> bool:
+    """Admissão conservadora: anúncio/CRM ou intenção ligada ao produto/negócio."""
+    metadata = commercial_metadata if isinstance(commercial_metadata, dict) else {}
+    origin = _normalize_text(str(metadata.get("origin") or ""))
+    origin_is_lead_source = bool(re.search(
+        r"\b(?:ads?|anuncio|campanha|campaign|crm|lead|landing|formulario|form)\b",
+        origin.replace("_", " "),
+    ))
+    if origin_is_lead_source or any(
+        metadata.get(field) for field in ("campaign", "market_id", "offer")
+    ):
+        return True
+
+    normalized = " ".join(_normalize_text(str(message_text or "")).split())
+    if not normalized:
+        return False
+    if _COMMERCIAL_SCOPE_BRAND_RE.search(normalized):
+        return True
+    if _COMMERCIAL_SCOPE_PAYMENT_RE.search(normalized):
+        return True
+    return bool(
+        _COMMERCIAL_SCOPE_SUBJECT_RE.search(normalized)
+        and _COMMERCIAL_SCOPE_INTENT_RE.search(normalized)
+    )
+
+
+def _recent_inbound_has_commercial_scope(chat_id: str, sender_id: str, limit: int = 30) -> bool:
+    """Consulta somente texto inbound local; nunca envia histórico para outro modelo."""
+    if not _MSG_DB_PATH.is_file():
+        return False
+    candidates = []
+    for value in (chat_id, sender_id):
+        raw = str(value or "").strip()
+        if raw and raw not in candidates:
+            candidates.append(raw)
+        try:
+            resolved = _resolve_phone_from_jid(raw)
+        except Exception:
+            resolved = raw
+        if resolved and resolved not in candidates:
+            candidates.append(resolved)
+    if not candidates:
+        return False
+
+    try:
+        conn = sqlite3.connect(f"file:{_MSG_DB_PATH}?mode=ro", uri=True, timeout=3)
+    except sqlite3.Error:
+        return False
+    try:
+        placeholders = ",".join("?" for _ in candidates)
+        rows = conn.execute(
+            f"""
+            SELECT body FROM messages
+            WHERE chat_id IN ({placeholders})
+              AND from_me = 0
+              AND body IS NOT NULL
+              AND TRIM(body) != ''
+            ORDER BY COALESCE(timestamp, 0) DESC LIMIT ?
+            """,
+            (*candidates, max(1, min(int(limit), 50))),
+        ).fetchall()
+    except (sqlite3.Error, TypeError, ValueError):
+        return False
+    finally:
+        conn.close()
+    return _has_commercial_scope_signal("\n".join(str(row[0]) for row in rows))
 
 
 def _contact_identity_candidates(*values: str) -> tuple[set[str], set[str]]:
@@ -6728,13 +6844,16 @@ def _ensure_contact_ai_access(
     sender_id: str,
     *,
     is_historical: bool = False,
+    message_text: str = "",
+    commercial_metadata: dict | None = None,
 ) -> tuple[bool, str]:
-    """Gate de atendimento: legado/importado off; contato novo realtime on.
+    """Gate de atendimento: somente contato comercial confirmado entra na IA.
 
     Um registro existente sem `ai_enabled=true` é fail-closed. Assim, sync,
     classificação ou update de container nunca habilitam contatos antigos por
-    acidente. Somente um contato ainda desconhecido chegando em tempo real
-    entra automaticamente no funil.
+    acidente. Contato pessoal conhecido é desligado mesmo se uma política antiga
+    o habilitou. Contato desconhecido aguarda até texto ou metadata confirmarem o
+    escopo comercial; ele pode ser promovido em uma mensagem posterior.
     """
     if is_historical:
         return False, "historical-import"
@@ -6759,6 +6878,100 @@ def _ensure_contact_ai_access(
 
         key, record = _find_contact_ai_record(contacts, chat_id, sender_id)
         if record is not None:
+            if _contact_record_is_personal(record):
+                changed = (
+                    record.get("ai_enabled") is not False
+                    or record.get("in_flow") is not False
+                    or record.get("ai_disabled_reason") != "personal_contact"
+                    or record.get("ai_policy_version") != _CONTACT_AI_POLICY_VERSION
+                )
+                record.update({
+                    "ai_enabled": False,
+                    "in_flow": False,
+                    "ai_disabled_reason": "personal_contact",
+                    "ai_policy_version": _CONTACT_AI_POLICY_VERSION,
+                })
+                if changed:
+                    try:
+                        _write_personal_contacts_atomic(contacts)
+                    except OSError as exc:
+                        logger.error("[contact-policy] Falha ao desligar contato pessoal: %s", exc)
+                        return False, "contact-policy-write-failed"
+                return False, "personal-contact"
+
+            # A policy v1 marcou todo desconhecido como lead. Revalida esses registros
+            # usando somente metadata estruturada e texto inbound local; respostas da
+            # própria AYA não contam como evidência comercial.
+            try:
+                policy_version = int(record.get("ai_policy_version") or 0)
+            except (TypeError, ValueError):
+                policy_version = 0
+            old_auto_admission = (
+                record.get("flow_origin") == "new_live_inbound"
+                and policy_version < _CONTACT_AI_POLICY_VERSION
+            )
+            if old_auto_admission:
+                record_metadata = {
+                    field: record.get(field)
+                    for field in ("origin", "campaign", "market_id", "offer")
+                    if record.get(field)
+                }
+                scope_confirmed = (
+                    _has_commercial_scope_signal(message_text, commercial_metadata)
+                    or _has_commercial_scope_signal("", record_metadata)
+                    or _recent_inbound_has_commercial_scope(chat_id, sender_id)
+                )
+                now = time.time()
+                if scope_confirmed:
+                    record.update({
+                        "ai_enabled": True,
+                        "in_flow": True,
+                        "flow_origin": "legacy_scope_confirmed",
+                        "ai_policy_version": _CONTACT_AI_POLICY_VERSION,
+                        "commercial_scope_confirmed_at": now,
+                        "last_interaction": now,
+                    })
+                    record.pop("ai_disabled_reason", None)
+                else:
+                    record.update({
+                        "ai_enabled": False,
+                        "in_flow": False,
+                        "flow_origin": "scope_pending",
+                        "ai_disabled_reason": "commercial_scope_unconfirmed",
+                        "ai_policy_version": _CONTACT_AI_POLICY_VERSION,
+                        "scope_pending_at": now,
+                        "last_interaction": now,
+                    })
+                try:
+                    _write_personal_contacts_atomic(contacts)
+                except OSError as exc:
+                    logger.error("[contact-policy] Falha ao migrar admissão antiga: %s", exc)
+                    return False, "contact-policy-write-failed"
+                if scope_confirmed:
+                    return True, "legacy-commercial-scope-confirmed"
+                return False, "commercial-scope-unconfirmed"
+
+            scope_pending = (
+                record.get("flow_origin") == "scope_pending"
+                and record.get("ai_disabled_reason") == "commercial_scope_unconfirmed"
+            )
+            if scope_pending and _has_commercial_scope_signal(message_text, commercial_metadata):
+                record.update({
+                    "ai_enabled": True,
+                    "in_flow": True,
+                    "flow_origin": "scope_confirmed",
+                    "ai_policy_version": _CONTACT_AI_POLICY_VERSION,
+                    "commercial_scope_confirmed_at": time.time(),
+                    "last_interaction": time.time(),
+                })
+                record.pop("ai_disabled_reason", None)
+                try:
+                    _write_personal_contacts_atomic(contacts)
+                except OSError as exc:
+                    logger.error("[contact-policy] Falha ao promover contato comercial: %s", exc)
+                    return False, "contact-policy-write-failed"
+                return True, "commercial-scope-confirmed"
+
             if "ai_enabled" not in record:
                 record.update(_contact_ai_policy_fields(
                     record,
@@ -6777,20 +6990,30 @@ def _ensure_contact_ai_access(
         if not key:
             return False, "contact-identity-uncertain"
         now = time.time()
+        commercial_scope = _has_commercial_scope_signal(message_text, commercial_metadata)
         contacts[key] = {
-            "ai_enabled": True,
-            "in_flow": True,
-            "flow_origin": "new_live_inbound",
+            "ai_enabled": commercial_scope,
+            "in_flow": commercial_scope,
+            "flow_origin": "new_live_commercial" if commercial_scope else "scope_pending",
             "ai_policy_version": _CONTACT_AI_POLICY_VERSION,
             "first_live_inbound_at": now,
             "last_interaction": now,
         }
+        if commercial_scope:
+            contacts[key]["commercial_scope_confirmed_at"] = now
+        else:
+            contacts[key].update({
+                "scope_pending_at": now,
+                "ai_disabled_reason": "commercial_scope_unconfirmed",
+            })
         try:
             _write_personal_contacts_atomic(contacts)
         except OSError as exc:
-            logger.error("[contact-policy] Falha ao cadastrar novo lead; bloqueando IA: %s", exc)
+            logger.error("[contact-policy] Falha ao cadastrar novo contato; bloqueando IA: %s", exc)
             return False, "contact-policy-write-failed"
-        return True, "new-live-inbound"
+        if commercial_scope:
+            return True, "new-commercial-inbound"
+        return False, "commercial-scope-unconfirmed"
 
 
 _PRODUCT_CATALOG_PATH = Path("/opt/data/product_catalog.json")
@@ -9230,60 +9453,12 @@ def pre_gateway_dispatch(*args, **kwargs):
             if len(_seen_message_ids) > 500:  # evitar crescimento ilimitado
                 _seen_message_ids.clear()
 
-    # Processamento de mídia: áudio pelo Fish ASR, imagem pelos modelos de visão.
+    # Descobrir mídia é local e barato. O conteúdo só pode chegar a visão/ASR depois
+    # que a política do contato confirmar que este chat pertence ao fluxo comercial.
     media_info = _get_media_info(event)
     sale_detection = None
     image_analysis_attempted = False
     audio_transcribed = False
-    if media_info["has_media"] and media_info["media_urls"]:
-        media_type = media_info["media_type"]
-        logger.info(f"[sale-detect] mídia recebida: media_type={media_type!r} urls={media_info['media_urls']!r}")
-        # Detecção de comprovante de pagamento — roda ANTES de _process_media_message porque
-        # essa função apaga o arquivo físico assim que termina (privacidade: sem guardar mídia).
-        # Aqui só LEMOS o arquivo, sem apagar; quem apaga continua sendo o fluxo normal abaixo.
-        if media_type == "image":
-            image_analysis_attempted = True
-            try:
-                _caption_text = (getattr(event, "text", "") or "").strip()
-                sale_detection = _detect_and_extract_sale_from_image(media_info["media_urls"], _caption_text)
-                logger.info(f"[sale-detect] chamado para {media_info['media_urls']!r} — resultado: {sale_detection!r}")
-            except Exception as sale_detect_err:
-                logger.error(f"[sale-detect] Erro ao analisar imagem para comprovante: {sale_detect_err}")
-        if media_type in ["ptt", "audio", "image"]:
-            result_text = _process_media_message(event)
-            display_text = None
-            if result_text:
-                if media_type in ["ptt", "audio"]:
-                    audio_transcribed = True
-                    display_text = f'[Áudio: "{result_text}"]'
-                else:
-                    display_text = f'[Imagem: {result_text}]'
-            elif media_type in ["ptt", "audio"]:
-                # Sem transcrição, o agente recebia o marcador cru do bridge
-                # ("[audio received]") e tinha que adivinhar o que fazer com ele. Entregar a
-                # instrução explícita torna o fallback determinístico em vez de sorte.
-                display_text = AUDIO_FALLBACK_TEXT
-
-            if display_text:
-                # Atualizar o evento em memória
-                event.text = display_text
-                if hasattr(event, "body"):
-                    event.body = display_text
-                for attr in ["raw", "raw_event", "payload", "data"]:
-                    if hasattr(event, attr):
-                        val = getattr(event, attr)
-                        if isinstance(val, dict):
-                            val["body"] = display_text
-                            val["text"] = display_text
-
-            # Só transcrição/descrição real vai para o histórico; a instrução de fallback
-            # é orientação de turno, não conteúdo da conversa.
-            if result_text:
-                db_path = Path("/opt/data/.hermes/whatsapp_messages.db")
-                if db_path.exists() and media_info["message_id"]:
-                    _persist_transcription_to_db(str(db_path), media_info["message_id"], display_text)
-
-
     # Identificar remetente (com resolução de LID para número de telefone clássico)
     sender_id = event.source.user_id or ""
     resolved_sender = _resolve_phone_from_jid(sender_id)
@@ -9332,15 +9507,8 @@ def pre_gateway_dispatch(*args, **kwargs):
     is_owner = (_normalize_brazilian_phone(clean_sender) == _normalize_brazilian_phone(clean_owner))
     is_self_chat = (clean_sender == clean_chat) and is_owner
 
-    # Modalidade da mensagem do lead decide a modalidade da resposta. Eco do próprio bot
-    # não conta — senão a primeira nota de voz enviada travaria o chat em áudio.
-    # Transcrição que falhou não autoriza responder em áudio: o QA pede fallback em texto,
-    # e responder por voz um áudio que a IA não entendeu é o pior dos dois mundos.
-    if not _is_from_me:
-        _remember_inbound_modality(chat_id, audio_transcribed)
-
     # Gate de atendimento por contato. Importação/sync nunca cria atendimento;
-    # contatos legados existentes ficam desligados até habilitação explícita.
+    # contatos pessoais e fora de escopo são interrompidos antes de visão/ASR.
     _is_historical_event = bool(
         getattr(event, "is_historical", False)
         or _raw_msg.get("is_historical")
@@ -9351,6 +9519,8 @@ def pre_gateway_dispatch(*args, **kwargs):
             chat_id,
             sender_id,
             is_historical=_is_historical_event,
+            message_text=str(getattr(event, "text", "") or ""),
+            commercial_metadata=_external_lead_metadata,
         )
         if not ai_allowed:
             try:
@@ -9359,6 +9529,60 @@ def pre_gateway_dispatch(*args, **kwargs):
                 pass
             logger.info("[contact-policy] IA bloqueada chat=%r reason=%s", chat_id, ai_reason)
             return {"action": "skip", "reason": ai_reason}
+
+    # Processamento de mídia autorizado: áudio pelo Fish ASR, imagem pelos modelos de visão.
+    if media_info["has_media"] and media_info["media_urls"]:
+        media_type = media_info["media_type"]
+        logger.info(f"[sale-detect] mídia recebida: media_type={media_type!r} urls={media_info['media_urls']!r}")
+        # Detecção de comprovante de pagamento — roda ANTES de _process_media_message porque
+        # essa função apaga o arquivo físico assim que termina (privacidade: sem guardar mídia).
+        # Aqui só LEMOS o arquivo, sem apagar; quem apaga continua sendo o fluxo normal abaixo.
+        if media_type == "image":
+            image_analysis_attempted = True
+            try:
+                _caption_text = (getattr(event, "text", "") or "").strip()
+                sale_detection = _detect_and_extract_sale_from_image(media_info["media_urls"], _caption_text)
+                logger.info(f"[sale-detect] chamado para {media_info['media_urls']!r} — resultado: {sale_detection!r}")
+            except Exception as sale_detect_err:
+                logger.error(f"[sale-detect] Erro ao analisar imagem para comprovante: {sale_detect_err}")
+        if media_type in ["ptt", "audio", "image"]:
+            result_text = _process_media_message(event)
+            display_text = None
+            if result_text:
+                if media_type in ["ptt", "audio"]:
+                    audio_transcribed = True
+                    display_text = f'[Áudio: "{result_text}"]'
+                else:
+                    display_text = f'[Imagem: {result_text}]'
+            elif media_type in ["ptt", "audio"]:
+                # Sem transcrição, o agente recebia o marcador cru do bridge
+                # ("[audio received]") e tinha que adivinhar o que fazer com ele. Entregar a
+                # instrução explícita torna o fallback determinístico em vez de sorte.
+                display_text = AUDIO_FALLBACK_TEXT
+
+            if display_text:
+                event.text = display_text
+                if hasattr(event, "body"):
+                    event.body = display_text
+                for attr in ["raw", "raw_event", "payload", "data"]:
+                    if hasattr(event, attr):
+                        val = getattr(event, attr)
+                        if isinstance(val, dict):
+                            val["body"] = display_text
+                            val["text"] = display_text
+
+            # Só transcrição/descrição real vai para o histórico; a instrução de fallback
+            # é orientação de turno, não conteúdo da conversa.
+            if result_text:
+                db_path = Path("/opt/data/.hermes/whatsapp_messages.db")
+                if db_path.exists() and media_info["message_id"]:
+                    _persist_transcription_to_db(str(db_path), media_info["message_id"], display_text)
+
+    # Modalidade da mensagem do lead decide a modalidade da resposta. Eco do próprio bot
+    # não conta — senão a primeira nota de voz enviada travaria o chat em áudio.
+    # Transcrição que falhou não autoriza responder em áudio.
+    if not _is_from_me:
+        _remember_inbound_modality(chat_id, audio_transcribed)
 
     # Comprovante detectado — registra como pendente, acusa recebimento sem confirmar
     # pagamento/pedido e avisa o dono no self-chat.
