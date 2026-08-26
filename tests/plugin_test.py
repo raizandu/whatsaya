@@ -7356,6 +7356,34 @@ class TestPrepareContactReply(BaseWhatsAppManagerTest):
         self.assertNotIn("atendente comercial", folded)
         self.assertIn("commercial ai assistant", folded)
 
+    def test_sdr_em_portugues_nao_vira_ingles(self):
+        """QA 25/08: 'é a SDR' casou 'a SDR' e saiu 'commercial AI assistant'."""
+        import whatsapp_manager
+        out = whatsapp_manager._prepare_contact_reply(
+            "A AYA é a SDR de WhatsApp da WhatsAYA: atende leads 24h."
+        )
+        folded = whatsapp_manager._normalize_text(out)
+        self.assertNotIn("sdr", folded)
+        self.assertNotIn("commercial ai assistant", folded)
+        self.assertIn("atendente comercial", folded)
+
+    def test_rascunho_eu_responderia_nao_chega_ao_lead(self):
+        """QA 25/08 gráfica: persona do dono rascunhando no chat do lead."""
+        import whatsapp_manager
+        out = whatsapp_manager._prepare_contact_reply(
+            "Boa aderência. Eu responderia para esse lead:\n"
+            "Envie:\n"
+            "> Entendi.\n"
+            "> Perfeito — gráfica recebe muito orçamento pelo Instagram.\n"
+            "> Em média, quantas mensagens de orçamento chegam por dia?"
+        )
+        folded = whatsapp_manager._normalize_text(out)
+        self.assertNotIn("boa aderencia", folded)
+        self.assertNotIn("responderia", folded)
+        self.assertNotIn("envie:", folded)
+        self.assertIn("grafica", folded)
+        self.assertEqual(out.count("?"), 1)
+
 
 class TestTransformLlmOutput(BaseWhatsAppManagerTest):
     """Hook que envia bolhas e devolve whitespace para o Hermes não reenviar o bloco."""

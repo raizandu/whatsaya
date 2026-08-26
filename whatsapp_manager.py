@@ -1674,6 +1674,7 @@ def _split_human_bubbles(message: str) -> list[str]:
 
     cleaned = [re.sub(r"[ \t]+\n", "\n", p).strip() for p in exploded if p and p.strip()]
     cleaned = [re.sub(r"[ \t]{2,}", " ", p) for p in cleaned]
+    cleaned = [p for p in cleaned if not re.match(r"^\d+[.)]\s*$", p)]
 
     cap = _BUBBLE_CAP
     if len(cleaned) > cap:
@@ -13261,6 +13262,8 @@ _ONBOARDING_IMPL_STATEMENT_RE = re.compile(
     r"(?:voce|voces|a\s+gente)?\s*precisa(?:ria|mos|m)?\s+levantar|"
     r"precisamos\s+levantar|"
     r"levantar\s+procedimentos|"
+    r"diagnostico\s+rapido|"
+    r"passa\s+servico|"
     r"fluxo-?base|"
     r"monto\s+um\s+fluxo|"
     r"montar\s+(?:essa\s+|um\s+)?(?:logica|fluxo)"
@@ -13455,6 +13458,8 @@ def _enforce_unsolicited_hours_gate(response_text: str, *, user_message: str) ->
 # restaurada no core, o enquadramento é removido deterministicamente na saída.
 _DRAFT_LABEL_RE = re.compile(
     r"^[>\s*_~\"'“”-]*(?:resposta\s+sugerida|sugest[aã]o\s+de\s+resposta|"
+    r"eu\s+responderia(?:\s+para\s+esse\s+lead)?|"
+    r"boa\s+ader[eê]ncia|"
     r"suggested\s+(?:reply|response)|draft\s+(?:reply|response)|"
     r"respuesta\s+sugerida|sugerencia\s+de\s+respuesta)"
     # Depois do rótulo só se consomem decorações (*_~) e espaço — aspas ficam,
@@ -13462,11 +13467,17 @@ _DRAFT_LABEL_RE = re.compile(
     r"[^:\n]{0,40}:[\s*_~]*",
     re.IGNORECASE,
 )
+_DRAFT_COACH_LINE_RE = re.compile(
+    r"^[>\s*_~\"'“”-]*(?:resposta\s+sugerida|sugest[aã]o\s+de\s+resposta|"
+    r"eu\s+responderia|boa\s+ader[eê]ncia|envie\s*:|"
+    r"suggested\s+(?:reply|response)|draft\s+(?:reply|response))",
+    re.IGNORECASE,
+)
 _DRAFT_QUOTE_PAIRS = (('"', '"'), ("“", "”"), ("'", "'"), ("«", "»"))
 
 
 def _strip_assistant_draft_framing(text: str) -> str:
-    """Remove o enquadramento de rascunho do início da resposta ao lead."""
+    """Remove o enquadramento de rascunho do início e das linhas do bloco."""
     value = str(text or "").lstrip()
     stripped = False
     for _ in range(2):
@@ -13475,6 +13486,22 @@ def _strip_assistant_draft_framing(text: str) -> str:
             break
         value = value[match.end():].lstrip()
         stripped = True
+    kept: list[str] = []
+    for line in value.splitlines():
+        raw = line.strip()
+        if not raw:
+            if kept and kept[-1] != "":
+                kept.append("")
+            continue
+        if _DRAFT_COACH_LINE_RE.match(raw):
+            stripped = True
+            continue
+        if raw.startswith(">"):
+            raw = raw.lstrip("> ").strip()
+            stripped = True
+        if raw:
+            kept.append(raw)
+    value = "\n".join(kept).strip()
     if not stripped:
         return str(text or "")
     for abre, fecha in _DRAFT_QUOTE_PAIRS:
@@ -13483,7 +13510,7 @@ def _strip_assistant_draft_framing(text: str) -> str:
             if abre not in inner and fecha not in inner:
                 value = inner
             break
-    logger.warning("[contact-reply] enquadramento de rascunho removido do início da resposta")
+    logger.warning("[contact-reply] enquadramento de rascunho removido")
     return value
 
 
@@ -13496,7 +13523,7 @@ _SDR_REWRITE = (
      "commercial AI assistant"),
     (re.compile(r"SDR\s+de\s+WhatsAYA", re.IGNORECASE),
      "atendente comercial con IA"),
-    (re.compile(r"\ban?\s+SDR\b", re.IGNORECASE), "a commercial AI assistant"),
+    (re.compile(r"\ban\s+SDR\b", re.IGNORECASE), "a commercial AI assistant"),
     (re.compile(r"\bun[ae]?\s+SDR\b", re.IGNORECASE), "una atendente comercial con IA"),
     (re.compile(r"\bSDR\b", re.IGNORECASE), "atendente comercial com IA"),
 )
@@ -13533,6 +13560,14 @@ def _rewrite_sdr_self_presentation(text: str) -> str:
     rewritten = value
     for pattern, repl in _SDR_REWRITE:
         rewritten = pattern.sub(repl, rewritten)
+    # "é a SDR" em pt casa "a SDR" se o padrão inglês for `an?`; não misturar idioma.
+    if re.search(r"\bé a commercial AI assistant\b", rewritten, re.IGNORECASE):
+        rewritten = re.sub(
+            r"commercial AI assistant",
+            "atendente comercial com IA",
+            rewritten,
+            flags=re.IGNORECASE,
+        )
     if rewritten != value:
         logger.warning("[contact-reply] apresentação SDR reescrita")
     return rewritten
