@@ -6858,11 +6858,9 @@ def _ensure_contact_ai_access(
     if is_historical:
         return False, "historical-import"
 
-    # Bloqueio manual do dono tem prioridade sobre qualquer outra regra do gate —
-    # sem isso um contato marcado como bloqueado ainda gerava chamada ao LLM (e
-    # gastava a quota do provider) enquanto o gate só olhava legado/novo lead.
-    if _is_contact_blocked(chat_id):
-        return False, "owner-blocked"
+    # Continua fail-closed, mas a política pessoal ainda é consolidada no JSON para
+    # que um futuro desbloqueio não ressuscite flags antigas de IA/fluxo.
+    owner_blocked = _is_contact_blocked(chat_id)
 
     with _CONTACT_AI_POLICY_LOCK:
         contacts: dict = {}
@@ -6873,6 +6871,8 @@ def _ensure_contact_ai_access(
                     raise ValueError("personal_contacts.json não contém objeto")
                 contacts = raw
             except (OSError, json.JSONDecodeError, ValueError) as exc:
+                if owner_blocked:
+                    return False, "owner-blocked"
                 logger.error("[contact-policy] Falha ao ler política; bloqueando IA: %s", exc)
                 return False, "contact-policy-unavailable"
 
@@ -6898,6 +6898,9 @@ def _ensure_contact_ai_access(
                         logger.error("[contact-policy] Falha ao desligar contato pessoal: %s", exc)
                         return False, "contact-policy-write-failed"
                 return False, "personal-contact"
+
+            if owner_blocked:
+                return False, "owner-blocked"
 
             # A policy v1 marcou todo desconhecido como lead. Revalida esses registros
             # usando somente metadata estruturada e texto inbound local; respostas da
@@ -6986,6 +6989,8 @@ def _ensure_contact_ai_access(
             enabled = record.get("ai_enabled") is True and record.get("in_flow") is not False
             return enabled, "explicit-flow" if enabled else "legacy-contact-disabled"
 
+        if owner_blocked:
+            return False, "owner-blocked"
         key = _canonical_new_contact_key(chat_id, sender_id)
         if not key:
             return False, "contact-identity-uncertain"

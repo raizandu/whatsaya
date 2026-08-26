@@ -3803,6 +3803,28 @@ class TestContactAiAccess(unittest.TestCase):
         self.assertIs(row["in_flow"], False)
         self.assertEqual(row["ai_disabled_reason"], "personal_contact")
 
+    @patch("whatsapp_manager._is_contact_blocked", return_value=True)
+    def test_blocked_personal_contact_consolidates_disabled_flags(self, blocked):
+        jid = "5511666666665@s.whatsapp.net"
+        self._write({
+            jid: {
+                "relationship": "Parente",
+                "ai_enabled": True,
+                "in_flow": True,
+                "flow_origin": "new_live_inbound",
+                "ai_policy_version": 1,
+            },
+        })
+
+        allowed, reason = whatsapp_manager._ensure_contact_ai_access(jid, jid)
+
+        self.assertFalse(allowed)
+        self.assertEqual(reason, "personal-contact")
+        row = self._read()[jid]
+        self.assertIs(row["ai_enabled"], False)
+        self.assertIs(row["in_flow"], False)
+        blocked.assert_called_once_with(jid)
+
     @patch("whatsapp_manager._recent_inbound_has_commercial_scope", return_value=False)
     def test_old_auto_admitted_cliente_without_commercial_evidence_is_paused(self, recent_scope):
         jid = "5511655555555@s.whatsapp.net"
