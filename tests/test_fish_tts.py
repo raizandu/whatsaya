@@ -106,6 +106,12 @@ class TestFishCues(unittest.TestCase):
         self.assertIn("Sim, respondi aqui.", out)
         self.assertIn("Ah, entendi.", out)
 
+    def test_strip_cue_with_inner_space(self):
+        out = self.fish.strip_fish_cues("[ curious] Quer que eu te coloque nesses 15 minutos?")
+        self.assertNotIn("[ curious]", out)
+        self.assertNotIn("[curious]", out)
+        self.assertTrue(out.startswith("Quer que eu"))
+
     def test_default_cue_when_missing(self):
         out = self.fish.prepare_spoken_for_tts("Oi, tudo bem?")
         self.assertTrue(out.startswith("[warm and friendly]"))

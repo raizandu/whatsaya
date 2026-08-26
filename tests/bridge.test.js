@@ -33,6 +33,7 @@ const {
   runSelfDiagnostics,
   clearRecentlyProcessedIds,
   stripExecLines,
+  stripFishCues,
 } = await import('../bridge.js');
 
 // Setup Mock Socket
@@ -494,6 +495,8 @@ test('WhatsApp Bridge Regression Tests', async (t) => {
   await t.test('13. isSystemError filter should catch technical/system messages and allow normal client messages', () => {
     // Blocked system/error messages
     assert.ok(isSystemError('💾 Self-improvement review: Memory updated'), 'Should block memory updates');
+    assert.ok(isSystemError('💾 Self-improvement review: User profile updated'), 'Should block user profile updates');
+    assert.ok(isSystemError('Self-improvement review: User profile updated'), 'Should block profile status even without emoji');
     assert.ok(isSystemError('💾 Memory updated'), 'Should block memory updates');
     assert.ok(isSystemError('❌ Rate limited after 3 retries — HTTP 402: This request requires more credits, or fewer max_tokens. You requested up to 65536 tokens, but can only afford 64850. To increase, visit https://openrouter.ai/settings/credits and add more credits'), 'Should block OpenRouter credit errors');
     assert.ok(isSystemError('⏱️ Rate limited. Waiting 2.3s (attempt 2/3)...'), 'Should block rate limit alerts');
@@ -673,14 +676,20 @@ test('WhatsApp Bridge Regression Tests', async (t) => {
     assert.ok(isSystemError('Failed to generate output because connection failed'), 'Should catch failed to generate / connection failed');
     assert.ok(isSystemError('{"status":"error","message":"crashed"}'), 'Should catch JSON error status');
     assert.ok(isSystemError("⚠️ Compression model MiniMax-M2.7 (api.minimax.io) context is 204,800 tokens, but the main model gemini-3.5-flash (gemini)'s compression threshold was 524,288 tokens. Auto-lowered this session's threshold to 204,800 tokens so compression can run."), 'Should block compression context warning leaks');
+    assert.ok(isSystemError('ℹ Codex gpt-5.6-luna caps context at 900K, so auto-compaction was raised to 85% (from 50%) to use more of the window before summarizing.\n  Opt back out: hermes config set compression.codex_gpt55_autoraise false'), 'Should block Codex autoraise notice');
     assert.ok(isSystemError("⏳ Still working... (3 min elapsed — iteration 31/60, waiting for provider response (streaming))"), 'Should block provider wait loops');
     assert.ok(isSystemError("waiting for provider response"), 'Should block waiting for provider message');
     assert.ok(isSystemError("⚠️ Iteration budget exhausted (60/60) — asking model to summarise"), 'Should block iteration budget alerts');
     assert.ok(isSystemError("asking model to summarise"), 'Should block summarization request messages');
+    assert.ok(isSystemError("⚡ Interrupting current task (iteration 1/60). I'll respond to your message shortly."), 'Should block interrupt ack');
+    assert.ok(isSystemError("⏳ Working — 6 min — iteration 1/60"), 'Should block working heartbeat');
+    assert.ok(isSystemError("⏳ Queued for the next turn (iteration 1/60). I'll respond once the current task finishes."), 'Should block queue ack');
+    assert.ok(isSystemError("⏳ Subagent working — your message is queued for when it finishes"), 'Should block subagent busy ack');
 
     // Normal questions or sentences
     assert.ok(!isSystemError('Como resolver o problema de conexão?'), 'Should allow Portuguese question about connection');
     assert.ok(!isSystemError('Esta taxa limite é mensal ou anual?'), 'Should allow credit/rate related discussion');
+    assert.ok(!isSystemError('Para personalizar a proposta em PDF, qual é seu nome completo?'), 'Should allow commercial PDF question');
   });
 
   await t.test('19. loadEnv should parse .env files correctly', () => {
@@ -757,6 +766,13 @@ test('WhatsApp Bridge Regression Tests', async (t) => {
       globalThis.fetch = originalFetch;
       process.env = originalEnv;
     }
+  });
+
+  await t.test('21a. stripFishCues should drop intonation tags from outgoing text', () => {
+    const out = stripFishCues('[confident] Sim, respondi aqui.\n\n[empathetic] Ah, entendi.');
+    assert.ok(!out.includes('[confident]'));
+    assert.ok(!out.includes('[empathetic]'));
+    assert.ok(out.includes('Sim, respondi aqui.'));
   });
 
   await t.test('21. stripExecLines should remove EXEC: command lines from outgoing messages', () => {

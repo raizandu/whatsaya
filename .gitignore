@@ -3,8 +3,6 @@
 *.log
 .hermes/
 node_modules/
-package-lock.json
 /tmp/
 __pycache__/
 *.pyc
-

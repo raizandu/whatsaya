@@ -1,7 +1,9 @@
 {
   "type": "module",
   "scripts": {
-    "test": "node --test --test-force-exit tests/bridge.test.js tests/bridge_campaign_metadata.test.js && python3 -m unittest tests/plugin_test.py tests/test_aya_market_rules.py"
+    "test": "npm run test:node && npm run test:python",
+    "test:node": "node --test --test-force-exit tests/bridge.test.js tests/bridge_campaign_metadata.test.js",
+    "test:python": "python3 -m unittest discover -s tests -p '*test*.py'"
   },
   "dependencies": {
     "@hapi/boom": "^10.0.1",

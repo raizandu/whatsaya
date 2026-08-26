@@ -38,6 +38,8 @@ def _load_plugin():
 print("Carregando plugin...", end=" ", flush=True)
 try:
     wm = _load_plugin()
+    if hasattr(wm, "_HUMAN_DELIVER_SYNC"):
+        wm._HUMAN_DELIVER_SYNC = True
     print("OK\n")
 except Exception as e:
     print(f"ERRO: {e}")

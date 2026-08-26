@@ -32,6 +32,14 @@ class MockContext:
 class BaseWhatsAppManagerTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.ctx = MockContext()
+        self.followup_tmp = tempfile.TemporaryDirectory()
+        self.followup_db_patcher = patch.object(
+            whatsapp_manager,
+            "_FOLLOWUP_DB_PATH",
+            Path(self.followup_tmp.name) / "commercial_followups.db",
+        )
+        self.followup_db_patcher.start()
+        whatsapp_manager._FOLLOWUP_ENGINE = None
         self.env_patcher = patch.dict(os.environ, {
             "WHATSAPP_OWNER_NUMBER": "5511999999999",
             # O nome do dono deixou de ser fixo no código e agora vem daqui. Os testes que
@@ -67,6 +75,9 @@ class BaseWhatsAppManagerTest(unittest.IsolatedAsyncioTestCase):
             register(self.ctx)
 
     def tearDown(self):
+        whatsapp_manager._FOLLOWUP_ENGINE = None
+        self.followup_db_patcher.stop()
+        self.followup_tmp.cleanup()
         self.ai_access_patcher.stop()
         self.env_patcher.stop()
 

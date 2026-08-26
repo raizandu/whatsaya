@@ -57,8 +57,17 @@ class FollowupPluginIntegrationTest(unittest.TestCase):
         policy_path.write_text("{}", encoding="utf-8")
         self._policy_patch = patch.object(wm, "_PERSONAL_CONTACTS_PATH", policy_path)
         self._policy_patch.start()
+        self._followup_db_patch = patch.object(
+            wm,
+            "_FOLLOWUP_DB_PATH",
+            Path(self._policy_tmp.name) / "commercial_followups.db",
+        )
+        self._followup_db_patch.start()
+        wm._FOLLOWUP_ENGINE = None
 
     def tearDown(self):
+        wm._FOLLOWUP_ENGINE = None
+        self._followup_db_patch.stop()
         self._policy_patch.stop()
         self._policy_tmp.cleanup()
 
@@ -156,6 +165,7 @@ class FollowupPluginIntegrationTest(unittest.TestCase):
         gateway = MagicMock()
         with patch.dict(wm.os.environ, {"WHATSAPP_OWNER_NUMBER": "5511999999999"}), \
              patch.object(wm, "_followup_note_activity") as note, \
+             patch.object(wm, "_ensure_contact_ai_access", return_value=(True, "explicit-flow")), \
              patch.object(wm, "_check_bot_paused", return_value=True):
             result = wm.pre_gateway_dispatch("pre_gateway_dispatch", {"event": event, "gateway": gateway})
         self.assertEqual(result, {"action": "skip", "reason": "bot-pausado"})
