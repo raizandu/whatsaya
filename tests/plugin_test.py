@@ -2087,16 +2087,14 @@ class TestUtilityFunctionsAndLogs(BaseWhatsAppManagerTest):
         """Verifica que _persist_transcription_to_db lança thread e retenta se retorno for 0."""
         import whatsapp_manager
         mock_update.side_effect = [0, 1]
-        
-        with patch("time.sleep") as mock_sleep:
+
+        with patch("threading.Thread") as mock_thread, patch("time.sleep") as mock_sleep:
             whatsapp_manager._persist_transcription_to_db("/dummy.db", "msg123", "body")
-            
-            import time
-            for _ in range(20):
-                if mock_update.call_count >= 2:
-                    break
-                time.sleep(0.01)
-                
+
+            mock_thread.assert_called_once()
+            retry_target = mock_thread.call_args.kwargs["target"]
+            retry_target()
+
             self.assertEqual(mock_update.call_count, 2)
             mock_sleep.assert_any_call(1)
 
