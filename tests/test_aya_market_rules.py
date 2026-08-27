@@ -29,6 +29,13 @@ class TestAyaMarketRules(unittest.TestCase):
         self.assertIn('_plugin_bootstrap_url("support_rules.md")', PLUGIN_SOURCE)
         self.assertIn('_plugin_bootstrap_url("SOUL_EMAIL.md")', PLUGIN_SOURCE)
 
+    def test_runtime_routes_external_whatsapp_sessions_to_aya_profile(self):
+        self.assertIn("gateway_cfg['multiplex_profiles'] = True", COMPOSE)
+        self.assertIn("gateway_cfg['multiplex_profile_allowlist'] = ['whatsapp']", COMPOSE)
+        self.assertIn("'name': 'whatsapp-clients'", COMPOSE)
+        self.assertIn("'platform': 'whatsapp'", COMPOSE)
+        self.assertIn("'profile': 'whatsapp'", COMPOSE)
+
     def test_united_states_is_confirmed_without_advertising_spanish(self):
         """EUA é mercado confirmado; espanhol não entra como idioma da oferta."""
         normalized = RULES.lower()

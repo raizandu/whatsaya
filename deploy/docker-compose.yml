@@ -316,6 +316,26 @@ services:
             cfg['session_reset'] = {'notify_user': False}
             gateway_cfg = cfg.get('gateway') if isinstance(cfg.get('gateway'), dict) else {}
             gateway_cfg['delivery_ledger'] = False
+            # Um único gateway atende o self-chat do dono e os leads, mas cada
+            # conversa roda com a persona do seu perfil. Sem multiplex, todos os
+            # contatos herdavam o SOUL operacional do dono.
+            gateway_cfg['multiplex_profiles'] = True
+            gateway_cfg['multiplex_profile_allowlist'] = ['whatsapp']
+            profile_routes = [
+                {
+                    'name': 'whatsapp-clients',
+                    'platform': 'whatsapp',
+                    'profile': 'whatsapp',
+                },
+            ]
+            if owner_jid:
+                profile_routes.insert(0, {
+                    'name': 'whatsapp-owner-self-chat',
+                    'platform': 'whatsapp',
+                    'chat_id': owner_jid + '@s.whatsapp.net',
+                    'profile': 'default',
+                })
+            gateway_cfg['profile_routes'] = profile_routes
             cfg['gateway'] = gateway_cfg
             compression = cfg.get('compression') if isinstance(cfg.get('compression'), dict) else {}
             compression['codex_gpt55_autoraise_notice'] = False
@@ -633,6 +653,9 @@ services:
 
       # Gateway
       - GATEWAY_ALLOW_ALL_USERS=${GATEWAY_ALLOW_ALL_USERS:-false}
+      # O core dá precedência à env sobre YAML persistido. Assim o isolamento de
+      # persona continua ligado mesmo após upgrade ou configuração antiga.
+      - GATEWAY_MULTIPLEX_PROFILES=true
 
       # API REST — API_SERVER_KEY é indispensável (sem default)
       - API_SERVER_ENABLED=true

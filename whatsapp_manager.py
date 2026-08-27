@@ -11042,8 +11042,18 @@ def pre_gateway_dispatch(*args, **kwargs):
                 event.body = merged
             logger.info(f"[inbound-buf] juntou {buf_chat!r}: {merged[:120]!r}")
 
-    # Roteamento Dinâmico de Modelos (Dono vs Clientes)
+    # Roteamento Dinâmico de Perfil + Modelo (Dono vs Clientes). No Hermes
+    # atual o perfil pertence ao SessionSource e entra no session_key; o antigo
+    # `_session_profile_overrides` não existe. Portanto o source precisa ser
+    # carimbado ANTES de calcular a chave da sessão.
     try:
+        target_profile = "default" if (is_owner and is_self_chat) else "whatsapp"
+        event.source.profile = target_profile
+        if isinstance(context, dict):
+            context["profile"] = target_profile
+        if hasattr(event, "profile"):
+            event.profile = target_profile
+
         session_key = gateway._session_key_for_source(event.source)
         if session_key:
             # Garantir que post_llm_call consiga resolver chat_id pelo session_id
@@ -11054,26 +11064,16 @@ def pre_gateway_dispatch(*args, **kwargs):
             client_model = config.whatsapp_client_model
             client_provider = config.whatsapp_client_provider
             
-            target_profile = "default" if (is_owner and is_self_chat) else "whatsapp"
-            if isinstance(context, dict):
-                context["profile"] = target_profile
-            if hasattr(event, "profile"):
-                event.profile = target_profile
-
             if is_owner:
                 gateway._session_model_overrides[session_key] = {
                     "model": owner_model,
                     "provider": owner_provider
                 }
-                if hasattr(gateway, "_session_profile_overrides") and isinstance(gateway._session_profile_overrides, dict):
-                    gateway._session_profile_overrides[session_key] = "default"
             else:
                 gateway._session_model_overrides[session_key] = {
                     "model": client_model,
                     "provider": client_provider
                 }
-                if hasattr(gateway, "_session_profile_overrides") and isinstance(gateway._session_profile_overrides, dict):
-                    gateway._session_profile_overrides[session_key] = "whatsapp"
     except Exception as e:
         logger.error(f"Erro ao aplicar override de modelo: {e}")
 
@@ -11784,6 +11784,26 @@ _INTERNAL_QA_OBSERVATION_RE = re.compile(
     r")",
     re.IGNORECASE,
 )
+# Colisão de persona: o perfil operacional do dono pode falar SOBRE a AYA em vez
+# de responder COMO a AYA. Estas formas vieram literalmente de uma sessão de lead.
+_INTERNAL_ROLE_LEAK_PATTERNS = (
+    r"^\s*ponto\s+de\s+aten[cç][aã]o\s*:",
+    r"^\s*(?:sim\s*[,—–-]?\s*)?erro\s+(?:bem\s+)?claro\s+d[ao]\s+AYA\b",
+    r"^\s*(?:a\s+)?corre[cç][aã]o\s+(?:para|pra)\s+enviar\s+ao\s+lead\b",
+    r"^\s*regra\s+(?:a|para)\s+(?:refor[cç]ar|corrigir|ajustar)\b",
+    r"^\s*antes\s+de\s+perguntar\s+ou\s+explicar\s+pre[cç]o\b",
+    r"^\s*ela(?:\s+pode)?\s*:\s*$",
+)
+_INTERNAL_ROLE_LEAK_RE = re.compile(
+    "(?:" + "|".join(_INTERNAL_ROLE_LEAK_PATTERNS) + ")",
+    re.IGNORECASE | re.MULTILINE,
+)
+_INTERNAL_ROLE_AUTOANALYSIS_RE = re.compile(
+    r"(?:erro\s+(?:bem\s+)?claro\s+d[ao]\s+AYA|"
+    r"corre[cç][aã]o\s+(?:para|pra)\s+enviar\s+ao\s+lead|"
+    r"regra\s+(?:a|para)\s+(?:refor[cç]ar|corrigir|ajustar))",
+    re.IGNORECASE,
+)
 # Prompt Mestre §17 — vazamento técnico/interno (filtro por linha).
 _INTERNAL_LEAK_PATTERNS = [
     r"self[- \u2010-\u2015]?improvement",
@@ -11840,6 +11860,7 @@ _INTERNAL_LEAK_PATTERNS = [
     r"\b(?:regra|pol[ií]tica|l[oó]gica|instru[cç][aã]o)\s+(?:interna|de\s+aprova[cç][aã]o|do\s+prompt)\b",
     r"\b(?:regla|pol[ií]tica|l[oó]gica|instrucci[oó]n)\s+(?:interna|de\s+aprobaci[oó]n|del\s+prompt)\b",
     r"\b(?:internal\s+(?:rule|policy|approval|authorization|instruction)|prompt\s+logic)\b",
+    *_INTERNAL_ROLE_LEAK_PATTERNS,
 ]
 _SYSTEM_STATUS_RE = re.compile(
     r"self[- \u2010-\u2015]?improvement|"
@@ -12352,6 +12373,10 @@ _BUSINESS_CONTEXT_RE = re.compile(
     r"\b(?:clinica|consultorio|empresa|atendo|atendemos|clientes|pacientes|"
     r"secretaria|procedimento|agenda|leads?|whatsapp)\b"
 )
+_EXPLICIT_BUSINESS_NICHE_RE = re.compile(
+    r"\b(?:clinica|consultorio|dentist|odontolog|psicoterapeut|psicolog|salao|"
+    r"escritorio|advogad|direito|juridic|tributar|contabil|contabilidade)\w*\b"
+)
 _CURRENT_BUSINESS_CONTEXT_RE = re.compile(
     r"\b(?:clinica|consultorio|dentist|odontolog|psicoterapeut|psicolog|salao|"
     r"escritorio|advogad|contabil|contabilidade|pacientes|secretaria|procedimento|"
@@ -12370,6 +12395,11 @@ def _lead_described_operation(lead_msgs: list[str]) -> bool:
         ):
             continue
         folded = _normalize_text(msg)
+        # Nicho explícito já é contexto, mesmo numa frase curta como
+        # "Tenho um escritório de direito tributário". O limiar antigo servia
+        # apenas para descrições genéricas e apagava justamente esse caso.
+        if _EXPLICIT_BUSINESS_NICHE_RE.search(folded):
+            return True
         if len(folded) >= 40 and _BUSINESS_CONTEXT_RE.search(folded):
             return True
     return False
@@ -13530,7 +13560,15 @@ def _enforce_aya_payment_output_gate(
             price_history = _fetch_chat_history(chat_id, limit=40) if chat_id else ""
         except Exception:
             price_history = ""
-        _from_me, price_lead_messages = _history_from_me_and_lead(price_history)
+        lead_names = tuple(
+            str(turn_contact.get(field) or "")
+            for field in ("name", "nickname", "pet_name")
+            if str(turn_contact.get(field) or "").strip()
+        )
+        _from_me, price_lead_messages = _history_from_me_and_lead(
+            price_history,
+            lead_names=lead_names,
+        )
         price_is_objection = _is_price_objection(user_message)
         operation_described = (
             _lead_described_operation(price_lead_messages)
@@ -14257,6 +14295,76 @@ def _finalize_stripped_reply(restante: str, *, fallback: str) -> str:
     return str(fallback or "").strip()
 
 
+_ROLE_LEAK_CONTEXT_COMPLAINT_RE = re.compile(
+    r"\b(?:aqui\s+eu\s+ja\s+falei|eu\s+ja\s+(?:falei|disse|informei)|"
+    r"ja\s+te\s+(?:falei|disse|informei)|voce\s+ja\s+perguntou|"
+    r"como\s+eu\s+disse)\b"
+)
+_ROLE_LEAK_CONTEXT_RECOVERY = {
+    "pt": (
+        "Você tem razão, eu já tenho esse contexto e vou seguir considerando o "
+        "que você contou. O que você quer entender agora pra decidir?"
+    ),
+    "en": (
+        "You're right, I already have that context and will keep using what you "
+        "shared. What would you like to understand now to decide?"
+    ),
+    "es": (
+        "Tienes razón, ya tengo ese contexto y voy a considerar lo que me contaste. "
+        "¿Qué quieres entender ahora para decidir?"
+    ),
+}
+_ROLE_LEAK_DISCOVERY_QUESTION = {
+    "pt": "Como o WhatsApp é atendido hoje?",
+    "en": "How is WhatsApp handled today?",
+    "es": "¿Cómo atienden WhatsApp hoy?",
+}
+
+
+def _enforce_internal_role_output_gate(
+    response_text: str,
+    *,
+    user_message: str,
+    contact_info: dict | None = None,
+) -> str:
+    """Remove autoanálise do papel operacional e recupera a conversa comercial."""
+    text = str(response_text or "")
+    if not text or not _INTERNAL_ROLE_LEAK_RE.search(text):
+        return text
+
+    language = _payment_gate_language(user_message, contact_info or {})
+    stripped = _strip_internal_leak_lines(text)
+    safe = _salvage_complete_reply_text(stripped)
+    normalized_inbound = _normalize_text(user_message)
+    if _ROLE_LEAK_CONTEXT_COMPLAINT_RE.search(normalized_inbound):
+        final = (
+            _ROLE_LEAK_CONTEXT_RECOVERY.get(language)
+            or _ROLE_LEAK_CONTEXT_RECOVERY["pt"]
+        )
+    elif _INTERNAL_ROLE_AUTOANALYSIS_RE.search(text):
+        # Autoavaliação costuma vir em bullets aparentemente completos
+        # ("ignorou o contexto", "repetiu a pergunta"). Não tentar reaproveitar
+        # nenhum trecho desse bloco.
+        final = _HOURS_GATE_FALLBACK.get(language) or _HOURS_GATE_FALLBACK["pt"]
+    elif safe:
+        final = safe
+        if not final.rstrip().endswith("?"):
+            question = (
+                _ROLE_LEAK_DISCOVERY_QUESTION.get(language)
+                or _ROLE_LEAK_DISCOVERY_QUESTION["pt"]
+            )
+            final = f"{final} {question}"
+    else:
+        final = _HOURS_GATE_FALLBACK.get(language) or _HOURS_GATE_FALLBACK["pt"]
+
+    logger.error(
+        "[role-output-gate] metalinguagem interna substituída; entrada=%d saída=%d",
+        len(text),
+        len(final),
+    )
+    return final
+
+
 def _enforce_unsolicited_hours_gate(response_text: str, *, user_message: str) -> str:
     """Horário de escritório/Goiânia não vai ao lead a menos que ele pergunte."""
     text = str(response_text or "")
@@ -14289,13 +14397,9 @@ def _enforce_unsolicited_hours_gate(response_text: str, *, user_message: str) ->
     return final
 
 
-# A persona default do dono às vezes responde como assistente RASCUNHANDO uma
-# resposta ("Resposta sugerida:") em vez de falar como a AYA — o core 0.20.5 não
-# tem mais o override de perfil por sessão que aplicaria a persona de cliente
-# (gateway._session_profile_overrides não existe; o hasattr do plugin pula em
-# silêncio). No QA de 24/08 o rótulo saiu como primeira bolha para o lead, e em
-# 19/08 a resposta inteira foi entregue entre aspas. Até a camada de perfil ser
-# restaurada no core, o enquadramento é removido deterministicamente na saída.
+# Defesa em profundidade: mesmo com o perfil comercial roteado por
+# SessionSource.profile, nenhum rótulo de rascunho pode chegar ao lead. No QA de
+# 24/08 ele saiu como primeira bolha e, em 19/08, a resposta veio entre aspas.
 _DRAFT_LABEL_RE = re.compile(
     r"^[>\s*_~\"'“”-]*(?:resposta\s+sugerida|sugest[aã]o\s+de\s+resposta|"
     r"resposta\s+que\s+(?:a\s+)?AYA\s+pode\s+enviar|"
@@ -14809,6 +14913,11 @@ def transform_llm_output(*args, **kwargs):
         try:
             contact_info = _contact_record_for_chat(chat_id)
             _soul, payment_rules = _load_support_files()
+            response_text = _enforce_internal_role_output_gate(
+                str(response_text),
+                user_message=current_inbound,
+                contact_info=contact_info,
+            )
             response_text = _enforce_aya_opening_output_gate(
                 str(response_text),
                 user_message=current_inbound,

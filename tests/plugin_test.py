@@ -83,6 +83,53 @@ class BaseWhatsAppManagerTest(unittest.IsolatedAsyncioTestCase):
 
 
 class TestMessageRoutingAndDispatch(BaseWhatsAppManagerTest):
+    def test_client_profile_is_stamped_before_session_key_without_legacy_override(self):
+        """Core 0.20.5 routes profiles through SessionSource.profile.
+
+        A fake ``_session_profile_overrides`` made the old test green even though
+        that attribute does not exist in production.
+        """
+        from types import SimpleNamespace
+
+        pre_dispatch = self.ctx.hooks.get("pre_gateway_dispatch")
+        event = MagicMock()
+        event.source = SimpleNamespace(
+            platform="whatsapp",
+            user_id="5511888888888@s.whatsapp.net",
+            chat_id="5511888888888@s.whatsapp.net",
+            profile=None,
+        )
+        event.text = "Quero entender como a AYA funciona"
+        event.raw = {}
+        event.raw_message = {}
+        event.is_historical = False
+        event.has_media = False
+
+        class RealisticGateway:
+            def __init__(self):
+                self._session_model_overrides = {}
+                self.profile_seen_by_session_key = None
+
+            def _session_key_for_source(self, source):
+                self.profile_seen_by_session_key = source.profile
+                return "whatsapp:session-client"
+
+        gateway = RealisticGateway()
+        with patch("whatsapp_manager._check_bot_paused", return_value=False), patch(
+            "whatsapp_manager._check_chat_silenced", return_value=False
+        ):
+            result = pre_dispatch(
+                "pre_gateway_dispatch", {"event": event, "gateway": gateway}
+            )
+
+        self.assertIsNone(result)
+        self.assertEqual(event.source.profile, "whatsapp")
+        self.assertEqual(gateway.profile_seen_by_session_key, "whatsapp")
+        self.assertEqual(
+            gateway._session_model_overrides["whatsapp:session-client"]["model"],
+            "gemini-3.5-flash-client",
+        )
+
     def test_owner_message_identification(self):
         pre_dispatch = self.ctx.hooks.get("pre_gateway_dispatch")
         self.assertIsNotNone(pre_dispatch)
@@ -7572,6 +7619,42 @@ class TestPrepareContactReply(BaseWhatsAppManagerTest):
         self.assertEqual(whatsapp_manager._prepare_contact_reply(text), "Suave.")
         self.assertTrue(whatsapp_manager.isSystemError(text.split("\n\n")[1]))
 
+    def test_incident_legal_internal_note_and_orphan_heading_are_removed(self):
+        text = (
+            "Para escritório de direito tributário, a AYA pode atender a entrada "
+            "de novos casos no WhatsApp e separar o que realmente vale sua análise.\n\n"
+            "Ela pode:\n\n"
+            "Ponto de atenção: para jurídico, o roteiro precisa ser bem restritivo, "
+            "nada de orientação jurídica personalizada, tese aplicável ou promessa "
+            "de êxito. A AYA qualifica e encaminha."
+        )
+        out = whatsapp_manager._prepare_contact_reply(text)
+        folded = whatsapp_manager._normalize_text(out)
+
+        self.assertIn("escritorio de direito tributario", folded)
+        self.assertNotIn("ponto de atencao", folded)
+        self.assertNotIn("roteiro precisa", folded)
+        self.assertNotRegex(folded, r"ela pode\s*:\s*$")
+
+    def test_incident_legal_note_recovers_as_commercial_question(self):
+        text = (
+            "Para escritório de direito tributário, a AYA organiza a entrada de "
+            "novos casos no WhatsApp.\n\n"
+            "Ela pode:\n\n"
+            "Ponto de atenção: para jurídico, o roteiro precisa ser restritivo."
+        )
+        out = whatsapp_manager._enforce_internal_role_output_gate(
+            text,
+            user_message="Tenho um escritório de direito tributário",
+            contact_info={"language": "pt"},
+        )
+        folded = whatsapp_manager._normalize_text(out)
+
+        self.assertIn("escritorio de direito tributario", folded)
+        self.assertNotIn("ponto de atencao", folded)
+        self.assertNotIn("ela pode", folded)
+        self.assertTrue(out.rstrip().endswith("?"), out)
+
     def test_normal_commercial_testing_language_is_preserved(self):
         import whatsapp_manager
         text = "A gente testa o fluxo antes de colocar em produção. Quer ver uma demonstração?"
@@ -8016,6 +8099,46 @@ class TestTransformLlmOutput(BaseWhatsAppManagerTest):
             "Suave.",
             automation=True,
         )
+
+    @patch("whatsapp_manager._human_send")
+    def test_autoanalysis_incident_is_replaced_by_commercial_recovery(self, mock_send):
+        session = "5511888888888@s.whatsapp.net"
+        inbound = "Aqui eu já falei"
+        model_response = (
+            "Sim, erro claro da AYA.\n\n"
+            "Ela:\n\n"
+            "Regra a reforçar no prompt: antes de perguntar ou explicar preço, "
+            "a AYA precisa considerar o histórico; e preço não é variável."
+        )
+        whatsapp_manager._track_inbound(session, "msg-role-leak", inbound)
+        whatsapp_manager._register_contact_turn(session, session, inbound)
+
+        with patch.dict(
+            os.environ, {"WHATSAPP_CONFIG_SUBDIR": "instance"}, clear=False
+        ), patch(
+            "whatsapp_manager._fetch_chat_history",
+            return_value=(
+                "Gustavo: Tenho um escritório de direito tributário\n"
+                "AYA: Como posso ajudar?\n"
+                f"Gustavo: {inbound}"
+            ),
+        ), patch(
+            "whatsapp_manager._contact_record_for_chat",
+            return_value={"name": "Gustavo", "relationship": "Cliente"},
+        ), patch(
+            "whatsapp_manager._load_support_files", return_value=("AYA", "regras")
+        ):
+            result = self._call(session, model_response)
+
+        self.assertEqual(result, "\n")
+        mock_send.assert_called_once()
+        visible = mock_send.call_args.args[1]
+        folded = whatsapp_manager._normalize_text(visible)
+        self.assertIn("ja tenho esse contexto", folded)
+        self.assertNotIn("erro claro da aya", folded)
+        self.assertNotIn("regra a reforcar", folded)
+        self.assertNotIn("prompt", folded)
+        self.assertTrue(visible.rstrip().endswith("?"), visible)
 
     @patch("whatsapp_manager._human_send")
     def test_owner_session_returns_none(self, mock_send):
@@ -10515,6 +10638,25 @@ class TestQaFinalBrasilGoLive(unittest.TestCase):
         folded = whatsapp_manager._normalize_text(out)
         self.assertNotIn("como voces atendem esses pedidos hoje", folded)
         self.assertNotIn("valor unico de tabela", folded)
+        self.assertIn("contatos por dia", folded)
+
+    def test_preco_preserva_contexto_juridico_rotulado_com_nome_do_lead(self):
+        """Incidente de 27/08: o fallback SQLite usa ``Gustavo:``, não ``Lead:``."""
+        historico = (
+            "Gustavo: Tenho um escritorio de direito tributario\n"
+            "AYA: A AYA pode organizar a entrada de novos casos no WhatsApp.\n"
+        )
+        out = self._gate(
+            "Show, e quanto q custa? E como funciona?",
+            "Mensagem sugerida para o lead: R$ 997 e R$ 397 por mês.",
+            historico=historico,
+            contact={"market_id": "BR", "language": "pt", "name": "Gustavo"},
+        )
+        folded = whatsapp_manager._normalize_text(out)
+
+        self.assertNotIn("pra qual tipo de negocio seria", folded)
+        self.assertNotIn("997", out)
+        self.assertNotIn("397", out)
         self.assertIn("contatos por dia", folded)
 
     def test_preco_depois_de_convite_de_call_retoma_o_convite(self):
