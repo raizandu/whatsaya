@@ -34,8 +34,11 @@ import { matchesAllowedUser, parseAllowedUsers } from './allowlist.js';
 import {
   getStoredMessage,
   initHistoryStore,
+  isQaWatchFeedbackMessage,
   persistHistoryBatch,
   persistLiveMessage,
+  recordQaWatchFeedback,
+  rememberQaWatchOutbound,
 } from './history_bridge.js';
 
 // Load .env files if present (custom dotenv implementation)
@@ -816,6 +819,24 @@ let onMessagesUpsert = async ({ messages, type }) => {
     ].find((jid) => jid?.endsWith('@lid'));
     let chatId = rawChatId;
     if (chatId === 'status@broadcast' || (chatId && chatId.includes('status'))) {
+      continue;
+    }
+    // QA feedback from an explicitly configured test contact is control-plane
+    // input. Capture it before normal history persistence or queueing so it can
+    // never alter the lead's memory, intent or commercial stage.
+    if (isQaWatchFeedbackMessage(msg)) {
+      try {
+        const result = recordQaWatchFeedback(msg);
+        await sendWithTimeout(rawChatId, {
+          react: { text: result.recorded ? '✅' : '⚠️', key: msg.key },
+        });
+        console.log(`[qa-watch] Feedback ${result.linked ? 'linked' : 'recorded without prior reply'}.`);
+      } catch (err) {
+        console.error(`[qa-watch] Failed to record feedback: ${err?.message || err}`);
+        try {
+          await sendWithTimeout(rawChatId, { react: { text: '⚠️', key: msg.key } });
+        } catch {}
+      }
       continue;
     }
     if (!HISTORY_PERSIST_DISABLED) {
@@ -2021,6 +2042,7 @@ messagingRouter.post('/send', async (req, res) => {
         await sleep(CHUNK_DELAY_MS);
       }
     }
+    rememberQaWatchOutbound(chatId, messageIds[messageIds.length - 1], cleanedMessage);
 
     res.json({
       success: true,

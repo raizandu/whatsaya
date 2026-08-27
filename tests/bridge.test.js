@@ -12,6 +12,8 @@ process.env.WHATSAPP_OWNER_NUMBER = '99999';
 process.env.WHATSAPP_ALLOWED_USERS = 'client123,client456,client789';
 process.env.WHATSAPP_MODE = 'bot';
 process.env.WHATSAPP_DEBOUNCE_INITIAL_MS = '0';
+process.env.WHATSAPP_QA_WATCH_CONTACTS = 'client123,lid123';
+process.env.WHATSAPP_QA_WATCH_REPORT_DIR = path.join(TEST_ROOT, 'qa-watch');
 
 const {
   onChatsUpdate,
@@ -35,6 +37,13 @@ const {
   stripExecLines,
   stripFishCues,
 } = await import('../bridge.js');
+const {
+  clearQaWatchState,
+  getStoredMessage,
+  initHistoryStore,
+  persistHistoryBatch,
+  rememberQaWatchOutbound,
+} = await import('../history_bridge.js');
 
 // Setup Mock Socket
 const mockSock = {
@@ -71,6 +80,8 @@ test('WhatsApp Bridge Regression Tests', async (t) => {
     getRecentlySentIds().clear();
     clearRecentlyProcessedIds();
     getMessageQueue().length = 0;
+    clearQaWatchState();
+    fs.rmSync(process.env.WHATSAPP_QA_WATCH_REPORT_DIR, { recursive: true, force: true });
   });
 
   await t.test('1. Commands in Self-Chat should pause and resume the bot globally', async () => {
@@ -382,6 +393,94 @@ test('WhatsApp Bridge Regression Tests', async (t) => {
         `Body must remain attached to ${contact}`,
       );
     });
+  });
+
+  await t.test('8c. QA feedback from the exact test contact is linked, recorded and never queued', async () => {
+    rememberQaWatchOutbound(
+      'client123@s.whatsapp.net',
+      'aya-reply-1',
+      'Olá, Gustavo! Ligue para 5511999999999.',
+    );
+
+    await onMessagesUpsert({
+      messages: [{
+        key: {
+          id: 'qa-feedback-1',
+          fromMe: false,
+          remoteJid: 'lid123@lid',
+          remoteJidAlt: 'client123@s.whatsapp.net',
+        },
+        message: {
+          conversation: 'eu faria assim: Oi, Gustavo! Meu número é 5511888888888.',
+        },
+      }],
+      type: 'notify',
+    });
+
+    assert.strictEqual(getMessageQueue().length, 0, 'QA control text must never reach the LLM queue');
+    assert.strictEqual(getSilencedChats()['lid123@lid'], undefined, 'QA feedback must not alter takeover state');
+    assert.strictEqual(mockSock.sentMessages.length, 1, 'Bridge should acknowledge with one reaction');
+    assert.strictEqual(mockSock.sentMessages[0].payload.react.text, '✅');
+
+    const files = fs.readdirSync(process.env.WHATSAPP_QA_WATCH_REPORT_DIR);
+    assert.strictEqual(files.length, 1, 'One private JSONL report should be created');
+    const [line] = fs.readFileSync(
+      path.join(process.env.WHATSAPP_QA_WATCH_REPORT_DIR, files[0]),
+      'utf8',
+    ).trim().split('\n');
+    const record = JSON.parse(line);
+    assert.strictEqual(record.turn, 1);
+    assert.strictEqual(record.aya_response_message_id, 'aya-reply-1');
+    assert.ok(record.aya_response.includes('[nome omitido]'));
+    assert.ok(record.aya_response.includes('[número omitido]'));
+    assert.ok(record.preferred_response.includes('[nome omitido]'));
+    assert.ok(record.preferred_response.includes('[número omitido]'));
+    assert.ok(!line.includes('client123'));
+    assert.ok(!line.includes('lid123'));
+    assert.ok(!line.includes('Gustavo'));
+  });
+
+  await t.test('8d. The same feedback phrase from an unconfigured contact remains a normal lead message', async () => {
+    await onMessagesUpsert({
+      messages: [{
+        key: {
+          id: 'qa-feedback-unconfigured',
+          fromMe: false,
+          remoteJid: 'client456@s.whatsapp.net',
+        },
+        message: {
+          conversation: 'eu faria assim: quero uma resposta diferente',
+        },
+      }],
+      type: 'notify',
+    });
+
+    assert.strictEqual(getMessageQueue().length, 1);
+    assert.strictEqual(getMessageQueue()[0].body, 'eu faria assim: quero uma resposta diferente');
+    assert.strictEqual(mockSock.sentMessages.length, 0);
+    assert.ok(!fs.existsSync(process.env.WHATSAPP_QA_WATCH_REPORT_DIR));
+  });
+
+  await t.test('8e. QA feedback is excluded from both live and historical conversation storage', async () => {
+    await initHistoryStore();
+    const normal = {
+      key: { id: 'history-normal-1', fromMe: false, remoteJid: 'client123@s.whatsapp.net' },
+      message: { conversation: 'mensagem normal do lead' },
+      messageTimestamp: 1700000000,
+    };
+    const feedback = {
+      key: { id: 'history-qa-1', fromMe: false, remoteJid: 'client123@s.whatsapp.net' },
+      message: { conversation: 'QA: eu faria assim: resposta preferida' },
+      messageTimestamp: 1700000001,
+    };
+
+    await persistHistoryBatch([normal, feedback], 'test');
+
+    assert.deepStrictEqual(
+      await getStoredMessage(normal.key),
+      { conversation: 'mensagem normal do lead' },
+    );
+    assert.strictEqual(await getStoredMessage(feedback.key), null, 'QA control text must not enter SQLite history');
   });
 
   await t.test('9. Client not in allowlist should be ignored and not enqueued', async () => {

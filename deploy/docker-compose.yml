@@ -548,6 +548,13 @@ services:
       - WHATSAPP_ALLOWED_USERS=${WHATSAPP_ALLOWED_USERS:-*}
       - WHATSAPP_CONNECTION_NAME=${WHATSAPP_CONNECTION_NAME:-EmpreendedorSerial}
 
+      # Watch de linguagem: desligado quando não há contato exato configurado.
+      # Aceita aliases PN/LID separados por vírgula, vindos apenas do .env local.
+      - WHATSAPP_QA_WATCH_CONTACTS=${WHATSAPP_QA_WATCH_CONTACTS:-}
+      - WHATSAPP_QA_WATCH_FLOW=${WHATSAPP_QA_WATCH_FLOW:-}
+      - WHATSAPP_QA_WATCH_REPORT_DIR=${WHATSAPP_QA_WATCH_REPORT_DIR:-/opt/data/reports/aya-v1/watch/inbox}
+      - WHATSAPP_DEPLOY_COMMIT=${WHATSAPP_DEPLOY_COMMIT:-}
+
       # Debounce de mensagens (agrupa fragmentos de texto antes de processar)
       - WHATSAPP_DEBOUNCE_INITIAL_MS=${WHATSAPP_DEBOUNCE_INITIAL_MS:-2500}
       - WHATSAPP_DEBOUNCE_MIN_MS=${WHATSAPP_DEBOUNCE_MIN_MS:-1500}
