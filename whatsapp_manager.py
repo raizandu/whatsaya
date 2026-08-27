@@ -12789,6 +12789,56 @@ _UNCONFIRMED_CAPABILITY_CLAIM_RE = re.compile(
     r"\b(?:automaticamente|sozinha|confirmad|reservad|automatically|confirmed|reserved)\w*"
 )
 
+_AYA_STANDARD_OPENING_PT = (
+    "Oii, seja muito bem-vinda(o)! Sou a AYA, atendente comercial com IA no "
+    "WhatsApp 🤍 Funciono 24/7 entendendo o que o cliente precisa e conduzindo "
+    "pro próximo passo. Qual o seu negócio hoje?"
+)
+_AYA_OPENING_INQUIRY_RE = re.compile(
+    r"\baya\b.{0,50}\b(?:funcion\w*|faz|atende\w*)\b|"
+    r"\b(?:entender|saber|conhecer)\b.{0,60}\baya\b|"
+    r"\b(?:mais|informacoes?)\b.{0,30}\b(?:sobre\s+)?(?:a\s+)?aya\b"
+)
+_AYA_OPENING_NEGATIVE_RE = re.compile(
+    r"\b(?:nao\s+(?:quero|tenho\s+interesse|preciso)|"
+    r"pare\s+de|deixa\s+pra\s+la|esquece)\b"
+)
+
+
+def _enforce_aya_opening_output_gate(
+    response_text: str,
+    *,
+    user_message: str,
+    chat_id: str = "",
+    history: str | None = None,
+) -> str:
+    """Transforma a abertura comercial aprovada em contrato do primeiro turno."""
+    text = str(response_text or "").strip()
+    message = str(user_message or "")
+    if _infer_message_language(message) != "pt":
+        return text
+    normalized_message = _normalize_text(message)
+    if _AYA_OPENING_NEGATIVE_RE.search(normalized_message):
+        return text
+    if not _AYA_OPENING_INQUIRY_RE.search(normalized_message):
+        return text
+    if history is None:
+        try:
+            history = _fetch_chat_history(chat_id, limit=40) if chat_id else ""
+        except Exception:
+            history = ""
+    history_text = str(history or "").strip()
+    if not history_text:
+        logger.warning(
+            "[opening-gate] histórico indisponível; mantendo resposta chat=%r",
+            chat_id,
+        )
+        return text
+    if re.search(r"(?mi)^\s*AYA\s*:", history_text):
+        return text
+    logger.warning("[opening-gate] abertura comercial padrão aplicada chat=%r", chat_id)
+    return _AYA_STANDARD_OPENING_PT
+
 
 def _safe_unconfirmed_integration_reply(text: str) -> bool:
     visible = str(text or "").strip()
@@ -14759,6 +14809,11 @@ def transform_llm_output(*args, **kwargs):
         try:
             contact_info = _contact_record_for_chat(chat_id)
             _soul, payment_rules = _load_support_files()
+            response_text = _enforce_aya_opening_output_gate(
+                str(response_text),
+                user_message=current_inbound,
+                chat_id=str(chat_id or ""),
+            )
             response_text = _enforce_aya_payment_output_gate(
                 str(response_text),
                 user_message=current_inbound,

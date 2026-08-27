@@ -7887,6 +7887,111 @@ class TestTransformLlmOutput(BaseWhatsAppManagerTest):
         )
 
     @patch("whatsapp_manager._human_send")
+    def test_first_commercial_aya_inquiry_uses_standard_opening(self, mock_send):
+        mock_send.return_value = "wamid-opening-first"
+        session = "5511888888888@s.whatsapp.net"
+        user_message = "Oi! Queria entender como a AYA funciona"
+        model_response = (
+            "A AYA é a atendente comercial no WhatsApp da WhatsAYA.\n\n"
+            "Ela funciona assim:\n\n"
+            "Por trás, ela é configurada com: Na prática, ela cuida do atendimento "
+            "repetitivo e da triagem."
+        )
+        expected = (
+            "Oii, seja muito bem-vinda(o)! Sou a AYA, atendente comercial com IA no "
+            "WhatsApp 🤍 Funciono 24/7 entendendo o que o cliente precisa e conduzindo "
+            "pro próximo passo. Qual o seu negócio hoje?"
+        )
+
+        whatsapp_manager._track_inbound(session, "msg-opening", user_message)
+        whatsapp_manager._register_contact_turn(session, session, user_message)
+        with patch.dict(
+            os.environ, {"WHATSAPP_CONFIG_SUBDIR": "instance"}, clear=False
+        ), patch(
+            "whatsapp_manager._fetch_chat_history",
+            return_value=f"Lead: {user_message}",
+        ), patch(
+            "whatsapp_manager._load_support_files",
+            return_value=("AYA", "regras"),
+        ):
+            result = self._call(session, model_response)
+
+        self.assertEqual(result, "\n")
+        mock_send.assert_called_once_with(session, expected, automation=True)
+
+    @patch("whatsapp_manager._human_send")
+    def test_repeated_aya_inquiry_after_a_reply_is_not_reopened(self, mock_send):
+        mock_send.return_value = "wamid-opening-repeat"
+        session = "5511777777777@s.whatsapp.net"
+        user_message = "Queria entender como a AYA funciona"
+        model_response = "Claro. Qual parte você quer entender melhor?"
+
+        whatsapp_manager._track_inbound(session, "msg-repeat", user_message)
+        whatsapp_manager._register_contact_turn(session, session, user_message)
+        history = (
+            "Lead: Oi! Queria entender como a AYA funciona\n"
+            "AYA: Oii, seja muito bem-vinda(o)! Qual o seu negócio hoje?\n"
+            f"Lead: {user_message}"
+        )
+        with patch.dict(
+            os.environ, {"WHATSAPP_CONFIG_SUBDIR": "instance"}, clear=False
+        ), patch(
+            "whatsapp_manager._fetch_chat_history", return_value=history
+        ), patch(
+            "whatsapp_manager._load_support_files",
+            return_value=("AYA", "regras"),
+        ):
+            result = self._call(session, model_response)
+
+        self.assertEqual(result, "\n")
+        mock_send.assert_called_once_with(session, model_response, automation=True)
+
+    @patch("whatsapp_manager._human_send")
+    def test_opening_gate_fails_open_when_history_is_unavailable(self, mock_send):
+        mock_send.return_value = "wamid-opening-no-history"
+        session = "5511666666666@s.whatsapp.net"
+        user_message = "Oi! Queria entender como a AYA funciona"
+        model_response = "Consigo te explicar. O que você quer entender primeiro?"
+
+        whatsapp_manager._track_inbound(session, "msg-no-history", user_message)
+        whatsapp_manager._register_contact_turn(session, session, user_message)
+        with patch.dict(
+            os.environ, {"WHATSAPP_CONFIG_SUBDIR": "instance"}, clear=False
+        ), patch(
+            "whatsapp_manager._fetch_chat_history", return_value=""
+        ), patch(
+            "whatsapp_manager._load_support_files",
+            return_value=("AYA", "regras"),
+        ):
+            result = self._call(session, model_response)
+
+        self.assertEqual(result, "\n")
+        mock_send.assert_called_once_with(session, model_response, automation=True)
+
+    @patch("whatsapp_manager._human_send")
+    def test_negative_aya_message_is_not_mistaken_for_opening_interest(self, mock_send):
+        mock_send.return_value = "wamid-opening-negative"
+        session = "5511555555555@s.whatsapp.net"
+        user_message = "Não quero mais saber sobre a AYA"
+        model_response = "Entendi, não vou insistir."
+
+        whatsapp_manager._track_inbound(session, "msg-negative", user_message)
+        whatsapp_manager._register_contact_turn(session, session, user_message)
+        with patch.dict(
+            os.environ, {"WHATSAPP_CONFIG_SUBDIR": "instance"}, clear=False
+        ), patch(
+            "whatsapp_manager._fetch_chat_history",
+            return_value=f"Lead: {user_message}",
+        ), patch(
+            "whatsapp_manager._load_support_files",
+            return_value=("AYA", "regras"),
+        ):
+            result = self._call(session, model_response)
+
+        self.assertEqual(result, "\n")
+        mock_send.assert_called_once_with(session, model_response, automation=True)
+
+    @patch("whatsapp_manager._human_send")
     def test_blank_line_is_kept_for_the_splitter(self, mock_send):
         text = "eita\n\nele capotou aqui, só umas 11h"
         result = self._call("5511888888888@s.whatsapp.net", text)
