@@ -924,6 +924,17 @@ let onMessagesUpsert = async ({ messages, type }) => {
     const isSelfChat = (myNumber && chatNumber === myNumber) || (myLid && chatNumber === myLid);
     const isOwnerChat = isSelfChat || (WHATSAPP_OWNER_NUMBER && chatNumber === WHATSAPP_OWNER_NUMBER);
 
+    // Baileys replays historical outbound messages as `append`. They belong in
+    // persisted history, but must not look like a live manual takeover or lead
+    // input. Keep self-chat append events because that mode uses them as real
+    // owner commands/messages.
+    if (msg.key.fromMe && type === 'append' && !isSelfChat) {
+      if (WHATSAPP_DEBUG) {
+        try { console.log(JSON.stringify({ event: 'ignored', reason: 'historical_from_me', chatId, messageId: msg.key.id })); } catch {}
+      }
+      continue;
+    }
+
     if (isOwner && isOwnerChat && !isGroup && !chatId.includes('status')) {
       if (['stop_bot', '!pausar', '!parar'].includes(textLower)) {
         botPaused = true;
@@ -1195,10 +1206,17 @@ let onMessagesUpsert = async ({ messages, type }) => {
       }
     }
 
-    // Ignore Hermes' own reply messages in self-chat mode to avoid loops.
-    if (msg.key.fromMe && ((REPLY_PREFIX && body.startsWith(REPLY_PREFIX)) || recentlySentIds.has(msg.key.id))) {
+    // Outbound messages in client chats are context/history only. Whether they
+    // came from Hermes or a human owner, they can never become current lead
+    // input. The ID cache remains useful for self-chat echo detection, but is
+    // deliberately not a safety boundary for bot-mode client chats.
+    if (msg.key.fromMe && (
+      !isSelfChat
+      || (REPLY_PREFIX && body.startsWith(REPLY_PREFIX))
+      || recentlySentIds.has(msg.key.id)
+    )) {
       if (WHATSAPP_DEBUG) {
-        try { console.log(JSON.stringify({ event: 'ignored', reason: 'agent_echo', chatId, messageId: msg.key.id })); } catch {}
+        try { console.log(JSON.stringify({ event: 'ignored', reason: 'from_me_never_inbound', chatId, messageId: msg.key.id })); } catch {}
       }
       continue;
     }

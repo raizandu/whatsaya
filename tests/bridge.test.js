@@ -249,6 +249,50 @@ test('WhatsApp Bridge Regression Tests', async (t) => {
     assert.ok(fs.existsSync(getSilenceStateHealth().file), 'Silence state file should exist');
   });
 
+  await t.test('3d. Untracked fromMe notify must trigger takeover but never enter the inbound queue', async () => {
+    const clientJid = 'client-untracked-notify@s.whatsapp.net';
+
+    await onMessagesUpsert({
+      messages: [{
+        key: {
+          id: 'msg-untracked-from-me-notify',
+          fromMe: true,
+          remoteJid: clientJid,
+          participant: '12345@s.whatsapp.net',
+        },
+        message: {
+          conversation: 'A AYA não deve reexplicar nem disparar outra pergunta.',
+        },
+      }],
+      type: 'notify',
+    });
+
+    assert.ok(getSilencedChats()[clientJid] > Date.now(), 'A live manual owner message must still trigger takeover');
+    assert.strictEqual(getMessageQueue().length, 0, 'No fromMe message may become lead input');
+  });
+
+  await t.test('3e. Historical fromMe append must neither silence the chat nor enter the inbound queue', async () => {
+    const clientJid = 'client-untracked-append@s.whatsapp.net';
+
+    await onMessagesUpsert({
+      messages: [{
+        key: {
+          id: 'msg-untracked-from-me-append',
+          fromMe: true,
+          remoteJid: clientJid,
+          participant: '12345@s.whatsapp.net',
+        },
+        message: {
+          conversation: 'Regra operacional: esta é uma saída antiga da AYA.',
+        },
+      }],
+      type: 'append',
+    });
+
+    assert.strictEqual(getSilencedChats()[clientJid], undefined, 'History replay must not look like a live takeover');
+    assert.strictEqual(getMessageQueue().length, 0, 'Historical fromMe output must never become lead input');
+  });
+
   await t.test('4. Command starting with ! in client chat should NOT trigger temporary silence', async () => {
     const clientJid = 'client@s.whatsapp.net';
     const ownerJid = '12345@s.whatsapp.net';

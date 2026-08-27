@@ -350,6 +350,38 @@ class TestMessageRoutingAndDispatch(BaseWhatsAppManagerTest):
         self.assertEqual(res.get("action"), "skip")
         self.assertEqual(res.get("reason"), "owner-manual-message")
 
+    def test_top_level_from_me_is_skipped_when_raw_message_omits_flag(self):
+        """O adapter pode manter fromMe no evento sem copiá-lo para raw_message."""
+        pre_dispatch = self.ctx.hooks.get("pre_gateway_dispatch")
+        self.assertIsNotNone(pre_dispatch)
+
+        event = MagicMock()
+        event.source.platform = "whatsapp"
+        event.source.user_id = "5511888888888@s.whatsapp.net"
+        event.source.chat_id = "5511888888888@s.whatsapp.net"
+        event.text = "Ação correta no fluxo: não responder novamente."
+        event.raw_message = {}
+        event.raw = {}
+        event.fromMe = True
+        event.has_media = False
+        event.message_id = "top-level-from-me-1"
+
+        gateway = MagicMock()
+        gateway._session_key_for_source.return_value = "session_from_me_fallback"
+        gateway._session_model_overrides = {}
+
+        with patch("whatsapp_manager._check_bot_paused", return_value=False), \
+             patch("whatsapp_manager._check_chat_silenced", return_value=False), \
+             patch("whatsapp_manager._persist_owner_message_to_db") as persist_owner, \
+             patch("whatsapp_manager._followup_cancel") as cancel, \
+             patch("whatsapp_manager._track_inbound") as track_inbound:
+            res = pre_dispatch("pre_gateway_dispatch", {"event": event, "gateway": gateway})
+
+        self.assertEqual(res, {"action": "skip", "reason": "from-me-echo"})
+        persist_owner.assert_called_once()
+        cancel.assert_called_once_with("5511888888888@s.whatsapp.net")
+        track_inbound.assert_not_called()
+
     def test_silenced_chat_client_message_is_skipped(self):
         """Mensagem de cliente em chat silenciado deve retornar skip."""
         pre_dispatch = self.ctx.hooks.get("pre_gateway_dispatch")

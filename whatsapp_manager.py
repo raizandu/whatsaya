@@ -9479,7 +9479,9 @@ def pre_gateway_dispatch(*args, **kwargs):
 
     clean_owner = "".join(c for c in owner_number.split("@")[0].split(":")[0] if c.isdigit())
     
-    # Detectar from_me via raw_message do evento (campo correto no Hermes)
+    # Detectar from_me no envelope inteiro. Algumas versões do adapter mantêm o
+    # campo no evento/raw e não o copiam para raw_message; depender só deste
+    # último transforma uma saída da AYA em nova entrada do lead.
     _raw_msg = getattr(event, "raw_message", None) or {}
     if isinstance(_raw_msg, str):
         try:
@@ -9489,7 +9491,27 @@ def pre_gateway_dispatch(*args, **kwargs):
             _raw_msg = {}
     if not isinstance(_raw_msg, dict):
         _raw_msg = {}
-    _is_from_me = bool(_raw_msg.get("fromMe") or _raw_msg.get("from_me"))
+
+    def _from_me_flag(value):
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, int):
+            return value == 1
+        if isinstance(value, str):
+            return value.strip().lower() in {"true", "1", "yes"}
+        return False
+
+    _from_me_sources = [_raw_msg]
+    for _raw_attr in ("raw", "raw_event", "payload", "data"):
+        _raw_value = getattr(event, _raw_attr, None)
+        if isinstance(_raw_value, dict):
+            _from_me_sources.append(_raw_value)
+    _is_from_me = any(
+        _from_me_flag(_source.get("fromMe"))
+        or _from_me_flag(_source.get("from_me"))
+        for _source in _from_me_sources
+    ) or _from_me_flag(getattr(event, "fromMe", False)) \
+        or _from_me_flag(getattr(event, "from_me", False))
     _raw_lead_metadata = _raw_msg.get("leadMetadata") or _raw_msg.get("lead_metadata") or {}
     _external_lead_metadata = _extract_external_commercial_metadata(
         {"commercial_metadata": _raw_lead_metadata}
