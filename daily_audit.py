@@ -418,6 +418,26 @@ FALLBACK_PHRASES: tuple[str, ...] = (
     "El valor depende del tamaño de la atención. "
     "Para no venderte más de lo que necesitan: ¿más o menos cuántos contactos "
     "reciben al día?",
+    # _CONSULTING_NO_CONTEXT
+    "O investimento muda de acordo com o que a AYA vai assumir no seu atendimento. "
+    "A gente fecha isso depois de entender melhor o cenário, numa call rápida. "
+    "Pra qual tipo de negócio seria?",
+    "The investment depends on what AYA will handle in your customer service. "
+    "We define it after understanding the scenario in a short call. "
+    "What type of business is it for?",
+    "La inversión depende de lo que la AYA asumirá en tu atención. "
+    "La definimos después de entender el escenario en una call corta. "
+    "¿Para qué tipo de negocio sería?",
+    # _CONSULTING_CALL_PENDING
+    "O investimento é personalizado pro que a AYA vai assumir no seu atendimento. "
+    "A gente fecha isso numa call rápida, olhando o seu caso. "
+    "Ainda topa a gente marcar essa conversa?",
+    "The investment is tailored to what AYA will handle in your customer service. "
+    "We define it in a short call based on your case. "
+    "Are you still open to scheduling that conversation?",
+    "La inversión se personaliza según lo que la AYA asumirá en tu atención. "
+    "La definimos en una call corta viendo tu caso. "
+    "¿Todavía te parece bien agendar esa conversación?",
     # _CONSULTING_TRIAGE_REPEAT (frases antigas ficam para o log)
     "O valor sai na proposta, conforme o tamanho do caso. Se fizer sentido, "
     "a gente agenda uma call curta pra fechar isso.",
@@ -482,6 +502,51 @@ FALLBACK_PHRASES: tuple[str, ...] = (
     "Perfecto — puedo pasarlo al equipo para seguir contigo. "
     "¿Qué horario te viene mejor: mañana o tarde?\n\n"
     "[[HANDOFF: lead quiere avanzar — propuesta en call]]",
+    "Show! Te encaminho já com o time pra confirmar o horário certinho. "
+    "Período de manhã ou tarde fica melhor pra você?\n\n"
+    "[[HANDOFF: lead topou call]]",
+    "Great! I'll pass this to the team so they can confirm the exact time. "
+    "Does morning or afternoon work better for you?\n\n"
+    "[[HANDOFF: lead accepted call]]",
+    "¡Perfecto! Se lo paso al equipo para que confirmen el horario exacto. "
+    "¿Te viene mejor por la mañana o por la tarde?\n\n"
+    "[[HANDOFF: lead aceptó la call]]",
+    # _STRONG_TECH_CALL_REPLY
+    "Ah, que maravilha! Pra entender como construir a AYA na sua operação e te "
+    "apresentar como ela funciona, vamos marcar uma call rápida. Qual dia fica "
+    "melhor pra você esta semana?",
+    "That's great! To understand how to build AYA into your operation and show you "
+    "how it works, let's schedule a quick call. Which day works best for you this week?",
+    "¡Qué maravilla! Para entender cómo construir la AYA en tu operación y mostrarte "
+    "cómo funciona, coordinemos una llamada rápida. ¿Qué día te queda mejor esta semana?",
+    # _INTEGRATION_PENDING_CALL_REPLY
+    "Essa integração específica eu prefiro confirmar direitinho na configuração pra "
+    "não te passar errado, mas isso não muda o essencial do atendimento. Ainda topa "
+    "a gente marcar aquela call?",
+    "I'd rather confirm that specific integration during configuration so I don't give "
+    "you the wrong information, but it doesn't change the core service. Are you still "
+    "up for that call?",
+    "Prefiero confirmar esa integración específica durante la configuración para no "
+    "darte información incorrecta, pero eso no cambia lo esencial de la atención. "
+    "¿Todavía te parece bien agendar esa llamada?",
+    # _INTEGRATION_CALL_REPLY
+    "Essa integração específica eu prefiro confirmar direitinho na configuração pra "
+    "não te passar errado. Faz sentido a gente olhar isso numa call rápida?",
+    "I'd rather confirm that specific integration during configuration so I don't give "
+    "you the wrong information. Does it make sense to review it on a quick call?",
+    "Prefiero confirmar esa integración específica durante la configuración para no "
+    "darte información incorrecta. ¿Te parece bien revisarlo en una llamada rápida?",
+    # _APPOINTMENT_CALL_REPLY
+    "Essa parte de agenda precisa ser alinhada na configuração pra eu não te prometer "
+    "algo sem a integração confirmada. Faz sentido eu te mostrar isso numa call rápida?",
+    "That scheduling flow needs to be aligned during configuration so I don't promise "
+    "anything before the integration is confirmed. Can I show you that on a quick call?",
+    "Ese flujo de agenda debe definirse durante la configuración para no prometer algo "
+    "antes de confirmar la integración. ¿Te lo muestro en una llamada rápida?",
+    # _SCOPE_CLARIFICATION_REPLY
+    "Tudo bem por aqui! Você chegou querendo saber mais sobre a AYA, ou é sobre outra coisa?",
+    "All good here! Did you reach out to learn more about AYA, or is it about something else?",
+    "¡Todo bien por aquí! ¿Llegaste para saber más sobre la AYA o es por otra cosa?",
     # _HUMAN_CONNECT_REPLY
     "Vou te conectar com o time agora. Eles já entram com o que conversamos.\n\n"
     "[[HANDOFF: lead pediu atendimento humano]]",
@@ -547,6 +612,18 @@ FALLBACK_TEMPLATES: tuple[str, ...] = (
     "{setup} de implantação e {monthly} por mês, via Zelle.",
     "{setup} setup and {monthly} per month, via Zelle.",
     "{setup} de implementación y {monthly} al mes, vía Zelle.",
+    "Show! Te chamo aqui com um horário certinho {preference} assim que confirmar "
+    "com o time. Pode ser assim?\n\n[[HANDOFF: lead topou call]]",
+    "Great! I'll message you with an exact time {preference} once the team confirms it. "
+    "Does that work?\n\n[[HANDOFF: lead accepted call]]",
+    "¡Perfecto! Te escribo con un horario exacto {preference} cuando lo confirme "
+    "con el equipo. ¿Te parece bien?\n\n[[HANDOFF: lead aceptó la call]]",
+    "Show! Te chamo aqui com um horário certinho {preference} assim que confirmar "
+    "com o time. Pode ser assim?",
+    "Great! I'll message you with an exact time {preference} once the team confirms it. "
+    "Does that work?",
+    "¡Perfecto! Te escribo con un horario exacto {preference} cuando lo confirme "
+    "con el equipo. ¿Te parece bien?",
 )
 
 

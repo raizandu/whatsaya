@@ -1,0 +1,330 @@
+{
+  "schema_version": 2,
+  "fixture_id": "aya-v2-golden-conversations",
+  "sanitized": true,
+  "conversations": [
+    {
+      "id": "v2-01-dentista",
+      "niche": "clínica odontológica",
+      "covered_regression_scenarios": ["01", "02", "06", "07"],
+      "turns": [
+        {
+          "turn": 1,
+          "lead": "Oi! Queria entender como a AYA funciona",
+          "reference_raw_reply": "Oii, seja muito bem-vinda(o)! Sou a AYA, atendente comercial com IA no WhatsApp 🤍 Funciono 24/7 entendendo o que o cliente precisa e conduzindo pro próximo passo. Qual o seu negócio hoje?",
+          "rationale": "Acolhe, explica a proposta em linguagem curta e abre a descoberta sem presumir o nicho.",
+          "lead_accepts_call": false,
+          "observable_assertions": [
+            "explica_atendimento_comercial_24_7",
+            "pergunta_tipo_de_negocio",
+            "nao_lista_modulos"
+          ]
+        },
+        {
+          "turn": 2,
+          "lead": "Perfeito, como eu faço pra colocar na minha empresa? Sou dentista e hoje tem uma secretária atendendo, mas não está tão bom assim",
+          "reference_raw_reply": "No seu caso, ela funcionaria como uma extensão da sua secretária: responde o paciente na hora, tira as dúvidas iniciais e organiza quem tem interesse real, sem ela precisar parar o que está fazendo pra responder todo mundo. ✅ Quantos pacientes chegam por dia, mais ou menos?",
+          "rationale": "O nicho e o problema já foram informados. A resposta conecta a AYA ao contexto e avança para volume sem repetir a descoberta.",
+          "lead_accepts_call": false,
+          "observable_assertions": [
+            "usa_contexto_da_secretaria",
+            "nao_repete_pergunta_sobre_negocio",
+            "pergunta_volume_diario"
+          ]
+        },
+        {
+          "turn": 3,
+          "lead": "Ah, chegam uns 10 pacientes por dia, mais ou menos",
+          "reference_raw_reply": "Já dá pra sentir o quanto isso pesa no dia a dia. Faz sentido eu te mostrar como isso ficaria funcionando na sua clínica. Topa uma call rápida esta semana?",
+          "rationale": "Reconhece o impacto do volume e transforma a descoberta suficiente em convite comercial.",
+          "lead_accepts_call": false,
+          "observable_assertions": [
+            "reconhece_impacto_do_volume",
+            "convida_para_call",
+            "nao_faz_nova_descoberta"
+          ]
+        },
+        {
+          "turn": 4,
+          "lead": "Sim",
+          "reference_raw_reply": "Show! Te encaminho com o time pra alinhar o horário certinho. Manhã ou tarde fica melhor pra você? [[HANDOFF: lead topou call]]",
+          "rationale": "A aceitação da call dispara o handoff e a coleta de período sem alegar que já existe horário reservado.",
+          "lead_accepts_call": true,
+          "observable_assertions": [
+            "inclui_marcador_de_handoff",
+            "pergunta_periodo",
+            "nao_promete_horario"
+          ]
+        },
+        {
+          "turn": 5,
+          "lead": "Pode ser de manhã",
+          "reference_raw_reply": "Show! Assim que alinhar com o time, te chamo aqui com um horário certinho de manhã. Pode ser assim?",
+          "rationale": "Registra a preferência depois do handoff sem repetir o marcador nem inventar um horário.",
+          "lead_accepts_call": false,
+          "observable_assertions": [
+            "reconhece_preferencia_da_manha",
+            "nao_repete_marcador_de_handoff",
+            "mantem_confirmacao_condicional"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "v2-02-psicoterapeuta",
+      "niche": "psicoterapia",
+      "covered_regression_scenarios": ["03", "14", "02", "06", "07"],
+      "turns": [
+        {
+          "turn": 1,
+          "lead": "Oi! Queria entender como a AYA funciona",
+          "reference_raw_reply": "Oii, seja muito bem-vinda(o)! Sou a AYA, atendente comercial com IA no WhatsApp 🤍 Funciono 24/7 entendendo o que o cliente precisa e conduzindo pro próximo passo. Qual o seu negócio hoje?",
+          "rationale": "A abertura apresenta a solução e pede somente o contexto necessário para continuar.",
+          "lead_accepts_call": false,
+          "observable_assertions": [
+            "explica_atendimento_comercial_24_7",
+            "pergunta_tipo_de_negocio",
+            "mantem_tom_acolhedor"
+          ]
+        },
+        {
+          "turn": 2,
+          "lead": "E quanto custa?",
+          "reference_raw_reply": "O investimento muda de acordo com o que a AYA vai assumir no seu atendimento. A gente fecha isso depois de entender melhor o cenário, numa call rápida. Pra qual tipo de negócio seria?",
+          "rationale": "Responde a pergunta direta de preço com a regra de personalização e retoma a descoberta que ainda falta.",
+          "lead_accepts_call": false,
+          "observable_assertions": [
+            "responde_pergunta_de_preco",
+            "nao_inventa_tabela_fixa",
+            "pergunta_tipo_de_negocio"
+          ]
+        },
+        {
+          "turn": 3,
+          "lead": "Sou psicoterapeuta, atendo sozinho e às vezes fica corrido responder no WhatsApp. Eu precisava de uma IA que recebesse o pessoal e ajudasse no agendamento",
+          "reference_raw_reply": "Faz todo sentido pro seu caso. Ela recebe o paciente na hora, entende o que ele precisa e deixa o contato organizado pra você marcar o horário, sem interromper a sessão pra responder. Topa uma call rápida esta semana pra eu te mostrar como isso funcionaria aí?",
+          "rationale": "Conecta ao atendimento individual e à agenda, sem prometer agendamento automático ou integração não validada.",
+          "lead_accepts_call": false,
+          "observable_assertions": [
+            "usa_contexto_de_sessao",
+            "direciona_demanda_de_agenda_para_call",
+            "nao_promete_agendamento_automatico"
+          ]
+        },
+        {
+          "turn": 4,
+          "lead": "Pode ser de manhã",
+          "reference_raw_reply": "Show! Assim que alinhar com o time, te chamo aqui com um horário certinho de manhã. Pode ser assim? [[HANDOFF: lead topou call]]",
+          "rationale": "A preferência de período também confirma a call, por isso o handoff ocorre neste mesmo turno.",
+          "lead_accepts_call": true,
+          "observable_assertions": [
+            "inclui_marcador_de_handoff",
+            "reconhece_preferencia_da_manha",
+            "nao_promete_horario"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "v2-03-salao-de-beleza",
+      "niche": "salão de beleza",
+      "covered_regression_scenarios": ["05", "02", "06", "07"],
+      "turns": [
+        {
+          "turn": 1,
+          "lead": "Oi! Queria entender como a AYA funciona",
+          "reference_raw_reply": "Oii, seja muito bem-vinda(o)! Sou a AYA, atendente comercial com IA no WhatsApp 🤍 Funciono 24/7 entendendo o que o cliente precisa e conduzindo pro próximo passo. Qual o seu negócio hoje?",
+          "rationale": "A abertura acolhe e inicia a descoberta com uma única pergunta.",
+          "lead_accepts_call": false,
+          "observable_assertions": [
+            "explica_atendimento_comercial_24_7",
+            "pergunta_tipo_de_negocio",
+            "nao_lista_modulos"
+          ]
+        },
+        {
+          "turn": 2,
+          "lead": "Tenho um salão",
+          "reference_raw_reply": "Hoje o atendimento do WhatsApp fica só com você ou tem alguém ajudando?",
+          "rationale": "Só o nicho ainda não revela a operação. A resposta faz uma pergunta curta para descobrir quem atende.",
+          "lead_accepts_call": false,
+          "observable_assertions": [
+            "faz_descoberta_operacional",
+            "nao_presume_dor",
+            "faz_uma_pergunta"
+          ]
+        },
+        {
+          "turn": 3,
+          "lead": "Tem uma secretária, mas ela acaba se perdendo por ter outras demandas",
+          "reference_raw_reply": "Faz sentido. Ela consegue segurar essa primeira ponta com quem chega perguntando de horário ou serviço, sem depender da sua secretária largar outra coisa pra responder. Topa uma call rápida esta semana pra eu te mostrar como isso ficaria no seu salão?",
+          "rationale": "Conecta a solução à sobrecarga informada e avança para a call sem prolongar a descoberta.",
+          "lead_accepts_call": false,
+          "observable_assertions": [
+            "usa_contexto_da_secretaria",
+            "conecta_a_horario_e_servico",
+            "convida_para_call"
+          ]
+        },
+        {
+          "turn": 4,
+          "lead": "E qual o valor?",
+          "reference_raw_reply": "O investimento é personalizado pro que a AYA vai assumir no seu atendimento. A gente fecha isso numa call rápida, olhando o seu caso. Ainda topa a gente marcar essa conversa?",
+          "rationale": "Explica a personalização do investimento e preserva o convite que já estava pendente.",
+          "lead_accepts_call": false,
+          "observable_assertions": [
+            "responde_pergunta_de_preco",
+            "nao_inventa_tabela_fixa",
+            "retoma_convite_pendente"
+          ]
+        },
+        {
+          "turn": 5,
+          "lead": "E é muito caro? Porque, se for, nem compensa entrar em reunião",
+          "reference_raw_reply": "Entendo a preocupação. Faz sentido principalmente pra parar de perder atendimento quando sua secretária fica sobrecarregada. A call existe justamente pra ver se compensa no seu caso, sem compromisso. Se topar, manhã ou tarde fica melhor pra você?",
+          "rationale": "Reconhece a objeção, reconecta ao problema específico e pergunta o período sem inventar uma preferência anterior.",
+          "lead_accepts_call": false,
+          "observable_assertions": [
+            "reconhece_objecao_sem_confrontar",
+            "reconecta_a_sobrecarga",
+            "nao_inventa_preferencia_de_periodo"
+          ]
+        },
+        {
+          "turn": 6,
+          "lead": "Ok, pode ser",
+          "reference_raw_reply": "Show! Pra eu encaminhar certinho com o time, prefere manhã ou tarde? [[HANDOFF: lead topou call]]",
+          "rationale": "A concordância dispara o handoff, mas a preferência de período continua em aberto e precisa ser perguntada.",
+          "lead_accepts_call": true,
+          "observable_assertions": [
+            "inclui_marcador_de_handoff",
+            "pergunta_periodo_nao_informado",
+            "nao_presume_manha"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "v2-04-advogado",
+      "niche": "escritório de advocacia",
+      "covered_regression_scenarios": ["11", "02", "06", "23", "07"],
+      "turns": [
+        {
+          "turn": 1,
+          "lead": "Oi! Queria entender como a AYA funciona",
+          "reference_raw_reply": "Oii, seja muito bem-vinda(o)! Sou a AYA, atendente comercial com IA no WhatsApp 🤍 Funciono 24/7 entendendo o que o cliente precisa e conduzindo pro próximo passo. Qual o seu negócio hoje?",
+          "rationale": "A abertura apresenta a AYA e pede o contexto do negócio sem antecipar uma solução específica.",
+          "lead_accepts_call": false,
+          "observable_assertions": [
+            "explica_atendimento_comercial_24_7",
+            "pergunta_tipo_de_negocio",
+            "mantem_tom_acolhedor"
+          ]
+        },
+        {
+          "turn": 2,
+          "lead": "Tenho um escritório de advocacia",
+          "reference_raw_reply": "Hoje o WhatsApp do escritório fica só com você ou mais gente também responde?",
+          "rationale": "A pergunta descobre como o atendimento é dividido e ajuda a checar o fit sem tirar conclusões pelo termo escritório.",
+          "lead_accepts_call": false,
+          "observable_assertions": [
+            "faz_descoberta_operacional",
+            "checa_divisao_do_atendimento",
+            "nao_presume_tamanho_da_equipe"
+          ]
+        },
+        {
+          "turn": 3,
+          "lead": "Tem uma secretária que responde, mas ela não entende tanto da parte comercial",
+          "reference_raw_reply": "Faz sentido. Ela consegue entender o que o cliente precisa logo de cara e filtrar o que é relevante, sem sua secretária precisar decidir sozinha o que é prioridade comercial. Faz sentido eu te mostrar como isso ficaria no seu escritório numa call rápida esta semana?",
+          "rationale": "Usa a dificuldade comercial já informada e avança para demonstração com o fit confirmado.",
+          "lead_accepts_call": false,
+          "observable_assertions": [
+            "usa_contexto_comercial_da_secretaria",
+            "explica_triagem_relevante",
+            "convida_para_call"
+          ]
+        },
+        {
+          "turn": 4,
+          "lead": "Aqui usamos um sistema jurídico específico. Será que conseguimos integrar? Trabalhamos com Empresarial, Imobiliário, tributos municipais e benefícios fiscais",
+          "reference_raw_reply": "Essa integração com o seu sistema jurídico eu prefiro validar na configuração pra não te passar algo errado. Isso não muda o essencial do atendimento. Ainda topa a gente marcar aquela call?",
+          "rationale": "Declara somente a incerteza da integração, não inventa compatibilidade e retoma o convite pendente.",
+          "lead_accepts_call": false,
+          "observable_assertions": [
+            "nao_promete_integracao",
+            "isola_incerteza_tecnica",
+            "retoma_convite_pendente"
+          ]
+        },
+        {
+          "turn": 5,
+          "lead": "Sim, podemos marcar",
+          "reference_raw_reply": "Show! Te encaminho com o time pra alinhar o horário certinho. Manhã ou tarde fica melhor pra você? [[HANDOFF: lead topou call]]",
+          "rationale": "A aceitação dispara o handoff e coleta apenas o período necessário para o time continuar.",
+          "lead_accepts_call": true,
+          "observable_assertions": [
+            "inclui_marcador_de_handoff",
+            "pergunta_periodo",
+            "nao_promete_horario"
+          ]
+        },
+        {
+          "turn": 6,
+          "lead": "Pode ser de tarde, mais pro final da tarde",
+          "reference_raw_reply": "Show! Assim que alinhar com o time, te chamo aqui com um horário mais pro final da tarde. Pode ser assim?",
+          "rationale": "Reconhece a preferência mais específica sem repetir o handoff e sem declarar uma reserva inexistente.",
+          "lead_accepts_call": false,
+          "observable_assertions": [
+            "reconhece_preferencia_do_final_da_tarde",
+            "nao_repete_marcador_de_handoff",
+            "mantem_confirmacao_condicional"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "v2-05-contador",
+      "niche": "empresa de contabilidade",
+      "covered_regression_scenarios": ["21", "02", "10", "11", "07"],
+      "turns": [
+        {
+          "turn": 1,
+          "lead": "Fala, meu amigo, como estão as coisas por aí?",
+          "reference_raw_reply": "Tudo bem por aqui! Você chegou querendo saber mais sobre a AYA ou é sobre outra coisa?",
+          "rationale": "Responde de forma neutra a uma abertura pessoal e verifica o escopo sem iniciar venda automaticamente.",
+          "lead_accepts_call": false,
+          "observable_assertions": [
+            "nao_dispara_roteiro_comercial",
+            "nao_vira_assistente_pessoal",
+            "pergunta_escopo"
+          ]
+        },
+        {
+          "turn": 2,
+          "lead": "Quero colocar a IA na minha empresa de contabilidade e entender como ela vai agir no WhatsApp. Eu precisava que ela reunisse documentos dos clientes e subisse no meu sistema interno",
+          "reference_raw_reply": "Ah, que maravilha! A IA pode fazer uma diferença grande no seu negócio. Pra entender como construir isso na sua operação e te apresentar como a AYA funciona, vamos marcar uma call rápida. Qual dia fica melhor pra você esta semana?",
+          "rationale": "A intenção forte de compra junto da capacidade técnica específica permite avançar direto para a call, onde a operação será validada.",
+          "lead_accepts_call": false,
+          "observable_assertions": [
+            "reconhece_intencao_forte",
+            "nao_promete_capacidade_tecnica",
+            "direciona_validacao_para_call"
+          ]
+        },
+        {
+          "turn": 3,
+          "lead": "Pode ser amanhã à tarde",
+          "reference_raw_reply": "Show! Assim que alinhar com o time, te chamo pra confirmar um horário amanhã à tarde. Pode ser assim? [[HANDOFF: lead topou call]]",
+          "rationale": "A sugestão de dia e período confirma a call, dispara o handoff e mantém o horário condicionado ao alinhamento humano.",
+          "lead_accepts_call": true,
+          "observable_assertions": [
+            "inclui_marcador_de_handoff",
+            "reconhece_dia_e_periodo",
+            "nao_promete_horario"
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -155,6 +155,38 @@ class TestMessageRoutingAndDispatch(BaseWhatsAppManagerTest):
         self.assertEqual(res, {"action": "skip", "reason": "legacy-contact-disabled"})
         cancel.assert_called_once_with("5511888888888@s.whatsapp.net")
 
+    def test_first_ambiguous_greeting_gets_one_neutral_scope_question(self):
+        pre_dispatch = self.ctx.hooks.get("pre_gateway_dispatch")
+        event = MagicMock()
+        event.source.platform = "whatsapp"
+        event.source.user_id = "5511888888888@s.whatsapp.net"
+        event.source.chat_id = "5511888888888@s.whatsapp.net"
+        event.text = "Fala meu amigo, como que tá por aí?"
+        event.raw = {}
+        event.raw_message = {}
+        event.is_historical = False
+        event.has_media = False
+
+        gateway = MagicMock()
+        gateway._session_key_for_source.return_value = "session_scope_pending"
+        gateway._session_model_overrides = {}
+
+        with patch(
+            "whatsapp_manager._ensure_contact_ai_access",
+            return_value=(False, "commercial-scope-unconfirmed"),
+        ), patch("whatsapp_manager._followup_cancel") as cancel, patch(
+            "whatsapp_manager._human_send"
+        ) as send:
+            res = pre_dispatch("pre_gateway_dispatch", {"event": event, "gateway": gateway})
+
+        self.assertEqual(res, {"action": "skip", "reason": "commercial-scope-unconfirmed"})
+        send.assert_called_once_with(
+            "5511888888888@s.whatsapp.net",
+            "Tudo bem por aqui! Você chegou querendo saber mais sobre a AYA, ou é sobre outra coisa?",
+            automation=True,
+        )
+        cancel.assert_called_once_with("5511888888888@s.whatsapp.net")
+
     def test_blocked_contact_media_is_not_sent_to_vision_or_asr(self):
         pre_dispatch = self.ctx.hooks.get("pre_gateway_dispatch")
         event = MagicMock()
@@ -755,12 +787,17 @@ class TestLLMContextAndPrompting(BaseWhatsAppManagerTest):
         has_pix_hire = "contratação direta" in ctx or "Pix" in ctx
         self.assertTrue(has_call or has_pix_hire, "prompt deve mencionar call de 15 min ou contratação direta")
         # Não forçar handoff só por pergunta de integração
-        self.assertIn("NÃO encaminhe para humano só porque perguntaram sobre integração", ctx)
+        self.assertIn("NÃO encaminhe só porque perguntaram sobre integração", ctx)
         self.assertIn("1 a 4 frases", ctx)
         self.assertIn("Responda no idioma em que o lead escreveu", ctx)
         self.assertIn("Não anuncie espanhol como idioma da oferta", ctx)
         self.assertIn("continua nesse mercado mesmo conversando em espanhol", ctx)
         self.assertNotIn("português, inglês ou espanhol", ctx)
+        self.assertIn("TERMINE COM UMA PERGUNTA", ctx)
+        self.assertIn("NÃO USE TRAVESSÃO", ctx)
+        self.assertIn("AGENDA OU AGENDAMENTO", ctx)
+        self.assertIn("INTENÇÃO FORTE + DÚVIDA TÉCNICA", ctx)
+        self.assertIn("RETOME A CALL PENDENTE", ctx)
 
     def test_build_support_prompt_injects_market_metadata_without_language_reclassification(self):
         import whatsapp_manager
@@ -4251,6 +4288,60 @@ class TestFetchChatHistory(BaseWhatsAppManagerTest):
 
         self.assertEqual(result, "Taylor: My cleaning company operates in the US")
 
+    @patch("urllib.request.urlopen", side_effect=OSError("message server offline"))
+    def test_local_fallback_deduplicates_same_message_id_across_phone_and_lid(
+        self, mock_urlopen
+    ):
+        from whatsapp_manager import _fetch_chat_history
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "whatsapp_messages.db"
+            conn = sqlite3.connect(db_path)
+            conn.execute(
+                """
+                CREATE TABLE messages (
+                    chat_id TEXT,
+                    sender_name TEXT,
+                    body TEXT,
+                    timestamp REAL,
+                    from_me INTEGER,
+                    message_id TEXT
+                )
+                """
+            )
+            conn.executemany(
+                "INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?)",
+                [
+                    (
+                        "12025550123@s.whatsapp.net",
+                        "Taylor",
+                        "I need help with customer messages",
+                        1,
+                        0,
+                        "SAME-INBOUND-ID",
+                    ),
+                    (
+                        "777000111@lid",
+                        "Taylor",
+                        "I need help with customer messages",
+                        2,
+                        0,
+                        "SAME-INBOUND-ID",
+                    ),
+                ],
+            )
+            conn.commit()
+            conn.close()
+
+            with patch.object(whatsapp_manager, "_MSG_DB_PATH", db_path), patch.dict(
+                whatsapp_manager._lid_to_phone,
+                {"777000111": "12025550123"},
+                clear=True,
+            ):
+                result = _fetch_chat_history("12025550123@s.whatsapp.net", limit=10)
+
+        self.assertEqual(result, "Taylor: I need help with customer messages")
+
 
 class TestResolveContactNameFromBridge(BaseWhatsAppManagerTest):
     """Testes para _resolve_contact_name_from_bridge."""
@@ -7308,6 +7399,28 @@ class TestPrepareContactReply(BaseWhatsAppManagerTest):
         out = whatsapp_manager._prepare_contact_reply("Resposta sugerida: Olá! Tudo bem?")
         self.assertEqual(out, "Olá! Tudo bem?")
 
+    def test_cabecalho_resposta_que_aya_pode_enviar_e_removido(self):
+        out = whatsapp_manager._prepare_contact_reply(
+            "Resposta que a AYA pode enviar:\n\n"
+            "Ela recebe quem chama no WhatsApp e conduz pro próximo passo. "
+            "Qual é o seu negócio hoje?"
+        )
+        self.assertEqual(
+            out,
+            "Ela recebe quem chama no WhatsApp e conduz pro próximo passo. "
+            "Qual é o seu negócio hoje?",
+        )
+
+    def test_travessao_visivel_e_trocado_por_pontuacao_natural(self):
+        out = whatsapp_manager._prepare_contact_reply(
+            "Entendo — a ideia é ajustar ao que você precisa. Ainda topa a call?"
+        )
+        self.assertNotIn("—", out)
+        self.assertEqual(
+            out,
+            "Entendo, a ideia é ajustar ao que você precisa. Ainda topa a call?",
+        )
+
     def test_variantes_de_rascunho_en_es(self):
         casos = (
             ("Suggested reply: Hi there.", "Hi there."),
@@ -8018,6 +8131,21 @@ class TestTransformLlmOutput(BaseWhatsAppManagerTest):
              patch("whatsapp_manager._human_send") as mock_send:
             result = self._call(session, response)
         return result, mock_send
+
+    @patch("whatsapp_manager.threading.Thread")
+    def test_duvida_tecnica_nao_dispara_handoff_inventado_pelo_modelo(self, mock_thread):
+        _result, mock_send = self._call_aya_payment_reply(
+            "Aqui usamos o Astrea. Sera que conseguimos integrar?",
+            "Sim, integra automaticamente. [[HANDOFF: duvida de integracao]]",
+            {"market_id": "BR", "currency": "BRL", "language": "pt"},
+        )
+
+        mock_thread.assert_not_called()
+        sent = mock_send.call_args.args[1]
+        folded = whatsapp_manager._normalize_text(sent)
+        self.assertIn("confirmar", folded)
+        self.assertIn("call", folded)
+        self.assertNotIn("integra automaticamente", folded)
 
     def test_zelle_details_are_blocked_for_price_question(self):
         response = "Zelle:\nTest Recipient\npay@example.com"
@@ -9840,14 +9968,15 @@ class TestQaFinalBrasilGoLive(unittest.TestCase):
         self.assertNotIn("em qual pais", folded)
 
     def test_preco_sem_mercado_pergunta_lugar_nao_pais(self):
-        """Quanto custa não tabela o lead — triagem + call, lugar no fio."""
+        """Preço sem contexto responde a regra e pergunta o tipo de negócio."""
         out = self._gate(
             "Quanto custa isso?",
             "A implementação é R$ 1.500.",
             contact={"language": "pt"},
         )
         folded = whatsapp_manager._normalize_text(out)
-        self.assertIn("contatos por dia", folded)
+        self.assertIn("tipo de negocio", folded)
+        self.assertNotIn("contatos por dia", folded)
         self.assertNotIn("valor unico de tabela", folded)
         self.assertNotIn("como voces atendem esses pedidos hoje", folded)
         self.assertNotIn("1.500", out)
@@ -9863,8 +9992,8 @@ class TestQaFinalBrasilGoLive(unittest.TestCase):
             contact={"language": "pt"},
         )
         folded = whatsapp_manager._normalize_text(out)
-        self.assertIn("contatos por dia", folded)
-        self.assertNotIn("investimento e", folded)
+        self.assertIn("tipo de negocio", folded)
+        self.assertIn("investimento muda", folded)
         self.assertNotIn("tony", folded)
         self.assertNotIn("997", out)
 
@@ -9895,6 +10024,20 @@ class TestQaFinalBrasilGoLive(unittest.TestCase):
             with self.subTest(msg=msg):
                 self.assertTrue(whatsapp_manager._asks_about_price(msg), msg)
 
+    def test_preco_direto_sem_contexto_responde_antes_de_perguntar_o_negocio(self):
+        out = self._gate(
+            "E quanto q custa?",
+            "Me conta como funciona seu atendimento hoje.",
+            contact={"market_id": "BR", "language": "pt"},
+        )
+        folded = whatsapp_manager._normalize_text(out)
+        self.assertIn("investimento", folded)
+        self.assertIn("call", folded)
+        self.assertIn("tipo de negocio", folded)
+        self.assertNotIn("contatos por dia", folded)
+        self.assertTrue(out.rstrip().endswith("?"), out)
+        self.assertEqual(out.count("?"), 1)
+
     def test_coloquiais_de_compra_sao_intencao(self):
         for msg in (
             "quero fechar",
@@ -9903,6 +10046,13 @@ class TestQaFinalBrasilGoLive(unittest.TestCase):
         ):
             with self.subTest(msg=msg):
                 self.assertTrue(whatsapp_manager._has_explicit_purchase_intent(msg), msg)
+
+    def test_pedido_de_agendamento_do_negocio_nao_e_aceite_de_call(self):
+        self.assertFalse(
+            whatsapp_manager._wants_sales_call(
+                "Quero que a IA consiga agendar os pacientes automaticamente"
+            )
+        )
 
     def test_pos_pagamento_coloquial_nao_e_pedido_de_dados(self):
         """Teste #09: 'Fiz o Pix. E agora?' não pode liberar (nem reoferecer) Pix."""
@@ -9986,13 +10136,14 @@ class TestQaFinalBrasilGoLive(unittest.TestCase):
         self.assertEqual(up.get("market_id"), "BR")
 
     def test_preco_com_mercado_conhecido_nao_repergunta_pais(self):
-        """Mercado já é BR e o lead perguntou preço — triagem/call, não tabela."""
+        """Mercado BR sem contexto pede o negócio, não país nem tabela."""
         out = self._gate(
             "Quanto custa?",
             "Em qual país sua empresa atua?",
         )
         folded = whatsapp_manager._normalize_text(out)
-        self.assertIn("contatos por dia", folded)
+        self.assertIn("tipo de negocio", folded)
+        self.assertNotIn("contatos por dia", folded)
         self.assertNotIn("1.500", out)
         self.assertNotIn("país", out.lower())
 
@@ -10002,7 +10153,7 @@ class TestQaFinalBrasilGoLive(unittest.TestCase):
             "Pode pagar pelo Pix: CNPJ 44.249.819/0001-62.",
         )
         folded = whatsapp_manager._normalize_text(out)
-        self.assertIn("equipe", folded)
+        self.assertIn("time", folded)
         self.assertIn("[[handoff:", folded.lower())
         self.assertNotIn("44.249.819", out)
 
@@ -10028,7 +10179,8 @@ class TestQaFinalBrasilGoLive(unittest.TestCase):
         )
         folded = whatsapp_manager._normalize_text(out)
         self.assertIn("maravilha", folded)
-        self.assertIn("contatos por dia", folded)
+        self.assertIn("tipo de negocio", folded)
+        self.assertNotIn("contatos por dia", folded)
         self.assertNotIn("1.500", out)
         self.assertNotIn("tambem e de goiania", folded)
 
@@ -10065,8 +10217,7 @@ class TestQaFinalBrasilGoLive(unittest.TestCase):
         self.assertIn("08h", out)
 
     def test_brasil_depois_da_pergunta_retoma_preco_pendente(self):
-        """Teste #05: Quanto custa? → país → Brasil. Volta para o preço, não para
-        qualificação."""
+        """Quanto custa? → país → Brasil responde a regra e retoma a descoberta."""
         historico = (
             "Lead: Quanto custa?\n"
             "AYA: Em qual país sua empresa atua?\n"
@@ -10077,9 +10228,9 @@ class TestQaFinalBrasilGoLive(unittest.TestCase):
             historico=historico,
         )
         folded = whatsapp_manager._normalize_text(out)
-        self.assertIn("contatos por dia", folded)
+        self.assertIn("tipo de negocio", folded)
+        self.assertNotIn("contatos por dia", folded)
         self.assertNotIn("1.500", out)
-        self.assertNotIn("Que tipo de empresa", out)
 
     def test_estado_da_conversa_inclui_mercado_ja_identificado(self):
         bloco = whatsapp_manager._conversation_state_block(
@@ -10091,6 +10242,105 @@ class TestQaFinalBrasilGoLive(unittest.TestCase):
         folded = whatsapp_manager._normalize_text(bloco)
         self.assertIn("mercado ja identificado", folded)
         self.assertIn("brasil", folded)
+
+    def test_estado_da_conversa_injeta_direcao_v2_do_turno(self):
+        historico = (
+            "Lead: Tenho um escritório de advocacia\n"
+            "AYA: Faz sentido eu te mostrar como ficaria isso no escritório. "
+            "Topa uma call rápida essa semana?\n"
+        )
+        integracao = whatsapp_manager._conversation_state_block(
+            _BR_QA_CHAT,
+            rules_content=_BR_QA_RULES,
+            contact_info={"market_id": "BR", "language": "pt"},
+            history=historico,
+            user_message="Aqui usamos o Astrea, será que conseguimos integrar?",
+        )
+        folded_integracao = whatsapp_manager._normalize_text(integracao)
+        self.assertIn("retome o convite da call", folded_integracao)
+        self.assertIn("ressalve somente a integracao", folded_integracao)
+
+        compra_forte = whatsapp_manager._conversation_state_block(
+            _BR_QA_CHAT,
+            rules_content=_BR_QA_RULES,
+            contact_info={"market_id": "BR", "language": "pt"},
+            history="Lead: oi",
+            user_message=(
+                "Queria colocar a IA na minha contabilidade e precisava que ela "
+                "reunisse documentos e subisse no meu sistema"
+            ),
+        )
+        folded_compra = whatsapp_manager._normalize_text(compra_forte)
+        self.assertIn("intencao forte de compra", folded_compra)
+        self.assertIn("leve direto para a call", folded_compra)
+
+    def test_integracao_nao_confirmada_nao_inventa_e_retoma_call_pendente(self):
+        historico = (
+            "Lead: Tenho um escritorio de advocacia\n"
+            "AYA: Faz sentido eu te mostrar como ficaria isso no escritorio. "
+            "Topa uma call rapida essa semana?\n"
+        )
+        out = whatsapp_manager._enforce_aya_capability_output_gate(
+            "Sim, a AYA integra com o Astrea automaticamente.",
+            user_message="Aqui usamos o Astrea, sera que conseguimos integrar?",
+            contact_info={"market_id": "BR", "language": "pt"},
+            history=historico,
+        )
+        folded = whatsapp_manager._normalize_text(out)
+        self.assertIn("confirmar", folded)
+        self.assertIn("call", folded)
+        self.assertIn("ainda topa", folded)
+        self.assertNotIn("integra com o astrea automaticamente", folded)
+        self.assertTrue(out.rstrip().endswith("?"), out)
+
+    def test_integracao_nao_confirmada_preserva_ressalva_segura(self):
+        historico = (
+            "AYA: Faz sentido eu te mostrar como ficaria isso. "
+            "Topa uma call rapida essa semana?\n"
+        )
+        resposta = (
+            "Essa integracao eu prefiro confirmar na configuracao pra nao te passar "
+            "errado. Ainda topa a call?"
+        )
+        out = whatsapp_manager._enforce_aya_capability_output_gate(
+            resposta,
+            user_message="O sistema e o Astrea. Consegue integrar?",
+            contact_info={"market_id": "BR", "language": "pt"},
+            history=historico,
+        )
+        self.assertEqual(out, resposta)
+
+    def test_agendamento_sem_integracao_confirmada_nao_vira_promessa(self):
+        out = whatsapp_manager._enforce_aya_capability_output_gate(
+            "Pronto, reservei o horario e o agendamento esta confirmado.",
+            user_message=(
+                "Sou psicoterapeuta e precisava de uma IA que recebesse o pessoal "
+                "e fizesse o agendamento"
+            ),
+            contact_info={"market_id": "BR", "language": "pt"},
+            history="Lead: Sou psicoterapeuta e atendo sozinho\n",
+        )
+        folded = whatsapp_manager._normalize_text(out)
+        self.assertIn("call", folded)
+        self.assertNotIn("reservei", folded)
+        self.assertNotIn("confirmado", folded)
+        self.assertTrue(out.rstrip().endswith("?"), out)
+
+    def test_intencao_forte_com_capacidade_tecnica_vai_direto_para_call(self):
+        out = whatsapp_manager._enforce_aya_capability_output_gate(
+            "Sim, ela sobe todos os documentos automaticamente no seu sistema.",
+            user_message=(
+                "Quero colocar a IA na minha empresa de contabilidade. Precisava que "
+                "ela reunisse documentos e subisse no meu sistema"
+            ),
+            contact_info={"market_id": "BR", "language": "pt"},
+            history="Lead: Oi\n",
+        )
+        folded = whatsapp_manager._normalize_text(out)
+        self.assertIn("maravilha", folded)
+        self.assertIn("call", folded)
+        self.assertNotIn("sobe todos os documentos automaticamente", folded)
+        self.assertTrue(out.rstrip().endswith("?"), out)
 
     def test_preco_br_e_proposta_nao_tabela_nem_espanhol(self):
         """Brasil: perguntou preço → proposta personalizada + call. Sem 1.500,
@@ -10162,6 +10412,52 @@ class TestQaFinalBrasilGoLive(unittest.TestCase):
         self.assertNotIn("valor unico de tabela", folded)
         self.assertIn("contatos por dia", folded)
 
+    def test_preco_depois_de_convite_de_call_retoma_o_convite(self):
+        historico = (
+            "Lead: Tenho um salão de beleza\n"
+            "AYA: Hoje o atendimento do WhatsApp fica só com você ou tem alguém ajudando?\n"
+            "Lead: Tem uma secretária, mas ela se perde por ter outras demandas\n"
+            "AYA: Faz sentido eu te mostrar como ficaria isso no seu salão. "
+            "Topa uma call rápida essa semana?\n"
+        )
+        out = self._gate(
+            "E qual o valor?",
+            "A implementação custa R$ 1.500.",
+            historico=historico,
+            contact={"market_id": "BR", "language": "pt"},
+        )
+        folded = whatsapp_manager._normalize_text(out)
+        self.assertIn("personalizado", folded)
+        self.assertIn("call", folded)
+        self.assertIn("ainda topa", folded)
+        self.assertNotIn("contatos por dia", folded)
+        self.assertNotIn("1.500", out)
+        self.assertTrue(out.rstrip().endswith("?"), out)
+
+    def test_objecao_preserva_resposta_segura_ligada_a_dor_do_lead(self):
+        historico = (
+            "Lead: Tenho um salão de beleza\n"
+            "Lead: Tem uma secretária, mas ela se perde por ter outras demandas\n"
+            "AYA: Faz sentido eu te mostrar como ficaria isso no seu salão. "
+            "Topa uma call rápida essa semana?\n"
+            "Lead: E qual o valor?\n"
+            "AYA: O investimento é personalizado. Ainda topa a call?\n"
+        )
+        resposta_preferida = (
+            "Entendo a preocupação. Faz sentido principalmente pra parar de perder "
+            "atendimento por causa da sua secretária ficando sobrecarregada. "
+            "Ainda topa a call?"
+        )
+        out = self._gate(
+            "E é muito caro? Se for, nem compensa entrar em reunião kk",
+            resposta_preferida,
+            historico=historico,
+            contact={"market_id": "BR", "language": "pt"},
+        )
+        self.assertEqual(out, resposta_preferida)
+        self.assertNotIn("contatos por dia", whatsapp_manager._normalize_text(out))
+        self.assertTrue(out.rstrip().endswith("?"), out)
+
     def test_objecao_de_preco_reconhece_antes_de_qualificar(self):
         out = self._gate(
             "tá caro",
@@ -10197,9 +10493,71 @@ class TestQaFinalBrasilGoLive(unittest.TestCase):
             contact={"market_id": "BR", "language": "pt"},
         )
         folded = whatsapp_manager._normalize_text(out)
-        self.assertIn("equipe", folded)
+        self.assertIn("time", folded)
+        self.assertIn("confirmar o horario", folded)
         self.assertIn("manha ou tarde", folded)
         self.assertIn("[[HANDOFF:", out)
+
+    def test_sim_aceita_convite_pendente_e_faz_handoff(self):
+        historico = (
+            "Lead: Chegam uns 10 pacientes por dia\n"
+            "AYA: Faz sentido eu te mostrar como ficaria isso funcionando na sua clínica. "
+            "Topa uma call rápida essa semana?\n"
+        )
+        out = self._gate(
+            "Sim",
+            "Que tipo de empresa você tem?",
+            historico=historico,
+            contact={"market_id": "BR", "language": "pt"},
+        )
+        folded = whatsapp_manager._normalize_text(out)
+        self.assertIn("manha ou tarde", folded)
+        self.assertIn("[[HANDOFF:", out)
+        visible, reason = whatsapp_manager._extract_handoff(out)
+        self.assertTrue(reason)
+        self.assertTrue(visible.rstrip().endswith("?"), visible)
+
+    def test_preferencia_no_aceite_da_call_e_preservada_no_handoff(self):
+        historico = (
+            "Lead: Sou psicoterapeuta e preciso de ajuda com agendamento\n"
+            "AYA: Faz sentido eu te mostrar como isso funcionaria aí. "
+            "Topa uma call rápida essa semana?\n"
+        )
+        out = self._gate(
+            "Pode ser de manhã",
+            "Vou reservar amanhã às 9h.",
+            historico=historico,
+            contact={"market_id": "BR", "language": "pt"},
+        )
+        folded = whatsapp_manager._normalize_text(out)
+        self.assertIn("de manha", folded)
+        self.assertIn("confirmar com o time", folded)
+        self.assertNotIn("manha ou tarde", folded)
+        self.assertIn("[[HANDOFF:", out)
+        visible, reason = whatsapp_manager._extract_handoff(out)
+        self.assertTrue(reason)
+        self.assertTrue(visible.rstrip().endswith("?"), visible)
+        self.assertNotIn("agendado", folded)
+        self.assertNotIn("reservei", folded)
+
+    def test_preferencia_depois_do_handoff_nao_repete_marcador(self):
+        historico = (
+            "Lead: Sim, podemos marcar\n"
+            "AYA: Show! Te encaminho já com o time pra confirmar o horário certinho. "
+            "Período de manhã ou tarde fica melhor pra você?\n"
+        )
+        out = self._gate(
+            "Pode ser de tarde, mas mais pro final da tarde",
+            "Vou reservar às 17h.",
+            historico=historico,
+            contact={"market_id": "BR", "language": "pt"},
+        )
+        folded = whatsapp_manager._normalize_text(out)
+        self.assertIn("final da tarde", folded)
+        self.assertIn("confirmar com o time", folded)
+        self.assertNotIn("[[handoff", folded)
+        self.assertTrue(out.rstrip().endswith("?"), out)
+        self.assertNotIn("reservei", folded)
 
     def test_marcador_da_guarda_nao_sobrevive_ao_caminho_do_lead(self):
         """O gate precisa do marcador para avisar o dono; o lead não vê."""
@@ -10215,7 +10573,8 @@ class TestQaFinalBrasilGoLive(unittest.TestCase):
         self.assertTrue(motivo)
         self.assertNotIn("[[handoff", folded)
         self.assertNotIn("handoff:", folded)
-        self.assertIn("posso encaminhar isso para a equipe continuar com voce", folded)
+        self.assertIn("te encaminho ja com o time", folded)
+        self.assertIn("confirmar o horario", folded)
         self.assertIn("manha ou tarde", folded)
 
     def test_objecao_depois_da_triagem_ainda_reconhece(self):

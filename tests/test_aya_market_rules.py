@@ -98,6 +98,16 @@ class TestAyaMarketRules(unittest.TestCase):
         self.assertNotIn("precisa de technical validation", combined)
         self.assertIn("não usar “human validation”", combined)
 
+    def test_v2_conversation_contract_is_explicit(self):
+        combined = f"{RULES}\n{SOUL}\n{MASTER_PROMPT}".lower()
+        self.assertIn("termine a parte visível de toda resposta com uma pergunta", combined)
+        self.assertIn("não use travessão", combined)
+        self.assertIn("negócio e o problema na mesma mensagem", combined)
+        self.assertIn("agenda ou agendamento", combined)
+        self.assertIn("intenção forte de compra", combined)
+        self.assertIn("retome o convite da call", combined)
+        self.assertNotIn("no máximo **duas perguntas** na conversa inteira", SOUL.lower())
+
 
 if __name__ == "__main__":
     unittest.main()
