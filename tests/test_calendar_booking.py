@@ -38,6 +38,12 @@ class _FreeBusy:
         return _Request({"calendars": {"primary": {"busy": list(self.service.busy)}}})
 
 
+class _StatusError(RuntimeError):
+    def __init__(self, status, message="google api error"):
+        super().__init__(message)
+        self.resp = SimpleNamespace(status=status)
+
+
 class _Events:
     def __init__(self, service):
         self.service = service
@@ -52,17 +58,25 @@ class _Events:
 
     def get(self, **kwargs):
         self.service.get_calls.append(kwargs)
-        return _Request({
-            "id": kwargs["eventId"],
-            "summary": "Call WhatsAYA — Lead",
-            "htmlLink": "https://calendar.google.test/existing",
-        })
+        payload = self.service.existing_event
+        if payload is None and getattr(getattr(self.service.insert_error, "resp", None), "status", None) == 409:
+            payload = {
+                "id": kwargs["eventId"],
+                "summary": "Call WhatsAYA — Lead",
+                "htmlLink": "https://calendar.google.test/existing",
+            }
+        if payload is None:
+            return _Request(error=_StatusError(404, "not found"))
+        result = dict(payload)
+        result.setdefault("id", kwargs["eventId"])
+        return _Request(result)
 
 
 class FakeService:
-    def __init__(self, busy=None, insert_error=None):
+    def __init__(self, busy=None, insert_error=None, existing_event=None):
         self.busy = busy or []
         self.insert_error = insert_error
+        self.existing_event = existing_event
         self.freebusy_bodies = []
         self.insert_calls = []
         self.get_calls = []
@@ -171,6 +185,30 @@ class CalendarBookingTests(unittest.TestCase):
             )
         self.assertEqual(result["status"], "already_exists")
         self.assertEqual(len(service.get_calls), 1)
+
+    def test_create_booking_retry_recognizes_own_busy_event(self):
+        service = FakeService(
+            busy=[{
+                "start": "2026-08-31T14:00:00-03:00",
+                "end": "2026-08-31T14:30:00-03:00",
+            }],
+            existing_event={
+                "summary": "Call WhatsAYA — Maria",
+                "htmlLink": "https://calendar.google.test/existing",
+            },
+        )
+        with patch("calendar_booking.datetime") as mocked_datetime:
+            mocked_datetime.now.return_value = datetime(2026, 8, 28, 10, 0, tzinfo=TZ)
+            mocked_datetime.fromisoformat.side_effect = datetime.fromisoformat
+            result = cb.create_booking(
+                chat_id="5562999999999@s.whatsapp.net",
+                start="2026-08-31T14:00:00-03:00",
+                end="2026-08-31T14:30:00-03:00",
+                service=service,
+            )
+        self.assertEqual(result["status"], "already_exists")
+        self.assertEqual(len(service.get_calls), 1)
+        self.assertFalse(service.insert_calls)
 
 
 if __name__ == "__main__":

@@ -242,6 +242,19 @@ def _event_id(chat_id: str, start: datetime, end: datetime) -> str:
     return "c" + hashlib.sha256(material).hexdigest()[:40]
 
 
+def _existing_event(api, event_id: str) -> dict[str, Any] | None:
+    """Busca apenas o ID determinístico da WhatsAYA; 404 significa ausente."""
+    try:
+        return api.events().get(calendarId=calendar_id(), eventId=event_id).execute()
+    except Exception as exc:
+        status = getattr(getattr(exc, "resp", None), "status", None)
+        if status == 404:
+            return None
+        raise CalendarBookingError(
+            f"Falha ao verificar reserva existente no Google Calendar: {type(exc).__name__}"
+        ) from exc
+
+
 def create_booking(
     *,
     chat_id: str,
@@ -290,20 +303,28 @@ def create_booking(
     with _API_LOCK:
         api = service or _service()
         if _freebusy(api, start_dt, end_dt):
-            raise CalendarBookingError("Esse horário acabou de ficar ocupado; consulte novas opções.")
-        try:
-            event = api.events().insert(
-                calendarId=calendar_id(),
-                body=body,
-                sendUpdates="none",
-            ).execute()
-            created = True
-        except Exception as exc:
-            status = getattr(getattr(exc, "resp", None), "status", None)
-            if status != 409:
-                raise CalendarBookingError(f"Falha ao criar evento no Google Calendar: {type(exc).__name__}") from exc
-            event = api.events().get(calendarId=calendar_id(), eventId=event_id).execute()
+            # Em um retry real, o próprio evento criado pela primeira chamada aparece
+            # como ocupado. Confirme o ID determinístico antes de tratar como conflito.
+            event = _existing_event(api, event_id)
+            if event is None:
+                raise CalendarBookingError("Esse horário acabou de ficar ocupado; consulte novas opções.")
             created = False
+        else:
+            try:
+                event = api.events().insert(
+                    calendarId=calendar_id(),
+                    body=body,
+                    sendUpdates="none",
+                ).execute()
+                created = True
+            except Exception as exc:
+                status = getattr(getattr(exc, "resp", None), "status", None)
+                if status != 409:
+                    raise CalendarBookingError(f"Falha ao criar evento no Google Calendar: {type(exc).__name__}") from exc
+                event = _existing_event(api, event_id)
+                if event is None:
+                    raise CalendarBookingError("O Google reportou conflito, mas a reserva existente não foi encontrada.")
+                created = False
 
     return {
         "status": "created" if created else "already_exists",
