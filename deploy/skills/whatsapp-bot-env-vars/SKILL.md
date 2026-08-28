@@ -42,7 +42,7 @@ pre_llm_call → aplica persona (Modo A = André, Modo B = Cliente)
 - Hook `pre_llm_call` injeta persona de suporte + SOUL_WHATSAPP.md + support_rules.md
 - Ferramentas DESABILITADAS para clientes (nenhum terminal/arquivos)
 - Modelo: `WHATSAPP_CLIENT_MODEL` (default: `gemini-3.5-flash`)
-- Delay: `WHATSAPP_FIRST_RESPONSE_DELAY_S` segundos (default: 30)
+- Delay legado: `WHATSAPP_FIRST_RESPONSE_DELAY_S` segundos (default: 0; o debounce já faz a espera)
 
 ## Arquivos Principais
 

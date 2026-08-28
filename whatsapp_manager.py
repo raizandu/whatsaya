@@ -271,11 +271,11 @@ class PluginConfig:
 
     @property
     def whatsapp_first_response_delay_s(self) -> int:
-        val = os.getenv("WHATSAPP_FIRST_RESPONSE_DELAY_S", "30").strip()
+        val = os.getenv("WHATSAPP_FIRST_RESPONSE_DELAY_S", "0").strip()
         try:
             return int(val)
         except ValueError:
-            return 30
+            return 0
 
     @property
     def whatsapp_live_classify_cooldown(self) -> int:
@@ -1573,7 +1573,7 @@ def isSystemError(message: str) -> bool:
 
 
 def _human_send(chat_id: str, message: str, *, automation: bool = False) -> str | None:
-    """Envia mensagem; `automation=True` revalida o gate antes de cada bolha."""
+    """Envia a primeira bolha já pronta e espaça somente as seguintes."""
     import random
 
     message = _strip_fish_cues(message)
@@ -1627,30 +1627,20 @@ def _human_send(chat_id: str, message: str, *, automation: bool = False) -> str 
         return
     logger.info(f"[human-send] chat={chat_id!r} bubbles={len(parts)} sizes={[len(p) for p in parts]}")
     try:
-        think_min = float(os.getenv("WHATSAPP_HUMAN_THINK_MIN_S", "3.5"))
-        think_max = float(os.getenv("WHATSAPP_HUMAN_THINK_MAX_S", "7.5"))
-        gap_min = float(os.getenv("WHATSAPP_HUMAN_GAP_MIN_S", "2.2"))
-        gap_max = float(os.getenv("WHATSAPP_HUMAN_GAP_MAX_S", "4.0"))
+        gap_min = float(os.getenv("WHATSAPP_HUMAN_GAP_MIN_S", "0.8"))
+        gap_max = float(os.getenv("WHATSAPP_HUMAN_GAP_MAX_S", "1.2"))
     except (TypeError, ValueError):
-        think_min, think_max = 3.5, 7.5
-        gap_min, gap_max = 2.2, 4.0
-    if think_max < think_min:
-        think_max = think_min
+        gap_min, gap_max = 0.8, 1.2
+    gap_min = max(0.0, gap_min)
     if gap_max < gap_min:
         gap_max = gap_min
     fast_test = os.getenv("WHATSAPP_HUMAN_TEST_MODE", "").strip().lower() in {"1", "true", "yes"}
-    if not fast_test:
-        _typing(chat_id)
-        time.sleep(random.uniform(think_min, think_max))
     last_message_id = None
     for i, part in enumerate(parts):
-        if not fast_test:
+        if not fast_test and i > 0:
             _typing(chat_id)
-            delay = min(max(len(part) * 0.085 + random.uniform(1.4, 2.4), 2.0), 8.0)
-            time.sleep(delay)
-        last_message_id = _send_one(chat_id, part) or last_message_id
-        if not fast_test and i < len(parts) - 1:
             time.sleep(random.uniform(gap_min, gap_max))
+        last_message_id = _send_one(chat_id, part) or last_message_id
     return last_message_id
 
 

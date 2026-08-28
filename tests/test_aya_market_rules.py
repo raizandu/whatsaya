@@ -11,6 +11,7 @@ RULES = (INSTANCE_DIR / "support_rules.md").read_text(encoding="utf-8")
 SOUL = (INSTANCE_DIR / "SOUL_WHATSAPP.md").read_text(encoding="utf-8")
 MASTER_PROMPT = (INSTANCE_DIR / "PROMPT_MESTRE.md").read_text(encoding="utf-8")
 COMPOSE = (REPO_ROOT / "deploy" / "docker-compose.yml").read_text(encoding="utf-8")
+ENV_EXAMPLE = (REPO_ROOT / "deploy" / ".env.example").read_text(encoding="utf-8")
 PLUGIN_SOURCE = (REPO_ROOT / "whatsapp_manager.py").read_text(encoding="utf-8")
 
 
@@ -54,6 +55,13 @@ class TestAyaMarketRules(unittest.TestCase):
             "WHATSAPP_DEBOUNCE_TYPING_REFRESH_MS=${WHATSAPP_DEBOUNCE_TYPING_REFRESH_MS:-5000}",
             COMPOSE,
         )
+
+    def test_runtime_does_not_stack_legacy_first_response_delay(self):
+        self.assertIn(
+            "WHATSAPP_FIRST_RESPONSE_DELAY_S=${WHATSAPP_FIRST_RESPONSE_DELAY_S:-0}",
+            COMPOSE,
+        )
+        self.assertIn("WHATSAPP_FIRST_RESPONSE_DELAY_S=0", ENV_EXAMPLE)
 
     def test_united_states_is_confirmed_without_advertising_spanish(self):
         """EUA é mercado confirmado; espanhol não entra como idioma da oferta."""

@@ -607,6 +607,8 @@ services:
       - WHATSAPP_DEBOUNCE_DECAY=${WHATSAPP_DEBOUNCE_DECAY:-0.6}
       - WHATSAPP_DEBOUNCE_SKIP_SELF_CHAT=${WHATSAPP_DEBOUNCE_SKIP_SELF_CHAT:-true}
       - WHATSAPP_DEBOUNCE_TYPING_REFRESH_MS=${WHATSAPP_DEBOUNCE_TYPING_REFRESH_MS:-5000}
+      # O debounce já é a espera humanizada. Não empilhe outro delay no primeiro turno.
+      - WHATSAPP_FIRST_RESPONSE_DELAY_S=${WHATSAPP_FIRST_RESPONSE_DELAY_S:-0}
 
       # Modelos por função — padrão OpenRouter (requer OPENROUTER_API_KEY).
       #

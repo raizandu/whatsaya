@@ -7359,6 +7359,58 @@ class TestSplitHumanBubbles(unittest.TestCase):
         self.assertNotIn("teste. Frase", parts[-1])
 
 
+class TestHumanSendPacing(unittest.TestCase):
+    """A geração e o debounce já são a espera antes da primeira bolha."""
+
+    def test_legacy_first_response_delay_defaults_and_falls_back_to_zero(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("WHATSAPP_FIRST_RESPONSE_DELAY_S", None)
+            self.assertEqual(whatsapp_manager.config.whatsapp_first_response_delay_s, 0)
+        with patch.dict(os.environ, {"WHATSAPP_FIRST_RESPONSE_DELAY_S": "invalid"}):
+            self.assertEqual(whatsapp_manager.config.whatsapp_first_response_delay_s, 0)
+
+    def test_first_bubble_is_immediate_and_only_following_bubbles_have_short_gap(self):
+        events = []
+
+        def fake_urlopen(request, *args, **kwargs):
+            url = request.full_url if hasattr(request, "full_url") else str(request)
+            events.append(("http", url))
+            response = MagicMock()
+            response.__enter__.return_value.read.return_value = b'{"messageId": "mid-test"}'
+            return response
+
+        def fake_sleep(seconds):
+            events.append(("sleep", seconds))
+
+        human_env = (
+            "WHATSAPP_HUMAN_TEST_MODE",
+            "WHATSAPP_HUMAN_GAP_MIN_S",
+            "WHATSAPP_HUMAN_GAP_MAX_S",
+        )
+        with patch.dict(os.environ, {}, clear=False), patch(
+            "urllib.request.urlopen", side_effect=fake_urlopen
+        ), patch("time.sleep", side_effect=fake_sleep), patch(
+            "random.uniform", side_effect=lambda low, high: (low + high) / 2
+        ):
+            for key in human_env:
+                os.environ.pop(key, None)
+            result = whatsapp_manager._human_send(
+                "5511888888888@s.whatsapp.net",
+                whatsapp_manager._AYA_STANDARD_OPENING_PT,
+            )
+
+        self.assertEqual(result, "mid-test")
+        self.assertEqual(events[0], ("http", f"{whatsapp_manager.BRIDGE_URL}/send"))
+        sends = [event for event in events if event == ("http", f"{whatsapp_manager.BRIDGE_URL}/send")]
+        typing = [event for event in events if event == ("http", f"{whatsapp_manager.BRIDGE_URL}/typing")]
+        sleeps = [seconds for kind, seconds in events if kind == "sleep"]
+        self.assertEqual(len(sends), 3)
+        self.assertEqual(len(typing), 2)
+        self.assertEqual(len(sleeps), 2)
+        self.assertTrue(all(0.8 <= seconds <= 1.2 for seconds in sleeps), sleeps)
+        self.assertLessEqual(sum(sleeps), 2.4)
+
+
 class TestPostLlmCall(BaseWhatsAppManagerTest):
     """post_llm_call só processa EXEC do dono. Contatos vão em transform_llm_output."""
 
