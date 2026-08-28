@@ -38,6 +38,8 @@ class TestAyaMarketRules(unittest.TestCase):
 
     def test_client_profile_loads_handoff_hooks_and_native_stt(self):
         self.assertIn("'plugins': {'enabled': ['whatsapp-manager']}", COMPOSE)
+        self.assertIn('PROFILE_PLUGIN_ROOT=/opt/data/.hermes/profiles/whatsapp/plugins', COMPOSE)
+        self.assertIn('ln -sfn "$$PLUGIN_DIR" "$$PROFILE_PLUGIN_LINK"', COMPOSE)
         self.assertIn("'provider': 'local'", COMPOSE)
         self.assertIn("'local': {'model': 'base', 'language': 'pt'}", COMPOSE)
         self.assertIn("'voice': {'auto_tts': False}", COMPOSE)

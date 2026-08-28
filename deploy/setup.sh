@@ -303,6 +303,19 @@ else
     fi
 fi
 
+# O runtime multiplexado cria um PluginManager com o HERMES_HOME do perfil.
+# Expor o mesmo plugin nesse diretório faz os hooks comerciais rodarem também
+# nas sessões externas roteadas para o perfil whatsapp.
+PROFILE_PLUGIN_ROOT="$BASE_DIR/profiles/whatsapp/plugins"
+PROFILE_PLUGIN_LINK="$PROFILE_PLUGIN_ROOT/whatsapp-manager"
+mkdir -p "$PROFILE_PLUGIN_ROOT"
+if [ -e "$PROFILE_PLUGIN_LINK" ] && [ ! -L "$PROFILE_PLUGIN_LINK" ]; then
+    echo "  - Plugin próprio do perfil já existe; mantendo $PROFILE_PLUGIN_LINK"
+else
+    ln -sfn "$BASE_DIR/plugins/whatsapp-manager" "$PROFILE_PLUGIN_LINK"
+    echo "  ✓ Plugin whatsapp-manager disponibilizado no perfil whatsapp."
+fi
+
 # Baixa o modelo de config.yaml se ele não existir localmente
 if [ ! -f "$BASE_DIR/config.yaml" ]; then
     safe_download "$RAW_URL/config.yaml.example" "$BASE_DIR/config.yaml" "$CURL_CODE_AUTH_HEADER" "config.yaml"

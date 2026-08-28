@@ -20,9 +20,9 @@ Duas armadilhas que este script existe para não repetir:
    de teste estava cadastrado lá, a auto-detecção devolveu zero, e 39 das 74
    mensagens sobreviveriam sob `@lid` — com a AYA seguindo "lembrando" do lead.
    A fonte confiável é o mapa `lidToPhone` do bridge; o cadastro é só fallback.
-2. **`sessions.json` existe em mais de um lugar.** A sessão viva estava em
-   `profiles/whatsapp/sessions/`, não no caminho documentado. A busca é
-   recursiva.
+2. **O estado existe em mais de um lugar.** Tanto `sessions.json` quanto
+   `state.db` podem estar sob `profiles/whatsapp/`, não só na raiz. As buscas
+   são recursivas.
 """
 from __future__ import annotations
 
@@ -91,6 +91,14 @@ def find_session_files(base: Path) -> list[Path]:
     return sorted(p for p in base.rglob("sessions.json") if p.is_file())
 
 
+def find_state_files(base: Path) -> list[Path]:
+    """Todos os `state.db` sob a base, inclusive os bancos de cada perfil."""
+    base = Path(base)
+    if not base.is_dir():
+        return []
+    return sorted(p for p in base.rglob("state.db") if p.is_file())
+
+
 def _where(col: str, n: int) -> str:
     return "(" + " OR ".join([f"{col} LIKE ?"] * n) + ")"
 
@@ -98,15 +106,9 @@ def _where(col: str, n: int) -> str:
 def _targets(hermes: Path, patterns: list[str]):
     p = patterns
     pp = patterns + patterns
-    return [
+    targets = [
         ("whatsapp_messages/messages", hermes / "whatsapp_messages.db",
          "FROM messages WHERE " + _where("chat_id", len(p)), p),
-        ("state/messages", hermes / "state.db",
-         "FROM messages WHERE session_id IN (SELECT id FROM sessions WHERE "
-         + _where("user_id", len(p)) + " OR " + _where("chat_id", len(p)) + ")", pp),
-        ("state/sessions", hermes / "state.db",
-         "FROM sessions WHERE " + _where("user_id", len(p)) + " OR "
-         + _where("chat_id", len(p)), pp),
         ("followups/lead_state", hermes / "commercial_followups.db",
          "FROM lead_state WHERE " + _where("chat_id", len(p)), p),
         ("followups/followup_jobs", hermes / "commercial_followups.db",
@@ -114,6 +116,18 @@ def _targets(hermes: Path, patterns: list[str]):
         ("followups/crm_outbox", hermes / "commercial_followups.db",
          "FROM crm_outbox WHERE " + _where("chat_id", len(p)), p),
     ]
+    for state_db in find_state_files(hermes):
+        relative = state_db.relative_to(hermes).as_posix()
+        targets.extend([
+            (f"{relative}/messages", state_db,
+             "FROM messages WHERE session_id IN (SELECT id FROM sessions WHERE "
+             + _where("user_id", len(p)) + " OR "
+             + _where("chat_id", len(p)) + ")", pp),
+            (f"{relative}/sessions", state_db,
+             "FROM sessions WHERE " + _where("user_id", len(p)) + " OR "
+             + _where("chat_id", len(p)), pp),
+        ])
+    return targets
 
 
 def main(argv: list[str]) -> int:

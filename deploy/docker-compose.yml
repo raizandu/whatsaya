@@ -204,6 +204,8 @@ services:
       - -c
       - |
         PLUGIN_DIR=/opt/data/.hermes/plugins/whatsapp-manager
+        PROFILE_PLUGIN_ROOT=/opt/data/.hermes/profiles/whatsapp/plugins
+        PROFILE_PLUGIN_LINK=$$PROFILE_PLUGIN_ROOT/whatsapp-manager
         REPO_USER="$${HERMES_SETUP_GITHUB_USER:-raizandu}"
         REPO_NAME="$${HERMES_SETUP_GITHUB_REPO:-whatsaya}"
         REPO_URL="https://github.com/$$REPO_USER/$$REPO_NAME"
@@ -228,6 +230,17 @@ services:
           else
             echo "[setup] AVISO: clone falhou e nao ha codigo no volume — o plugin nao vai carregar"
           fi
+        fi
+
+        # O manager do perfil multiplexado descobre plugins no HERMES_HOME do
+        # próprio perfil. Apenas habilitar o nome no config.yaml não disponibiliza
+        # o manifesto; sem este link, nenhum hook comercial roda para clientes.
+        mkdir -p "$$PROFILE_PLUGIN_ROOT"
+        if [ -e "$$PROFILE_PLUGIN_LINK" ] && [ ! -L "$$PROFILE_PLUGIN_LINK" ]; then
+          echo "[setup] plugin próprio do perfil já existe; mantendo $$PROFILE_PLUGIN_LINK"
+        else
+          ln -sfn "$$PLUGIN_DIR" "$$PROFILE_PLUGIN_LINK"
+          echo "[setup] plugin do perfil whatsapp ligado a $$PLUGIN_DIR"
         fi
 
         # 2) Personas a partir do proprio clone, so se ainda nao existirem no volume.

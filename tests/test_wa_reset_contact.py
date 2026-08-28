@@ -8,14 +8,16 @@ seguia "lembrando" do lead depois do reset.
 from __future__ import annotations
 
 import json
+import sqlite3
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.append(str(Path(__file__).parent.parent / "deploy" / "scripts"))
 
-from wa_reset_contact import find_session_files, resolve_identifiers
+from wa_reset_contact import find_session_files, main, resolve_identifiers
 
 
 LID_MAP = {
@@ -94,6 +96,65 @@ class FindSessionFilesTest(unittest.TestCase):
     def test_base_sem_sessions_nao_explode(self):
         with tempfile.TemporaryDirectory() as tmp:
             self.assertEqual(find_session_files(Path(tmp)), [])
+
+
+class ResetProfileStateTest(unittest.TestCase):
+    """O multiplexador persiste sessões em um `state.db` por perfil.
+
+    Limpar somente o banco raiz deixa o histórico comercial vivo, mesmo quando
+    `sessions.json` já foi removido.
+    """
+
+    @staticmethod
+    def _create_state_db(path: Path, target: str, keep: str | None = None) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(path) as conn:
+            conn.execute(
+                "CREATE TABLE sessions (id TEXT PRIMARY KEY, user_id TEXT, chat_id TEXT)"
+            )
+            conn.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT)")
+            conn.execute(
+                "INSERT INTO sessions (id, user_id, chat_id) VALUES (?, ?, ?)",
+                ("target-session", target, target),
+            )
+            conn.execute(
+                "INSERT INTO messages (session_id) VALUES (?)", ("target-session",)
+            )
+            if keep:
+                conn.execute(
+                    "INSERT INTO sessions (id, user_id, chat_id) VALUES (?, ?, ?)",
+                    ("keep-session", keep, keep),
+                )
+                conn.execute(
+                    "INSERT INTO messages (session_id) VALUES (?)", ("keep-session",)
+                )
+
+    def test_apply_apaga_state_db_raiz_e_do_perfil(self):
+        target = "556281405459"
+        keep = "5511999999999"
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            hermes = base / ".hermes"
+            root_db = hermes / "state.db"
+            profile_db = hermes / "profiles" / "whatsapp" / "state.db"
+            self._create_state_db(root_db, target)
+            self._create_state_db(profile_db, target, keep)
+
+            with mock.patch("wa_reset_contact.fetch_lid_map", return_value={}):
+                result = main([target, "--base", str(base), "--apply"])
+
+            self.assertEqual(result, 0)
+            for db in (root_db, profile_db):
+                with sqlite3.connect(db) as conn:
+                    target_count = conn.execute(
+                        "SELECT COUNT(*) FROM sessions WHERE user_id = ?", (target,)
+                    ).fetchone()[0]
+                self.assertEqual(target_count, 0, db)
+            with sqlite3.connect(profile_db) as conn:
+                keep_count = conn.execute(
+                    "SELECT COUNT(*) FROM sessions WHERE user_id = ?", (keep,)
+                ).fetchone()[0]
+            self.assertEqual(keep_count, 1)
 
 
 if __name__ == "__main__":
