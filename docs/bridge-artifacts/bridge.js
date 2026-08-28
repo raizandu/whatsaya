@@ -211,6 +211,10 @@ const CHUNK_DELAY_MS = parseInt(process.env.WHATSAPP_CHUNK_DELAY_MS || '300', 10
 const WHATSAPP_DEBOUNCE_INITIAL_MS = parseInt(process.env.WHATSAPP_DEBOUNCE_INITIAL_MS || '14000', 10);
 const WHATSAPP_DEBOUNCE_MIN_MS     = parseInt(process.env.WHATSAPP_DEBOUNCE_MIN_MS     || '2000',  10);
 const WHATSAPP_DEBOUNCE_DECAY      = parseFloat(process.env.WHATSAPP_DEBOUNCE_DECAY    || '0.6');
+const WHATSAPP_DEBOUNCE_TYPING_REFRESH_MS = parseInt(
+  process.env.WHATSAPP_DEBOUNCE_TYPING_REFRESH_MS || '5000',
+  10,
+);
 // ─────────────────────────────────────────────────────────────────────────────
 // Per-call timeout for sock.sendMessage(). Baileys occasionally hangs forever
 // when uploading media to WhatsApp servers (and, less often, on text sends),
@@ -359,8 +363,34 @@ const MAX_RECENT_PROCESSED_IDS = 500;
 
 // ── Debounce buffer ──────────────────────────────────────────────────────────
 // Acumula fragmentos de mensagens de texto puro por chatId antes de enfileirar.
-// Estrutura: chatId -> { event, bodyParts: string[], debounceIds: string[], timer }
+// Estrutura: chatId -> { event, bodyParts: string[], debounceIds: string[], timer, typingTimer }
 const debounceBuffer = new Map();
+
+function sendDebounceTyping(chatId) {
+  if (!sock || typeof sock.sendPresenceUpdate !== 'function') return;
+
+  try {
+    const update = sock.sendPresenceUpdate('composing', chatId);
+    if (update && typeof update.catch === 'function') {
+      update.catch((err) => {
+        if (WHATSAPP_DEBUG) console.log(`[debounce] typing refresh failed: ${err.message}`);
+      });
+    }
+  } catch (err) {
+    if (WHATSAPP_DEBUG) console.log(`[debounce] typing refresh failed: ${err.message}`);
+  }
+}
+
+function startDebounceTyping(chatId) {
+  sendDebounceTyping(chatId);
+  const refreshMs = Number.isFinite(WHATSAPP_DEBOUNCE_TYPING_REFRESH_MS)
+    && WHATSAPP_DEBOUNCE_TYPING_REFRESH_MS > 0
+    ? WHATSAPP_DEBOUNCE_TYPING_REFRESH_MS
+    : 5000;
+  const typingTimer = setInterval(() => sendDebounceTyping(chatId), refreshMs);
+  typingTimer.unref?.();
+  return typingTimer;
+}
 
 /**
  * Calcula o próximo timer de debounce com decay exponencial.
@@ -384,6 +414,7 @@ function calcDebounceDelay(parts) {
 function flushDebounceBuffer(chatId) {
   const pending = debounceBuffer.get(chatId);
   if (!pending) return;
+  clearInterval(pending.typingTimer);
   debounceBuffer.delete(chatId);
 
   const consolidated = {
@@ -804,6 +835,7 @@ let onMessagesUpsert = async ({ messages, type }) => {
       if (pending) {
         // Já existe buffer para este chat: acumular fragmento e reduzir o timer
         clearTimeout(pending.timer);
+        sendDebounceTyping(chatId);
         pending.bodyParts.push(body);
         pending.debounceIds.push(event.messageId);
         const delay = calcDebounceDelay(pending.bodyParts.length);
@@ -819,6 +851,7 @@ let onMessagesUpsert = async ({ messages, type }) => {
           bodyParts: [body],
           debounceIds: [event.messageId],
           timer: setTimeout(() => flushDebounceBuffer(chatId), delay),
+          typingTimer: startDebounceTyping(chatId),
         });
         if (WHATSAPP_DEBUG) {
           console.log(`[debounce] iniciado chatId=${chatId} nextTimer=${delay}ms body="${body.slice(0, 40)}"`);

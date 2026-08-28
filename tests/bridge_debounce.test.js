@@ -16,12 +16,21 @@ process.env.WHATSAPP_DEBOUNCE_INITIAL_MS = '120';
 process.env.WHATSAPP_DEBOUNCE_MIN_MS = '30';
 process.env.WHATSAPP_DEBOUNCE_DECAY = '0.5';
 process.env.WHATSAPP_DEBOUNCE_SKIP_SELF_CHAT = 'true';
+process.env.WHATSAPP_DEBOUNCE_TYPING_REFRESH_MS = '25';
 
 const {
   clearRecentlyProcessedIds,
   getMessageQueue,
   onMessagesUpsert,
+  setSock,
 } = await import('../bridge.js');
+
+const presenceUpdates = [];
+setSock({
+  sendPresenceUpdate: async (state, chatId) => {
+    presenceUpdates.push({ state, chatId, at: Date.now() });
+  },
+});
 
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 const inbound = (id, body) => ({
@@ -39,9 +48,19 @@ const inbound = (id, body) => ({
 test('quick text fragments become one ordered inbound batch', async () => {
   clearRecentlyProcessedIds();
   getMessageQueue().length = 0;
+  presenceUpdates.length = 0;
 
   await onMessagesUpsert(inbound('debounce-1', 'Sim, pode ser'));
-  await wait(60);
+  assert.strictEqual(presenceUpdates[0]?.state, 'composing');
+  assert.strictEqual(presenceUpdates[0]?.chatId, 'client123@s.whatsapp.net');
+
+  await wait(35);
+  assert.ok(
+    presenceUpdates.length >= 2,
+    'typing presence should be refreshed while the first fragment remains buffered',
+  );
+
+  await wait(25);
   await onMessagesUpsert(inbound('debounce-2', 'Quanto q custa?'));
 
   assert.strictEqual(getMessageQueue().length, 0);
@@ -51,4 +70,12 @@ test('quick text fragments become one ordered inbound batch', async () => {
   assert.strictEqual(queue.length, 1);
   assert.strictEqual(queue[0].body, 'Sim, pode ser\nQuanto q custa?');
   assert.deepStrictEqual(queue[0].debounceIds, ['debounce-1', 'debounce-2']);
+
+  const updatesAtFlush = presenceUpdates.length;
+  await wait(40);
+  assert.strictEqual(
+    presenceUpdates.length,
+    updatesAtFlush,
+    'typing refresh should stop once the buffered turn is flushed',
+  );
 });

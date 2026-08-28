@@ -125,6 +125,7 @@
 #   WHATSAPP_DEBOUNCE_MIN_MS          Piso do decaimento progressivo em ms (padrão: 1500)
 #   WHATSAPP_DEBOUNCE_DECAY           Fator de decaimento a cada fragmento novo (padrão: 0.6)
 #   WHATSAPP_DEBOUNCE_SKIP_SELF_CHAT  Pular debounce no self-chat do dono (padrão: true)
+#   WHATSAPP_DEBOUNCE_TYPING_REFRESH_MS Renovar "digitando" durante a espera (padrão: 5000)
 #
 # 🔑 GOOGLE CLOUD / OAUTH
 #   GOOGLE_CLIENT_ID       Client ID para autenticação OAuth (Calendar, Drive, etc.)
@@ -580,6 +581,7 @@ services:
       - WHATSAPP_DEBOUNCE_MIN_MS=${WHATSAPP_DEBOUNCE_MIN_MS:-1500}
       - WHATSAPP_DEBOUNCE_DECAY=${WHATSAPP_DEBOUNCE_DECAY:-0.6}
       - WHATSAPP_DEBOUNCE_SKIP_SELF_CHAT=${WHATSAPP_DEBOUNCE_SKIP_SELF_CHAT:-true}
+      - WHATSAPP_DEBOUNCE_TYPING_REFRESH_MS=${WHATSAPP_DEBOUNCE_TYPING_REFRESH_MS:-5000}
 
       # Modelos por função — padrão OpenRouter (requer OPENROUTER_API_KEY).
       #
