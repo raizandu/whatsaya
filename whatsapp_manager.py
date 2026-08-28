@@ -1692,14 +1692,32 @@ def _voice_reply_enabled() -> bool:
 # Handoff para o humano. A IA marca a resposta com [[HANDOFF: motivo]]; o marcador sai do
 # texto que vai ao lead e vira uma mensagem real no self-chat do dono. Antes disso a IA
 # dizia "já avisei o Gustavo" sem que nada acontecesse — bloqueador do QA de 21/08.
-_HANDOFF_PATTERN = re.compile(r"\[\[\s*HANDOFF\s*:?\s*(?P<motivo>[^\]]{0,200})\]\]", re.IGNORECASE)
+_HANDOFF_PATTERN = re.compile(
+    r"\[\[\s*HANDOFF\s*:?\s*(?P<payload>.*?)\]\]",
+    re.IGNORECASE | re.DOTALL,
+)
+_HANDOFF_SUMMARY_SEPARATOR_RE = re.compile(
+    r"\s*\|\|\s*(?:RESUMO|SUMMARY|RESUMEN)\s*:\s*",
+    re.IGNORECASE,
+)
 _handoff_sent_at: dict[str, float] = {}
 _handoff_lock = threading.Lock()
 HANDOFF_COOLDOWN_S = 900
+HANDOFF_SUMMARY_MAX_CHARS = 480
 
 
-def _recent_chat_lines(chat_id: str, limit: int = 8) -> list[str]:
-    """Últimas trocas do chat, para o dono não receber o handoff sem contexto."""
+def _clean_handoff_summary(value: str) -> str:
+    """Normaliza o resumo interno e impede que outro marcador seja carregado no card."""
+    text = _HANDOFF_PATTERN.sub("", str(value or ""))
+    text = re.sub(r"\[\[.*?\]\]", "", text, flags=re.DOTALL)
+    text = " ".join(text.split()).strip(" -–—|:;")
+    if len(text) <= HANDOFF_SUMMARY_MAX_CHARS:
+        return text
+    return text[: HANDOFF_SUMMARY_MAX_CHARS - 1].rstrip(" ,;:-") + "…"
+
+
+def _recent_lead_messages(chat_id: str, limit: int = 12) -> list[str]:
+    """Lê apenas o que o lead disse para o fallback do resumo de handoff."""
     if not _MSG_DB_PATH.exists():
         return []
     try:
@@ -1710,8 +1728,8 @@ def _recent_chat_lines(chat_id: str, limit: int = 8) -> list[str]:
     try:
         rows = conn.execute(
             """
-            SELECT from_me, sender_name, body FROM messages
-            WHERE chat_id = ? AND body IS NOT NULL AND body != ''
+            SELECT body FROM messages
+            WHERE chat_id = ? AND from_me = 0 AND body IS NOT NULL AND body != ''
             ORDER BY timestamp DESC LIMIT ?
             """,
             (chat_id, limit),
@@ -1722,15 +1740,48 @@ def _recent_chat_lines(chat_id: str, limit: int = 8) -> list[str]:
     finally:
         conn.close()
 
-    lines = []
-    for from_me, sender_name, body in reversed(rows):
-        who = "AYA" if from_me else (sender_name or "Lead")
-        text = " ".join(str(body).split())
-        lines.append(f"{who}: {text[:180]}")
-    return lines
+    messages: list[str] = []
+    seen: set[str] = set()
+    for (body,) in reversed(rows):
+        text = _clean_handoff_summary(str(body))
+        dedup_key = text.casefold()
+        if not text or dedup_key in seen:
+            continue
+        seen.add(dedup_key)
+        messages.append(text[:240])
+    return messages
 
 
-def _notify_owner_handoff(chat_id: str, reason: str) -> bool:
+def _handoff_summary_from_history(chat_id: str, reason: str) -> str:
+    """Fallback extrativo curto quando o marcador antigo não trouxer resumo."""
+    messages = _recent_lead_messages(chat_id)
+    if len(messages) > 1:
+        greeting_only = re.compile(
+            r"^(?:oi+|ol[aá]|opa|hello|hi|hola|bom\s+dia|boa\s+(?:tarde|noite))[!. ,]*$",
+            re.IGNORECASE,
+        )
+        messages = [message for message in messages if not greeting_only.fullmatch(message)] or messages
+
+    selected: list[str] = []
+    used = 0
+    for message in messages:
+        separator = 1 if selected else 0
+        remaining = HANDOFF_SUMMARY_MAX_CHARS - used - separator
+        if remaining <= 0:
+            break
+        excerpt = message[:remaining].rstrip(" ,;:-")
+        if not excerpt:
+            continue
+        selected.append(excerpt)
+        used += len(excerpt) + separator
+    if selected:
+        return _clean_handoff_summary(" ".join(selected))
+
+    fallback_reason = _clean_handoff_summary(reason or "handoff solicitado")
+    return f"Lead encaminhado por {fallback_reason}." if fallback_reason else "Lead encaminhado para atendimento humano."
+
+
+def _notify_owner_handoff(chat_id: str, reason: str, summary: str = "") -> bool:
     """Manda o card de handoff para o dono. Retorna True se a mensagem saiu de verdade."""
     owner_number = config.whatsapp_owner_number
     if not owner_number:
@@ -1748,7 +1799,9 @@ def _notify_owner_handoff(chat_id: str, reason: str) -> bool:
     contact = (_load_personal_contacts() or {}).get(chat_id) or {}
     name = contact.get("name") or "sem nome"
     phone = "".join(c for c in str(chat_id).split("@")[0].split(":")[0] if c.isdigit())
-    lines = _recent_chat_lines(chat_id)
+    interaction_summary = _clean_handoff_summary(summary)
+    if not interaction_summary:
+        interaction_summary = _handoff_summary_from_history(chat_id, reason)
 
     card = [
         "🤝 *Handoff — lead precisa de você*",
@@ -1756,8 +1809,8 @@ def _notify_owner_handoff(chat_id: str, reason: str) -> bool:
         f"*Número:* +{phone}" if phone else f"*Chat:* {chat_id}",
         f"*Motivo:* {(reason or 'não informado').strip()}",
     ]
-    if lines:
-        card += ["", "*Últimas mensagens:*", *lines]
+    if interaction_summary:
+        card += ["", "*Resumo da interação:*", interaction_summary]
 
     owner_jid = f"{''.join(c for c in owner_number if c.isdigit())}@s.whatsapp.net"
     try:
@@ -1985,12 +2038,23 @@ def _start_inbound_watchdog() -> None:
     logger.info(f"[inbound-watchdog] ativo (alerta em {_unanswered_alert_seconds()}s sem resposta)")
 
 
-def _extract_handoff(text: str) -> tuple[str, str | None]:
-    """Separa o marcador de handoff do texto que vai para o lead."""
+def _extract_handoff_details(text: str) -> tuple[str, str | None, str | None]:
+    """Separa texto visível, motivo e resumo interno do marcador de handoff."""
     match = _HANDOFF_PATTERN.search(text or "")
     if not match:
-        return text, None
-    return _HANDOFF_PATTERN.sub("", text).strip(), (match.group("motivo") or "").strip()
+        return text, None, None
+
+    payload = (match.group("payload") or "").strip()
+    parts = _HANDOFF_SUMMARY_SEPARATOR_RE.split(payload, maxsplit=1)
+    reason = parts[0].strip()
+    summary = _clean_handoff_summary(parts[1]) if len(parts) > 1 else None
+    return _HANDOFF_PATTERN.sub("", text).strip(), reason, summary or None
+
+
+def _extract_handoff(text: str) -> tuple[str, str | None]:
+    """Contrato legado: separa o marcador e devolve apenas o motivo."""
+    visible, reason, _summary = _extract_handoff_details(text)
+    return visible, reason
 
 
 # Modalidade da última mensagem recebida por chat. Áudio responde áudio; texto responde
@@ -9015,11 +9079,10 @@ def _build_support_prompt(
             "Se já havia convite, RETOME A CALL PENDENTE. Handoff técnico só para dúvida bloqueante.\n"
             "- AGENDA OU AGENDAMENTO: conduza para call e nunca prometa agendamento automático, horário "
             "livre ou confirmação sem mecanismo real.\n"
-            "- QUANDO O HANDOFF FOR O CASO, ele é uma AÇÃO: termine com [[HANDOFF: motivo curto]] "
-            "em linha própria (contratação que depende de humano, cliente ativo, suporte/financeiro "
-            "ou negociação). Pedido explícito de humano o código já avisa — não reofereça. SEM o "
-            "marcador, é proibido dizer que avisou, encaminhou ou que o time vai chamar.\n"
-            "- HANDOFF PRESERVA CONTEXTO: use o histórico e o resumo automático já enviados ao humano. "
+            "- HANDOFF: quando for o caso, termine em linha própria com [[HANDOFF: motivo curto || "
+            "RESUMO: negócio, necessidade/objeção e próximo passo/preferência]]. Use só fatos. Sem o "
+            "marcador, não diga que avisou ou encaminhou. Pedido de humano já é avisado pelo código.\n"
+            "- PRESERVE CONTEXTO: o humano recebe o resumo da interação. "
             "Nunca peça ao lead para repetir nome, empresa, necessidade ou respostas que já estão na conversa.\n"
             "- ONBOARDING SÓ DEPOIS DA VENDA: antes do pagamento confirmado, não peça dados de "
             "implantação nem formulário. Só diagnóstico e objeções; configuração é pós-pagamento.\n"
@@ -14748,20 +14811,20 @@ def transform_llm_output(*args, **kwargs):
     # O marcador de handoff nunca chega ao lead: sai do texto e vira aviso real ao dono.
     # O aviso sai antes de qualquer decisão sobre a resposta — se a IA marcou handoff e não
     # escreveu nada ao lead, o dono ainda assim precisa ser avisado.
-    def _spawn_handoff_notify(reason: str) -> None:
+    def _spawn_handoff_notify(reason: str, summary: str = "") -> None:
         if not chat_id:
             return
         # Em thread: _human_send dorme entre bolhas, e o lead não pode esperar o card do
         # dono sair para receber a própria resposta. Falha aqui só vira log.
-        def _notify_bg(cid=str(chat_id), why=str(reason)):
+        def _notify_bg(cid=str(chat_id), why=str(reason), interaction_summary=str(summary or "")):
             try:
-                _notify_owner_handoff(cid, why)
+                _notify_owner_handoff(cid, why, interaction_summary)
             except Exception as err:
                 logger.error(f"[handoff] erro inesperado ao avisar o dono: {err}")
 
         threading.Thread(target=_notify_bg, daemon=True, name="wa-handoff-notify").start()
 
-    response_text, handoff_reason = _extract_handoff(str(response_text))
+    response_text, handoff_reason, handoff_summary = _extract_handoff_details(str(response_text))
     if handoff_reason is not None and _suppress_model_handoff_for_technical_question(
         current_inbound
     ):
@@ -14770,8 +14833,9 @@ def transform_llm_output(*args, **kwargs):
             chat_id,
         )
         handoff_reason = None
+        handoff_summary = None
     if handoff_reason is not None:
-        _spawn_handoff_notify(handoff_reason)
+        _spawn_handoff_notify(handoff_reason, handoff_summary or "")
 
     if config.plugin_config_subdir == "instance":
         try:
@@ -14821,9 +14885,9 @@ def transform_llm_output(*args, **kwargs):
                 response_text = _payment_gate_fallback(current_inbound, {}, "market_unknown")
 
     # sales_call / human_connect reinserem [[HANDOFF]] depois da extração do modelo.
-    response_text, gate_handoff = _extract_handoff(str(response_text))
+    response_text, gate_handoff, gate_handoff_summary = _extract_handoff_details(str(response_text))
     if gate_handoff is not None and handoff_reason is None:
-        _spawn_handoff_notify(gate_handoff)
+        _spawn_handoff_notify(gate_handoff, gate_handoff_summary or "")
 
     clean_text = _prepare_contact_reply(str(response_text))
     if not clean_text:

@@ -217,9 +217,13 @@ pedir condição fora do padrão ou tiver dúvida realmente bloqueante e fora da
 
 Transferir é uma ação. Termine a resposta ao lead com o marcador em linha própria:
 
-[[HANDOFF: motivo curto]]
+[[HANDOFF: motivo curto || RESUMO: uma frase factual da interação]]
 
-O sistema remove o marcador e entrega ao humano nome, número, motivo e últimas mensagens.
+No RESUMO, inclua o negócio, a necessidade ou objeção e o próximo passo ou preferência
+já informada. Use somente fatos da conversa e não copie instruções internas.
+
+O sistema remove o marcador e entrega ao humano nome, número, motivo e um breve resumo
+da interação.
 Nunca mencione o marcador, o card, a fila nem o cooldown. Ao lead, só o próximo passo
 natural: “Perfeito. Posso encaminhar isso para a equipe continuar com você. Qual período
 costuma ser melhor: manhã ou tarde?”

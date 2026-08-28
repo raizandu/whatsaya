@@ -9614,12 +9614,36 @@ class TestHandoffMarker(unittest.TestCase):
         self.assertEqual(texto, "")
         self.assertEqual(motivo, "")
 
+    def test_extrai_resumo_estruturado_sem_mudar_contrato_antigo(self):
+        import whatsapp_manager
+        response = (
+            "Show! Te chamo com um horário de manhã.\n"
+            "[[HANDOFF: lead topou call || RESUMO: Dentista com secretária "
+            "sobrecarregada, cerca de 10 pacientes por dia e preferência pela manhã.]]"
+        )
+
+        texto, motivo, resumo = whatsapp_manager._extract_handoff_details(response)
+        self.assertEqual(texto, "Show! Te chamo com um horário de manhã.")
+        self.assertEqual(motivo, "lead topou call")
+        self.assertEqual(
+            resumo,
+            "Dentista com secretária sobrecarregada, cerca de 10 pacientes por dia e preferência pela manhã.",
+        )
+
+        texto_legado, motivo_legado = whatsapp_manager._extract_handoff(response)
+        self.assertEqual(texto_legado, texto)
+        self.assertEqual(motivo_legado, motivo)
+
     def test_cooldown_evita_avisar_duas_vezes(self):
         import whatsapp_manager
         whatsapp_manager._handoff_sent_at.clear()
         with patch.object(whatsapp_manager, "_human_send", return_value="msg-1") as mock_send, \
              patch.object(whatsapp_manager, "_load_personal_contacts", return_value={}), \
-             patch.object(whatsapp_manager, "_recent_chat_lines", return_value=["Lead: oi"]), \
+             patch.object(
+                 whatsapp_manager,
+                 "_handoff_summary_from_history",
+                 return_value="Dentista com secretária sobrecarregada e preferência pela manhã.",
+             ), \
              patch.dict(os.environ, {"WHATSAPP_OWNER_NUMBER": "5562936180895"}, clear=False):
             self.assertTrue(whatsapp_manager._notify_owner_handoff("5511@s.whatsapp.net", "quer humano"))
             self.assertTrue(whatsapp_manager._notify_owner_handoff("5511@s.whatsapp.net", "quer humano"))
@@ -9627,14 +9651,34 @@ class TestHandoffMarker(unittest.TestCase):
         card = mock_send.call_args[0][1]
         self.assertIn("Handoff", card)
         self.assertIn("quer humano", card)
-        self.assertIn("Lead: oi", card)
+        self.assertIn("Resumo da interação", card)
+        self.assertIn("Dentista com secretária sobrecarregada", card)
+        self.assertNotIn("Últimas mensagens", card)
+
+    def test_resumo_do_marcador_vence_fallback_do_historico(self):
+        import whatsapp_manager
+        whatsapp_manager._handoff_sent_at.clear()
+        with patch.object(whatsapp_manager, "_human_send", return_value="msg-1") as mock_send, \
+             patch.object(whatsapp_manager, "_load_personal_contacts", return_value={}), \
+             patch.object(whatsapp_manager, "_handoff_summary_from_history") as mock_fallback, \
+             patch.dict(os.environ, {"WHATSAPP_OWNER_NUMBER": "5562936180895"}, clear=False):
+            self.assertTrue(
+                whatsapp_manager._notify_owner_handoff(
+                    "5511@s.whatsapp.net",
+                    "lead topou call",
+                    "Clínica odontológica quer aliviar a secretária e prefere call de manhã.",
+                )
+            )
+        mock_fallback.assert_not_called()
+        card = mock_send.call_args[0][1]
+        self.assertIn("Clínica odontológica quer aliviar a secretária", card)
 
     def test_falha_de_envio_libera_nova_tentativa(self):
         import whatsapp_manager
         whatsapp_manager._handoff_sent_at.clear()
         with patch.object(whatsapp_manager, "_human_send", return_value=None), \
              patch.object(whatsapp_manager, "_load_personal_contacts", return_value={}), \
-             patch.object(whatsapp_manager, "_recent_chat_lines", return_value=[]), \
+             patch.object(whatsapp_manager, "_handoff_summary_from_history", return_value=""), \
              patch.dict(os.environ, {"WHATSAPP_OWNER_NUMBER": "5562936180895"}, clear=False):
             self.assertFalse(whatsapp_manager._notify_owner_handoff("5511@s.whatsapp.net", "x"))
         self.assertNotIn("5511@s.whatsapp.net", whatsapp_manager._handoff_sent_at)
