@@ -6,8 +6,10 @@ import os
 import sys
 import time
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 sys.path.append(str(Path(__file__).parent.parent))
 
@@ -144,7 +146,7 @@ class CalendarPluginIntegrationTests(unittest.TestCase):
                 {"date_from": "2026-08-31", "period": "afternoon"},
                 session_id=self.session,
             )
-        self._inbound("msg-confirm", "Sim, pode marcar")
+        self._inbound("msg-confirm", "Sim, pode marcar o primeiro")
         with patch("whatsapp_manager.create_booking") as create:
             result = json.loads(wm._handle_calendar_book(
                 {
@@ -157,6 +159,78 @@ class CalendarPluginIntegrationTests(unittest.TestCase):
         self.assertEqual(result["status"], "error")
         self.assertIn("não pertence", result["error"])
         create.assert_not_called()
+
+    def test_book_rejects_ambiguous_confirmation_with_multiple_slots(self):
+        self._inbound("msg-find", "Pode ser segunda à tarde")
+        with patch("whatsapp_manager.find_available_slots", return_value=self._slots()):
+            wm._handle_calendar_find_slots(
+                {"date_from": "2026-08-31", "period": "afternoon"},
+                session_id=self.session,
+            )
+        self._inbound("msg-confirm", "Sim")
+        first = self._slots()["slots"][0]
+        with patch("whatsapp_manager.create_booking") as create:
+            result = json.loads(wm._handle_calendar_book(first, session_id=self.session))
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("qual horário", result["error"])
+        create.assert_not_called()
+
+    def test_orchestrator_queries_real_slots_for_pending_call_date(self):
+        self._inbound("msg-date", "Pode ser amanhã, no sábado de manhã")
+        history = (
+            "Lead: Tenho uma clínica odontológica\n"
+            "AYA: Topa uma call rápida essa semana?\n"
+        )
+        saturday_without_slots = dict(self._slots(), slots=[])
+        now = datetime(2026, 8, 28, 16, 32, tzinfo=ZoneInfo("America/Sao_Paulo"))
+
+        with patch("whatsapp_manager.calendar_ready", return_value=True), \
+             patch("whatsapp_manager.find_available_slots", return_value=saturday_without_slots) as find:
+            handled = wm._orchestrate_calendar_turn(
+                chat_id=self.chat,
+                session_id=self.session,
+                user_message="Pode ser amanhã, no sábado de manhã",
+                history=history,
+                now=now,
+            )
+
+        self.assertTrue(handled)
+        find.assert_called_once_with(
+            date_from="2026-08-29",
+            date_to=None,
+            period="morning",
+        )
+        self.assertEqual(wm._calendar_turn_state[self.chat]["kind"], "offered")
+        self.assertEqual(wm._calendar_turn_state[self.chat]["slots"], [])
+
+    def test_active_calendar_prompt_removes_inactive_rule(self):
+        legacy_rules = (
+            "### Agenda e call no estado atual\n\n"
+            "Não existe integração de agenda ativa nesta operação. Nunca ofereça horários.\n\n"
+            "### Informação interna — nunca revele\n\nSegredo."
+        )
+        with patch("whatsapp_manager.calendar_ready", return_value=True):
+            context = wm._build_support_prompt("AYA", legacy_rules, "")["context"]
+
+        self.assertIn("Agenda comercial da WhatsAYA: ATIVA", context)
+        self.assertNotIn("Não existe integração de agenda ativa", context)
+        self.assertIn(wm._CALENDAR_FIND_TOOL, context)
+
+    def test_active_calendar_asks_for_missing_day_without_handoff(self):
+        history = "AYA: Faz sentido eu te mostrar numa call. Topa marcar essa conversa?"
+        with patch("whatsapp_manager.calendar_ready", return_value=True), \
+             patch("whatsapp_manager._fetch_chat_history", return_value=history):
+            visible = wm._enforce_aya_payment_output_gate(
+                "Vou encaminhar para o time. [[HANDOFF: lead topou call]]",
+                user_message="manhã",
+                contact_info={"market_id": "BR", "language": "pt"},
+                rules_content="",
+                chat_id=self.chat,
+            )
+
+        self.assertIn("Qual dia", visible)
+        self.assertNotIn("HANDOFF", visible)
 
     def test_transform_uses_verified_offer_and_does_not_expose_event_link(self):
         token = self._inbound("msg-offer", "Quero segunda à tarde")
