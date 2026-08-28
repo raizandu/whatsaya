@@ -11,7 +11,7 @@ Plugin **`whatsapp-manager`** para o [Hermes Agent v2026](https://github.com/nou
 - **Arquitetura de Container Único (Single-Container):** Desde o Hermes Agent v0.19 ("Quicksilver"), o core ganhou uma plataforma WhatsApp nativa (`hermes_plugins.whatsapp_platform`) que descobre, sobe e monitora o processo Node.js da ponte automaticamente — em vez deste plugin gerenciar seu próprio subprocesso. O `bridge.js` deste repositório continua sendo o código que roda; o Hermes só assumiu o ciclo de vida do processo (spawn, pidfile, restart em crash), eliminando o container duplicado e o erro de desconexão `440 conflict / replaced`.
 - **Roteamento Nativo por Perfis (`default` vs `whatsapp`):**
   - **`SelfChat` (Perfil: `default`):** Acesso à persona executiva (`SOUL.md`), histórico completo, comandos de controle e **todas as ferramentas ativas** (código, terminal, busca web, mídias).
-  - **Clientes/Contatos (Perfil: `whatsapp`):** Persona de suporte (`SOUL_WHATSAPP.md` + `support_rules.md`), respostas baseadas nas regras de negócio e **todas as ferramentas desativadas por padrão (`toolsets: []`)** com firewall de execução no backend.
+  - **`Clientes/Contatos` (Perfil: `whatsapp`):** Persona de suporte (`SOUL_WHATSAPP.md` + `support_rules.md`), respostas baseadas nas regras de negócio e somente o toolset comercial de agenda habilitado; ele fica oculto sem OAuth válido e o firewall bloqueia as demais ferramentas no backend.
 - **Silêncio de Avisos Brutais:** Ocultação automática de mensagens do sistema (como aviso de reset de 24h e metadados `◆ Model: ...`).
 
 ---
@@ -166,7 +166,8 @@ Envie mensagens para si mesmo no WhatsApp. Todos os comandos de controle funcion
 agent:
   tool_use_enforcement: disabled
 
-toolsets: []         # ❌ Nenhuma ferramenta habilitada para clientes
+toolsets:
+  - whatsaya_calendar # ✅ Apenas consulta/reserva comercial, oculta sem OAuth
 disabled_toolsets:   # ❌ Todas as 25 famílias de ferramentas desativadas
   - file_operations
   - code_execution
@@ -181,7 +182,7 @@ skills:
   enabled: false
 ```
 
-- **Clientes:** Se uma mensagem de cliente tentar forçar a execução de ferramentas, o hook `pre_tool_call` intercepta e aborta imediatamente a chamada no backend.
+- **Clientes:** Só podem consultar e reservar vagas comerciais pelas ferramentas controladas de agenda. Qualquer outra tentativa é abortada pelo hook `pre_tool_call` no backend.
 - **Dono (SelfChat):** Pode solicitar qualquer execução de código, leitura de arquivos ou buscas normalmente.
 
 ---

@@ -492,8 +492,9 @@ services:
         profile_env['WHATSAPP_ENABLED'] = 'false'
         _upsert_env('/opt/data/.hermes/profiles/whatsapp/.env', profile_env)
 
-        # Perfil "whatsapp" = clientes. Nenhuma ferramenta habilitada; o hook
-        # pre_tool_call do plugin e a segunda camada, no backend.
+        # Perfil "whatsapp" = clientes. Somente o toolset comercial de agenda;
+        # calendar_ready() mantém as tools ocultas sem OAuth válido, e o hook
+        # pre_tool_call continua sendo a segunda camada fail-closed no backend.
         disabled = ['file_operations', 'code_execution', 'vision', 'image_generation',
                     'video_analysis', 'video_generation', 'web_search', 'browser',
                     'terminal', 'text_to_speech', 'skills', 'task_planning', 'todo',
@@ -533,7 +534,9 @@ services:
                     },
                 },
                 'compression': {'codex_gpt55_autoraise_notice': False},
-                'toolsets': [], 'disabled_toolsets': disabled, 'tools': [],
+                'toolsets': ['whatsaya_calendar'],
+                'disabled_toolsets': disabled,
+                'tools': [],
                 'skills': {'enabled': False},
                 'terminal': {'backend': 'disabled'},
                 'display': {
