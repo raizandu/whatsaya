@@ -1593,47 +1593,28 @@ class TestMediaMessageProcessing(BaseWhatsAppManagerTest):
         self.assertEqual(whatsapp_manager._get_mime_type("IMAGE.PNG"), "image/png")
         self.assertEqual(whatsapp_manager._get_mime_type("file.unknown"), "application/octet-stream")
 
-    @patch("os.path.exists", return_value=True)
     @patch("os.remove")
     @patch.dict(os.environ, {"GOOGLE_API_KEY": "test-key", "FISH_API_KEY": "fk-test"})
-    def test_process_media_message_audio(self, mock_remove, mock_exists):
-        """Áudio vai para o Fish ASR, não para o Gemini — e o arquivo é apagado depois."""
-        event = MagicMock()
-        event.has_media = True
-        event.media_type = "ptt"
-        event.media_urls = ["/path/to/voice.ogg"]
-
-        with patch.object(whatsapp_manager, "_transcribe_via_fish", return_value="bom dia, tudo bem?") as mock_fish, \
-             patch("urllib.request.urlopen") as mock_urlopen:
-            text = whatsapp_manager._process_media_message(event)
-
-        self.assertEqual(text, "bom dia, tudo bem?")
-        mock_fish.assert_called_once_with("/path/to/voice.ogg")
-        # Nenhum provedor de LLM é chamado para áudio.
-        mock_urlopen.assert_not_called()
-        mock_remove.assert_called_once_with("/path/to/voice.ogg")
-
-    @patch("os.path.exists", return_value=True)
-    @patch("os.remove")
-    @patch.dict(os.environ, {"GOOGLE_API_KEY": "test-key", "FISH_API_KEY": ""})
-    def test_process_media_message_audio_sem_fish(self, mock_remove, mock_exists):
-        """Sem chave do Fish não há transcrição — e o áudio some do disco do mesmo jeito."""
+    def test_process_media_message_audio_is_left_for_native_hermes(self, mock_remove):
+        """O plugin não consome nem apaga o PTT antes do STT nativo do Hermes."""
         event = MagicMock()
         event.has_media = True
         event.media_type = "ptt"
         event.media_urls = ["/path/to/voice.ogg"]
 
         with patch("urllib.request.urlopen") as mock_urlopen:
-            self.assertIsNone(whatsapp_manager._process_media_message(event))
-            mock_urlopen.assert_not_called()
-        mock_remove.assert_called_once_with("/path/to/voice.ogg")
+            text = whatsapp_manager._process_media_message(event)
+
+        self.assertIsNone(text)
+        mock_urlopen.assert_not_called()
+        mock_remove.assert_not_called()
 
     @patch("os.path.exists", return_value=True)
     @patch("builtins.open", new_callable=unittest.mock.mock_open, read_data=b"mock-image-data")
     @patch("urllib.request.urlopen")
     @patch.dict(os.environ, {"GOOGLE_API_KEY": "test-key", "WHATSAPP_CLIENT_MEDIA_MODEL": "gemini-custom-media-model"})
     def test_process_media_message_image_custom_model(self, mock_urlopen, mock_open, mock_exists):
-        """WHATSAPP_CLIENT_MEDIA_MODEL agora vale para imagem — áudio é do Fish."""
+        """WHATSAPP_CLIENT_MEDIA_MODEL vale somente para imagem."""
         event = MagicMock()
         event.has_media = True
         event.media_type = "image"
@@ -1723,16 +1704,16 @@ class TestMediaMessageProcessing(BaseWhatsAppManagerTest):
         import whatsapp_manager
         event = MagicMock()
         event.has_media = True
-        event.media_type = "ptt"
-        event.media_urls = ["/path/to/nonexistent.ogg"]
+        event.media_type = "image"
+        event.media_urls = ["/path/to/nonexistent.jpg"]
         res = whatsapp_manager._process_media_message(event)
         self.assertIsNone(res)
 
-    @patch("whatsapp_manager._process_media_message", return_value="transcribed audio")
+    @patch("whatsapp_manager._process_media_message")
     @patch("whatsapp_manager._persist_transcription_to_db")
     @patch("pathlib.Path.exists", return_value=True)
     def test_pre_gateway_dispatch_media_audio(self, mock_exists, mock_persist, mock_process_media):
-        """Verifica que pre_gateway_dispatch processa áudio, atualiza evento e persiste no banco."""
+        """O hook preserva PTT para o STT nativo e registra a modalidade da resposta."""
         pre_dispatch = self.ctx.hooks.get("pre_gateway_dispatch")
         self.assertIsNotNone(pre_dispatch)
 
@@ -1742,7 +1723,7 @@ class TestMediaMessageProcessing(BaseWhatsAppManagerTest):
         event.media_type = "ptt"
         event.media_urls = ["/path/to/voice.ogg"]
         event.message_id = "msg123"
-        event.text = ""
+        event.text = "[audio received]"
         event.source.user_id = "5511888888888@s.whatsapp.net"
         event.source.chat_id = "5511888888888@s.whatsapp.net"
 
@@ -1753,12 +1734,17 @@ class TestMediaMessageProcessing(BaseWhatsAppManagerTest):
         context = {"event": event, "gateway": gateway}
 
         with patch("whatsapp_manager._check_bot_paused", return_value=False), \
-             patch("whatsapp_manager._check_chat_silenced", return_value=False):
+             patch("whatsapp_manager._check_chat_silenced", return_value=False), \
+             patch("whatsapp_manager._remember_inbound_modality") as mock_modality:
             res = pre_dispatch("pre_gateway_dispatch", context)
             
-        self.assertIsNone(res) # Não deve pular
-        self.assertEqual(event.text, '[Áudio: "transcribed audio"]')
-        mock_persist.assert_called_once_with("/opt/data/.hermes/whatsapp_messages.db", "msg123", '[Áudio: "transcribed audio"]')
+        self.assertIsNone(res)
+        self.assertEqual(event.text, "[audio received]")
+        mock_process_media.assert_not_called()
+        mock_persist.assert_not_called()
+        mock_modality.assert_called_once_with(
+            "5511888888888@s.whatsapp.net", True
+        )
 
 
 class TestExternalServicesAndUpdates(BaseWhatsAppManagerTest):
@@ -6069,7 +6055,7 @@ class TestUpdateContactFieldsSteps(BaseWhatsAppManagerTest):
 
 
 class TestProcessMediaMessage(BaseWhatsAppManagerTest):
-    """Testes para _process_media_message — transcrição de áudio e imagem."""
+    """Testes para _process_media_message — somente descrição de imagem."""
 
     def _make_event(self, media_type, file_path):
         event = MagicMock()
@@ -6093,12 +6079,9 @@ class TestProcessMediaMessage(BaseWhatsAppManagerTest):
     def test_no_api_key_returns_none(self):
         """Sem nenhuma chave: retorna None e não chama ninguém."""
         import whatsapp_manager
-        event = self._make_event("ptt", "/tmp/audio.ogg")
+        event = self._make_event("image", "/tmp/photo.jpg")
         patches = self._config_patch()
-        # FISH_API_KEY explicitamente vazia: dentro do container a chave real está no env
-        # e o teste faria uma chamada de verdade ao Fish.
         with patches[0], patches[1], patches[2], patches[3], \
-             patch.dict(os.environ, {"FISH_API_KEY": ""}, clear=False), \
              patch("urllib.request.urlopen") as mock_urlopen, \
              patch("os.remove"):
             result = whatsapp_manager._process_media_message(event)
@@ -6108,7 +6091,7 @@ class TestProcessMediaMessage(BaseWhatsAppManagerTest):
     def test_file_not_found_returns_none(self):
         """Arquivo de mídia inexistente: retorna None."""
         import whatsapp_manager
-        event = self._make_event("ptt", "/tmp/nonexistent_audio_xyz.ogg")
+        event = self._make_event("image", "/tmp/nonexistent_image_xyz.jpg")
         patches = self._config_patch(google="fake-key")
         with patches[0], patches[1], patches[2], patches[3], \
              patch("os.path.exists", return_value=False):
@@ -6126,19 +6109,17 @@ class TestProcessMediaMessage(BaseWhatsAppManagerTest):
 
     @patch("urllib.request.urlopen")
     @patch("os.remove")
-    @patch("os.path.exists", return_value=True)
-    def test_audio_vai_para_o_fish_e_nao_para_o_gemini(self, mock_exists, mock_remove, mock_urlopen):
-        """Mesmo com chave do Google preenchida, áudio é transcrito pelo Fish."""
+    def test_audio_fica_intacto_para_o_stt_nativo(self, mock_remove, mock_urlopen):
+        """Mesmo com provedores configurados, o plugin não assume a transcrição."""
         import whatsapp_manager
 
         event = self._make_event("ptt", "/tmp/audio.ogg")
         patches = self._config_patch(google="fake-key")
-        with patches[0], patches[1], patches[2], patches[3], \
-             patch.object(whatsapp_manager, "_transcribe_via_fish", return_value="olá tudo bem") as mock_fish:
+        with patches[0], patches[1], patches[2], patches[3]:
             result = whatsapp_manager._process_media_message(event)
-        self.assertEqual(result, "olá tudo bem")
-        mock_fish.assert_called_once_with("/tmp/audio.ogg")
+        self.assertIsNone(result)
         mock_urlopen.assert_not_called()
+        mock_remove.assert_not_called()
 
     @patch("urllib.request.urlopen")
     @patch("os.remove")
@@ -9421,126 +9402,6 @@ class TestCommercialContextInference(unittest.TestCase):
         self.assertEqual(record["language"], "es")
 
 
-class TestFishAsr(unittest.TestCase):
-    """Transcrição pela API do Fish — áudio não passa mais pelos modelos do OpenRouter."""
-
-    def test_idioma_padrao_e_detectado_automaticamente(self):
-        import whatsapp_manager
-        with patch.dict(
-            os.environ,
-            {"WHATSAPP_STT_LANGUAGE": "", "HERMES_LOCAL_STT_LANGUAGE": "pt"},
-            clear=False,
-        ):
-            self.assertIsNone(whatsapp_manager._fish_asr_language())
-
-    def test_override_explicito_de_idioma_e_preservado(self):
-        import whatsapp_manager
-        with patch.dict(os.environ, {"WHATSAPP_STT_LANGUAGE": "es"}, clear=False):
-            self.assertEqual(whatsapp_manager._fish_asr_language(), "es")
-
-    def test_override_invalido_volta_para_deteccao_automatica(self):
-        import whatsapp_manager
-        with patch.dict(os.environ, {"WHATSAPP_STT_LANGUAGE": "espanol"}, clear=False):
-            self.assertIsNone(whatsapp_manager._fish_asr_language())
-
-    def test_multipart_carrega_campos_e_binario(self):
-        from whatsapp_manager import _build_multipart
-        body, content_type = _build_multipart(
-            {"language": "pt", "ignore_timestamps": "true"}, "audio", "aud.ogg", b"\x00\x01OGG"
-        )
-        self.assertTrue(content_type.startswith("multipart/form-data; boundary=----whatsaya"))
-        boundary = content_type.split("boundary=")[1].encode()
-        self.assertIn(b'name="language"', body)
-        self.assertIn(b"pt", body)
-        self.assertIn(b'name="audio"; filename="aud.ogg"', body)
-        self.assertIn(b"\x00\x01OGG", body)
-        self.assertTrue(body.endswith(b"--" + boundary + b"--\r\n"))
-
-    def test_sem_chave_nao_chama_api(self):
-        import whatsapp_manager
-        with patch.dict(os.environ, {"FISH_API_KEY": ""}, clear=False), \
-             patch("urllib.request.urlopen") as mock_open:
-            self.assertIsNone(whatsapp_manager._transcribe_via_fish("/tmp/qualquer.ogg"))
-            mock_open.assert_not_called()
-
-    def test_transcreve_e_devolve_texto(self):
-        import whatsapp_manager
-        resp = MagicMock()
-        resp.read.return_value = json.dumps(
-            {"text": " quanto custa a implementação? ", "duration": 4.2, "language_code": "pt"}
-        ).encode()
-        resp.__enter__ = lambda s: s
-        resp.__exit__ = lambda *a: None
-        with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
-            tmp.write(b"audio-bytes")
-            path = tmp.name
-        try:
-            with patch.dict(os.environ, {"FISH_API_KEY": "fk-test"}, clear=False), \
-                 patch("urllib.request.urlopen", return_value=resp):
-                self.assertEqual(
-                    whatsapp_manager._transcribe_via_fish(path),
-                    "quanto custa a implementação?",
-                )
-        finally:
-            os.unlink(path)
-
-    def test_transcricao_multilingue_omite_language_no_multipart(self):
-        import whatsapp_manager
-        resp = MagicMock()
-        resp.read.return_value = json.dumps(
-            {"text": "quiero avanzar", "duration": 2.5, "language_code": "es"}
-        ).encode()
-        resp.__enter__ = lambda s: s
-        resp.__exit__ = lambda *a: None
-        with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
-            tmp.write(b"audio-bytes")
-            path = tmp.name
-        try:
-            with patch.dict(
-                os.environ,
-                {"FISH_API_KEY": "fk-test", "WHATSAPP_STT_LANGUAGE": ""},
-                clear=False,
-            ), patch("urllib.request.urlopen", return_value=resp) as mock_open:
-                self.assertEqual(whatsapp_manager._transcribe_via_fish(path), "quiero avanzar")
-            request = mock_open.call_args.args[0]
-            self.assertNotIn(b'name="language"', request.data)
-            self.assertIn(b'name="ignore_timestamps"', request.data)
-        finally:
-            os.unlink(path)
-
-    def test_402_nao_repete_tentativa(self):
-        import whatsapp_manager
-        erro = urllib.error.HTTPError("u", 402, "Payment Required", {}, None)
-        with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
-            tmp.write(b"audio-bytes")
-            path = tmp.name
-        try:
-            with patch.dict(os.environ, {"FISH_API_KEY": "fk-test"}, clear=False), \
-                 patch("urllib.request.urlopen", side_effect=erro) as mock_open:
-                self.assertIsNone(whatsapp_manager._transcribe_via_fish(path, attempts=3))
-                # crédito esgotado não melhora com insistência
-                self.assertEqual(mock_open.call_count, 1)
-        finally:
-            os.unlink(path)
-
-    def test_erro_transitorio_faz_retry(self):
-        import whatsapp_manager
-        resp = MagicMock()
-        resp.read.return_value = json.dumps({"text": "ok"}).encode()
-        resp.__enter__ = lambda s: s
-        resp.__exit__ = lambda *a: None
-        with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
-            tmp.write(b"audio-bytes")
-            path = tmp.name
-        try:
-            with patch.dict(os.environ, {"FISH_API_KEY": "fk-test"}, clear=False), \
-                 patch("urllib.request.urlopen", side_effect=[TimeoutError("lento"), resp]) as mock_open:
-                self.assertEqual(whatsapp_manager._transcribe_via_fish(path), "ok")
-                self.assertEqual(mock_open.call_count, 2)
-        finally:
-            os.unlink(path)
-
-
 class TestRotuloDeRelacionamento(BaseWhatsAppManagerTest):
     """"Cliente" no CRM é tipo de contato, não status de contrato."""
 
@@ -9605,10 +9466,10 @@ class TestPrecoNaoVazaNoCodigo(unittest.TestCase):
         self.assertEqual(achados, [], f"valor da oferta hardcoded: {achados}")
 
 
-class TestAudioFallbackText(BaseWhatsAppManagerTest):
-    """Transcrição que falha entrega instrução explícita, não o marcador cru do bridge."""
+class TestNativeAudioHandoff(BaseWhatsAppManagerTest):
+    """O plugin entrega a nota de voz intacta ao STT nativo do Hermes."""
 
-    def _dispatch(self, transcricao, message_id):
+    def test_ptt_nao_e_reescrito_nem_persistido_pelo_plugin(self):
         import whatsapp_manager
         pre_dispatch = self.ctx.hooks.get("pre_gateway_dispatch")
         self.assertIsNotNone(pre_dispatch)
@@ -9618,7 +9479,7 @@ class TestAudioFallbackText(BaseWhatsAppManagerTest):
         event.has_media = True
         event.media_type = "ptt"
         event.media_urls = ["/path/to/voice.ogg"]
-        event.message_id = message_id
+        event.message_id = "msg_native_stt"
         event.text = "[audio received]"
         event.source.user_id = "5511987654321@s.whatsapp.net"
         event.source.chat_id = "5511987654321@s.whatsapp.net"
@@ -9627,42 +9488,17 @@ class TestAudioFallbackText(BaseWhatsAppManagerTest):
         gateway._session_key_for_source.return_value = "session_audio_fb"
         gateway._session_model_overrides = {}
 
-        with patch("whatsapp_manager._process_media_message", return_value=transcricao), \
+        with patch("whatsapp_manager._process_media_message") as mock_process, \
              patch("whatsapp_manager._persist_transcription_to_db") as mock_persist, \
-             patch("pathlib.Path.exists", return_value=True), \
              patch("whatsapp_manager._check_bot_paused", return_value=False), \
              patch("whatsapp_manager._check_chat_silenced", return_value=False):
             pre_dispatch("pre_gateway_dispatch", {"event": event, "gateway": gateway})
-        return event, mock_persist
 
-    def test_falha_entrega_instrucao_e_nao_grava_no_historico(self):
-        import whatsapp_manager
-        event, mock_persist = self._dispatch(None, "msg_audio_falha")
-        self.assertEqual(event.text, whatsapp_manager.AUDIO_FALLBACK_TEXT)
-        self.assertIn("não foi possível transcrever", event.text)
-        self.assertIn("TEXTO", event.text)
-        # instrução de turno não é conteúdo de conversa
+        self.assertEqual(event.text, "[audio received]")
+        self.assertEqual(event.media_type, "ptt")
+        self.assertEqual(event.media_urls, ["/path/to/voice.ogg"])
+        mock_process.assert_not_called()
         mock_persist.assert_not_called()
-
-    def test_falha_nao_libera_resposta_em_audio(self):
-        import whatsapp_manager
-        with patch.dict(os.environ, {"FISH_API_KEY": "fk", "WHATSAPP_AUTO_TTS": "true"}, clear=False):
-            self._dispatch(None, "msg_audio_falha_2")
-            self.assertFalse(
-                whatsapp_manager._voice_reply_allowed_for("5511987654321@s.whatsapp.net"))
-
-    def test_sucesso_entrega_transcricao_e_grava(self):
-        event, mock_persist = self._dispatch("quanto custa?", "msg_audio_ok")
-        self.assertEqual(event.text, '[Áudio: "quanto custa?"]')
-        mock_persist.assert_called_once_with(
-            "/opt/data/.hermes/whatsapp_messages.db", "msg_audio_ok", '[Áudio: "quanto custa?"]')
-
-    def test_sucesso_libera_resposta_em_audio(self):
-        import whatsapp_manager
-        with patch.dict(os.environ, {"FISH_API_KEY": "fk", "WHATSAPP_AUTO_TTS": "true"}, clear=False):
-            self._dispatch("quanto custa?", "msg_audio_ok_2")
-            self.assertTrue(
-                whatsapp_manager._voice_reply_allowed_for("5511987654321@s.whatsapp.net"))
 
 
 class TestVoiceModalityGate(unittest.TestCase):
@@ -9684,11 +9520,10 @@ class TestVoiceModalityGate(unittest.TestCase):
             whatsapp_manager._remember_inbound_modality("5562@s.whatsapp.net", True)
             self.assertTrue(whatsapp_manager._voice_reply_allowed_for("5562@s.whatsapp.net"))
 
-    def test_transcricao_falha_mantem_texto(self):
-        """Áudio que não foi transcrito não autoriza responder em áudio."""
+    def test_anexo_de_audio_comum_nao_libera_voz(self):
+        """Um arquivo de áudio sem PTT não é tratado como nota de voz do lead."""
         import whatsapp_manager
         with patch.dict(os.environ, {"FISH_API_KEY": "fk", "WHATSAPP_AUTO_TTS": "true"}, clear=False):
-            # o hook passa audio_transcribed=False quando o ASR não devolveu texto
             whatsapp_manager._remember_inbound_modality("5562@s.whatsapp.net", False)
             self.assertFalse(whatsapp_manager._voice_reply_allowed_for("5562@s.whatsapp.net"))
 

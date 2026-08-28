@@ -34,6 +34,7 @@ const {
   loadEnv,
   runSelfDiagnostics,
   clearRecentlyProcessedIds,
+  isWhatsAppVoiceNote,
   stripExecLines,
   stripFishCues,
 } = await import('../bridge.js');
@@ -918,6 +919,13 @@ test('WhatsApp Bridge Regression Tests', async (t) => {
     assert.ok(!out.includes('[confident]'));
     assert.ok(!out.includes('[empathetic]'));
     assert.ok(out.includes('Sim, respondi aqui.'));
+  });
+
+  await t.test('21b. Baileys audioMessage with ptt=true is a native Hermes voice note', () => {
+    assert.strictEqual(isWhatsAppVoiceNote({ audioMessage: { ptt: true } }), true);
+    assert.strictEqual(isWhatsAppVoiceNote({ audioMessage: { ptt: false } }), false);
+    assert.strictEqual(isWhatsAppVoiceNote({ audioMessage: {} }), false);
+    assert.strictEqual(isWhatsAppVoiceNote({ pttMessage: {} }), true);
   });
 
   await t.test('21. stripExecLines should remove EXEC: command lines from outgoing messages', () => {

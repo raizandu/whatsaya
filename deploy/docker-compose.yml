@@ -93,11 +93,10 @@
 #                                     mais barato que max; suba se as respostas ficarem rasas)
 #   WHATSAPP_CLIENT_MEDIA_MODEL   Leitura de IMAGEM (descrição e comprovante de venda).
 #                                 Precisa aceitar imagem; DeepSeek é só texto e falharia.
-#                                 Áudio NÃO passa por aqui: transcrição é do Fish ASR,
-#                                 com FISH_API_KEY. Nenhum slug de texto/visão do
-#                                 OpenRouter aceita entrada de áudio — apontar áudio
-#                                 para cá devolve 404 e a mensagem chega ao agente como
-#                                 "[audio received]" cru.
+#                                 Áudio NÃO passa por aqui. Notas de voz são marcadas
+#                                 como PTT pelo bridge e transcritas pelo STT local nativo
+#                                 do Hermes. O Fish é usado apenas para sintetizar a
+#                                 resposta em voz.
 #   WHATSAPP_CONTACT_CLASSIFIER_MODEL  Classificar novos contatos
 #   WHATSAPP_AUDIT_ENABLED    Auditoria diária do atendimento (padrão: false)
 #   WHATSAPP_AUDIT_MODEL      Modelo do auditor — env própria, nunca o do cliente
@@ -398,7 +397,10 @@ services:
             tts['providers'] = providers
             cfg['tts'] = tts
             voice = cfg.get('voice') if isinstance(cfg.get('voice'), dict) else {}
-            voice['auto_tts'] = True
+            # O plugin envia a resposta falável pelo Fish somente quando o lead falou
+            # em áudio. O auto-TTS nativo duplicaria essa entrega e tenta escrever em
+            # um caminho protegido no gateway.
+            voice['auto_tts'] = False
             cfg['voice'] = voice
             mem = cfg.get('memory') if isinstance(cfg.get('memory'), dict) else {}
             mem['user_profile_enabled'] = False
@@ -494,6 +496,16 @@ services:
                 'fallback_providers': fallback_chain,
                 'agent': {'tool_use_enforcement': 'disabled', 'reasoning_effort': client_reasoning_effort},
                 'gateway': {'delivery_ledger': False},
+                # O runtime multiplexado carrega plugins a partir do próprio perfil.
+                # Sem isso, os hooks de saída não removem [[HANDOFF: ...]] do lead.
+                'plugins': {'enabled': ['whatsapp-manager']},
+                # Entrada de voz continua no caminho nativo do Hermes. Fish é só TTS.
+                'stt': {
+                    'provider': 'local',
+                    'language': 'pt',
+                    'local': {'model': 'base', 'language': 'pt'},
+                },
+                'voice': {'auto_tts': False},
                 # tools/toolsets vazios não escondem as meta-ferramentas de descoberta
                 # (tool_search, tool_describe, tool_call). O pre_tool_call do plugin nega
                 # cada uma, e sem hard stop o modelo reinsiste: uma conversa de cliente do
@@ -688,8 +700,6 @@ services:
       # resposta em áudio, inclusive para lead que escreveu em texto. Com o gate de
       # modalidade, "true" significa: áudio só para quem mandou áudio.
       - WHATSAPP_AUTO_TTS=${WHATSAPP_AUTO_TTS:-true}
-      # Fish ASR detecta o idioma quando vazio; use pt/en/es apenas para forçar um idioma.
-      - WHATSAPP_STT_LANGUAGE=${WHATSAPP_STT_LANGUAGE:-}
       # Esta composição é a instância comercial AYA; use "generic" para os templates genéricos.
       - WHATSAPP_CONFIG_SUBDIR=${WHATSAPP_CONFIG_SUBDIR:-instance}
       # IDs/nomes nativos CTWA -> metadados comerciais confiáveis; vazio desativa o mapa.

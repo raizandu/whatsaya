@@ -334,6 +334,13 @@ function getMessageContent(msg) {
   return content;
 }
 
+export function isWhatsAppVoiceNote(messageContent) {
+  return Boolean(
+    messageContent?.pttMessage
+    || messageContent?.audioMessage?.ptt === true
+  );
+}
+
 function getContextInfo(messageContent) {
   if (!messageContent || typeof messageContent !== 'object') return {};
   for (const value of Object.values(messageContent)) {
@@ -1122,7 +1129,7 @@ let onMessagesUpsert = async ({ messages, type }) => {
       }
     } else if (messageContent.audioMessage || messageContent.pttMessage) {
       hasMedia = true;
-      mediaType = messageContent.pttMessage ? 'ptt' : 'audio';
+      mediaType = isWhatsAppVoiceNote(messageContent) ? 'ptt' : 'audio';
       try {
         const audioMsg = messageContent.pttMessage || messageContent.audioMessage;
         const buf = await downloadMediaMessage(msg, 'buffer', {}, { logger, reuploadRequest: sock.updateMediaMessage });

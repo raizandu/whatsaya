@@ -19,7 +19,6 @@ import urllib.request
 import urllib.error
 import urllib.parse
 import unicodedata
-import uuid
 import fcntl
 import socket
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -1165,154 +1164,17 @@ def _get_mime_type(file_path: str) -> str:
     return mime_map.get(ext, "application/octet-stream")
 
 
-FISH_ASR_URL = "https://api.fish.audio/v1/asr"
-
-# Texto entregue ao agente quando o áudio do lead não pôde ser transcrito.
-AUDIO_FALLBACK_TEXT = (
-    "[O cliente enviou um áudio que não foi possível transcrever. "
-    "Peça em TEXTO, de forma curta e natural, que ele repita por escrito ou reenvie o áudio. "
-    "Não responda em áudio, não invente o conteúdo do que ele disse e não dê explicação técnica.]"
-)
-
-
-def _fish_asr_language() -> str | None:
-    """Retorna um override explícito; sem ele, o Fish detecta o idioma do áudio."""
-    configured = os.getenv("WHATSAPP_STT_LANGUAGE", "").strip().lower()
-    if not configured or configured in {"auto", "detect", "multilingual"}:
-        return None
-    if configured in {"pt", "en", "es"}:
-        return configured
-    logger.warning("[fish-asr] idioma inválido ignorado: %r", configured)
-    return None
-
-
-def _build_multipart(fields: dict, file_field: str, filename: str, payload: bytes) -> tuple[bytes, str]:
-    """Monta um corpo multipart/form-data sem depender de requests."""
-    boundary = f"----whatsaya{uuid.uuid4().hex}"
-    sep = f"--{boundary}".encode()
-    chunks = []
-    for name, value in fields.items():
-        chunks += [
-            sep,
-            f'Content-Disposition: form-data; name="{name}"'.encode(),
-            b"",
-            str(value).encode("utf-8"),
-        ]
-    chunks += [
-        sep,
-        f'Content-Disposition: form-data; name="{file_field}"; filename="{filename}"'.encode(),
-        b"Content-Type: application/octet-stream",
-        b"",
-        payload,
-        f"--{boundary}--".encode(),
-        b"",
-    ]
-    return b"\r\n".join(chunks), f"multipart/form-data; boundary={boundary}"
-
-
-def _transcribe_via_fish(file_path: str, *, attempts: int = 2) -> str | None:
-    """Transcreve áudio pela API própria do Fish Audio.
-
-    Áudio não passa pelos modelos do OpenRouter: os slugs de texto/visão em uso não têm
-    endpoint de entrada de áudio (`404 No endpoints found that support input audio`), e foi
-    exatamente isso que fez o agente receber `[audio received]` cru no QA de 21/08. O Fish
-    já é o provedor de voz do projeto e tem ASR próprio — a mesma FISH_API_KEY atende os
-    dois lados. O OpenRouter fica só como motor de texto.
-
-    Retorna a transcrição, ou None se a chave faltar ou a API falhar em todas as tentativas.
-    """
-    api_key = os.getenv("FISH_API_KEY", "").strip()
-    if not api_key:
-        logger.info("[asr] FISH_API_KEY ausente — sem transcrição de áudio")
-        return None
-    try:
-        payload = Path(file_path).read_bytes()
-    except OSError as err:
-        logger.error(f"[asr] não consegui ler o áudio {file_path}: {err}")
-        return None
-    if not payload:
-        logger.warning(f"[asr] áudio vazio: {file_path}")
-        return None
-
-    asr_fields = {"ignore_timestamps": "true"}
-    language = _fish_asr_language()
-    if language:
-        asr_fields["language"] = language
-    body, content_type = _build_multipart(
-        asr_fields, "audio", Path(file_path).name or "audio.ogg", payload
-    )
-    # A doc do endpoint aceita multipart/form-data ou msgpack; JSON com base64 não é
-    # suportado. Multipart é o que dá para montar com urllib, sem dependência nova.
-    last_err = None
-    for attempt in range(1, attempts + 1):
-        req = urllib.request.Request(
-            FISH_ASR_URL,
-            data=body,
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": content_type},
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=60) as resp:
-                result = json.loads(resp.read().decode("utf-8"))
-            text = (result.get("text") or "").strip()
-            if text:
-                logger.info(
-                    f"[asr] fish ok tentativa={attempt} dur={result.get('duration')}s "
-                    f"lang={result.get('language_code')!r} chars={len(text)}"
-                )
-                return text
-            logger.warning(f"[asr] fish devolveu transcrição vazia (tentativa {attempt}/{attempts})")
-            last_err = "transcrição vazia"
-        except urllib.error.HTTPError as err:
-            detail = ""
-            try:
-                detail = err.read().decode("utf-8")[:300]
-            except Exception:
-                pass
-            last_err = f"HTTP {err.code} {detail}"
-            logger.warning(f"[asr] fish falhou (tentativa {attempt}/{attempts}): {last_err}")
-            # 401/402 não melhoram com retry: chave inválida ou crédito de API esgotado.
-            if err.code in (401, 402, 403):
-                break
-        except Exception as err:
-            last_err = str(err)
-            logger.warning(f"[asr] fish falhou (tentativa {attempt}/{attempts}): {err}")
-
-    logger.error(f"[asr] transcrição não obtida para {Path(file_path).name}: {last_err}")
-    return None
-
-
 def _process_media_message(event) -> str | None:
-    """Processa mensagem de mídia: áudio pelo Fish ASR, imagem por Gemini/OpenAI/OpenRouter.
+    """Descreve imagens pelos provedores multimodais configurados.
 
-    Retorna a transcrição ou descrição, ou None se falhar/não for mídia.
+    Notas de voz são responsabilidade do STT nativo do Hermes. O plugin não lê nem apaga
+    o arquivo de áudio antes de o gateway executar essa etapa.
     """
     media_info = _get_media_info(event)
     if not media_info["has_media"] or not media_info["media_urls"]:
         return None
 
     media_type = media_info["media_type"]
-
-    # Áudio é do Fish, e só dele. Os modelos do OpenRouter atendem o motor de texto e a
-    # leitura de imagem; nenhum deles aceita entrada de áudio nos slugs em uso.
-    if media_type in ["ptt", "audio"]:
-        audio_path = media_info["media_urls"][0]
-        try:
-            if not os.path.exists(audio_path):
-                logger.info(f"Arquivo de mídia não encontrado: {audio_path}")
-                return None
-            return _transcribe_via_fish(audio_path)
-        finally:
-            # Privacidade: o áudio some do disco tendo transcrito ou não. Some inteiro —
-            # se o bridge mandou mais de um arquivo, nenhum fica para trás.
-            for path in media_info["media_urls"]:
-                try:
-                    os.remove(path)
-                    logger.info(f"Arquivo temporário de mídia removido para economizar espaço: {path}")
-                except FileNotFoundError:
-                    pass
-                except OSError as delete_err:
-                    logger.warning(f"Erro ao deletar arquivo de mídia temporário: {delete_err}")
 
     if media_type != "image":
         # Outros tipos de mídia não são suportados para transcrição/descrição direta
@@ -9560,12 +9422,15 @@ def pre_gateway_dispatch(*args, **kwargs):
             if len(_seen_message_ids) > 500:  # evitar crescimento ilimitado
                 _seen_message_ids.clear()
 
-    # Descobrir mídia é local e barato. O conteúdo só pode chegar a visão/ASR depois
+    # Descobrir mídia é local e barato. O conteúdo só pode chegar à visão depois
     # que a política do contato confirmar que este chat pertence ao fluxo comercial.
     media_info = _get_media_info(event)
     sale_detection = None
     image_analysis_attempted = False
-    audio_transcribed = False
+    inbound_was_voice = (
+        bool(media_info["has_media"])
+        and str(media_info.get("media_type") or "").lower() in {"ptt", "voice"}
+    )
     # Identificar remetente (com resolução de LID para número de telefone clássico)
     sender_id = event.source.user_id or ""
     resolved_sender = _resolve_phone_from_jid(sender_id)
@@ -9678,13 +9543,11 @@ def pre_gateway_dispatch(*args, **kwargs):
             logger.info("[contact-policy] IA bloqueada chat=%r reason=%s", chat_id, ai_reason)
             return {"action": "skip", "reason": ai_reason}
 
-    # Processamento de mídia autorizado: áudio pelo Fish ASR, imagem pelos modelos de visão.
+    # O STT nativo do Hermes roda depois deste hook. O plugin só processa imagens aqui;
+    # consumir ou apagar o PTT impediria o gateway de transcrevê-lo.
     if media_info["has_media"] and media_info["media_urls"]:
         media_type = media_info["media_type"]
         logger.info(f"[sale-detect] mídia recebida: media_type={media_type!r} urls={media_info['media_urls']!r}")
-        # Detecção de comprovante de pagamento — roda ANTES de _process_media_message porque
-        # essa função apaga o arquivo físico assim que termina (privacidade: sem guardar mídia).
-        # Aqui só LEMOS o arquivo, sem apagar; quem apaga continua sendo o fluxo normal abaixo.
         if media_type == "image":
             image_analysis_attempted = True
             try:
@@ -9693,22 +9556,10 @@ def pre_gateway_dispatch(*args, **kwargs):
                 logger.info(f"[sale-detect] chamado para {media_info['media_urls']!r} — resultado: {sale_detection!r}")
             except Exception as sale_detect_err:
                 logger.error(f"[sale-detect] Erro ao analisar imagem para comprovante: {sale_detect_err}")
-        if media_type in ["ptt", "audio", "image"]:
             result_text = _process_media_message(event)
-            display_text = None
             if result_text:
-                if media_type in ["ptt", "audio"]:
-                    audio_transcribed = True
-                    display_text = f'[Áudio: "{result_text}"]'
-                else:
-                    display_text = f'[Imagem: {result_text}]'
-            elif media_type in ["ptt", "audio"]:
-                # Sem transcrição, o agente recebia o marcador cru do bridge
-                # ("[audio received]") e tinha que adivinhar o que fazer com ele. Entregar a
-                # instrução explícita torna o fallback determinístico em vez de sorte.
-                display_text = AUDIO_FALLBACK_TEXT
+                display_text = f'[Imagem: {result_text}]'
 
-            if display_text:
                 event.text = display_text
                 if hasattr(event, "body"):
                     event.body = display_text
@@ -9718,19 +9569,16 @@ def pre_gateway_dispatch(*args, **kwargs):
                         if isinstance(val, dict):
                             val["body"] = display_text
                             val["text"] = display_text
-
-            # Só transcrição/descrição real vai para o histórico; a instrução de fallback
-            # é orientação de turno, não conteúdo da conversa.
-            if result_text:
                 db_path = Path("/opt/data/.hermes/whatsapp_messages.db")
                 if db_path.exists() and media_info["message_id"]:
                     _persist_transcription_to_db(str(db_path), media_info["message_id"], display_text)
+        elif inbound_was_voice:
+            logger.info("[stt] nota de voz preservada para transcrição nativa do Hermes")
 
     # Modalidade da mensagem do lead decide a modalidade da resposta. Eco do próprio bot
     # não conta — senão a primeira nota de voz enviada travaria o chat em áudio.
-    # Transcrição que falhou não autoriza responder em áudio.
     if not _is_from_me:
-        _remember_inbound_modality(chat_id, audio_transcribed)
+        _remember_inbound_modality(chat_id, inbound_was_voice)
 
     # Comprovante detectado — registra como pendente, acusa recebimento sem confirmar
     # pagamento/pedido e avisa o dono no self-chat.

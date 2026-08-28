@@ -36,6 +36,13 @@ class TestAyaMarketRules(unittest.TestCase):
         self.assertIn("'platform': 'whatsapp'", COMPOSE)
         self.assertIn("'profile': 'whatsapp'", COMPOSE)
 
+    def test_client_profile_loads_handoff_hooks_and_native_stt(self):
+        self.assertIn("'plugins': {'enabled': ['whatsapp-manager']}", COMPOSE)
+        self.assertIn("'provider': 'local'", COMPOSE)
+        self.assertIn("'local': {'model': 'base', 'language': 'pt'}", COMPOSE)
+        self.assertIn("'voice': {'auto_tts': False}", COMPOSE)
+        self.assertIn("voice['auto_tts'] = False", COMPOSE)
+
     def test_runtime_batches_quick_lead_fragments_for_eight_seconds(self):
         self.assertIn(
             "WHATSAPP_DEBOUNCE_INITIAL_MS=${WHATSAPP_DEBOUNCE_INITIAL_MS:-8000}",
