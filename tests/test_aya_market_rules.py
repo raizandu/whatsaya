@@ -36,9 +36,9 @@ class TestAyaMarketRules(unittest.TestCase):
         self.assertIn("'platform': 'whatsapp'", COMPOSE)
         self.assertIn("'profile': 'whatsapp'", COMPOSE)
 
-    def test_runtime_batches_quick_lead_fragments_for_fourteen_seconds(self):
+    def test_runtime_batches_quick_lead_fragments_for_eight_seconds(self):
         self.assertIn(
-            "WHATSAPP_DEBOUNCE_INITIAL_MS=${WHATSAPP_DEBOUNCE_INITIAL_MS:-14000}",
+            "WHATSAPP_DEBOUNCE_INITIAL_MS=${WHATSAPP_DEBOUNCE_INITIAL_MS:-8000}",
             COMPOSE,
         )
         self.assertIn(
