@@ -21,12 +21,16 @@ class MockContext:
     def __init__(self):
         self.hooks = {}
         self.skills = {}
+        self.tools = {}
 
     def register_hook(self, name, func):
         self.hooks[name] = func
 
     def register_skill(self, name, path):
         self.skills[name] = path
+
+    def register_tool(self, name, **kwargs):
+        self.tools[name] = kwargs
 
 
 class BaseWhatsAppManagerTest(unittest.IsolatedAsyncioTestCase):

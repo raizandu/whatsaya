@@ -31,6 +31,12 @@ from commercial_followups import (
     render_contextual_message,
     sanitize_followup_fact,
 )
+from calendar_booking import (
+    CalendarBookingError,
+    calendar_ready,
+    create_booking,
+    find_available_slots,
+)
 
 import logging
 
@@ -372,6 +378,13 @@ _turn_context_bindings: contextvars.ContextVar[tuple[str, ...]] = contextvars.Co
     "whatsaya_turn_context_bindings",
     default=(),
 )
+
+# Estado efêmero da agenda: uma vaga só pode ser reservada pelo mesmo chat que a
+# recebeu, em resposta a um inbound posterior e dentro de 30 minutos. Nenhum título
+# ou participante de outros eventos entra neste cache.
+_calendar_turn_state: dict[str, dict] = {}
+_calendar_state_lock = threading.Lock()
+_CALENDAR_OFFER_TTL_S = 30 * 60
 
 # Dedup por sessão Hermes: NÃO usar como bloqueio de turno seguinte.
 # O Hermes reusa o mesmo session_id na conversa inteira; bloquear aqui
@@ -11554,12 +11567,223 @@ def _run_periodic_sync():
         time.sleep(60)
 
 
+_CALENDAR_FIND_TOOL = "whatsaya_calendar_find_slots"
+_CALENDAR_BOOK_TOOL = "whatsaya_calendar_book"
+_CALENDAR_TOOLSET = "whatsaya_calendar"
+
+_CALENDAR_FIND_SCHEMA = {
+    "name": _CALENDAR_FIND_TOOL,
+    "description": (
+        "Consulta a agenda comercial real da WhatsAYA e retorna no máximo três vagas livres. "
+        "Use somente para marcar a call comercial da WhatsAYA, nunca para afirmar que a AYA "
+        "já integra a agenda do negócio do lead. Datas usam YYYY-MM-DD."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "date_from": {"type": "string", "description": "Primeiro dia da busca, YYYY-MM-DD."},
+            "date_to": {"type": "string", "description": "Último dia da busca, YYYY-MM-DD; máximo 14 dias."},
+            "period": {"type": "string", "enum": ["any", "morning", "afternoon"]},
+        },
+        "required": ["date_from"],
+    },
+}
+
+_CALENDAR_BOOK_SCHEMA = {
+    "name": _CALENDAR_BOOK_TOOL,
+    "description": (
+        "Reserva na agenda real uma das vagas devolvidas por whatsaya_calendar_find_slots. "
+        "Só use depois que o lead responder em um turno posterior confirmando explicitamente "
+        "uma das opções. Nunca invente start/end e nunca reserve no mesmo turno da consulta."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "start": {"type": "string", "description": "Início ISO 8601 exatamente como devolvido pela consulta."},
+            "end": {"type": "string", "description": "Fim ISO 8601 exatamente como devolvido pela consulta."},
+        },
+        "required": ["start", "end"],
+    },
+}
+
+
+def _calendar_tool_json(payload: dict) -> str:
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
+def _calendar_tool_context(session_id: str) -> tuple[str, dict, tuple[str, float] | None]:
+    chat_id = _resolve_mapped_chat_id(str(session_id or ""))
+    if not chat_id or _session_is_owner(str(session_id or "")):
+        raise CalendarBookingError("Sessão de lead não identificada com segurança.")
+    inbound = _current_inbound_record(chat_id, str(session_id or ""))
+    token = _inbound_record_token(inbound)
+    if not token:
+        raise CalendarBookingError("Turno atual do lead não está vinculado à mensagem recebida.")
+    return chat_id, inbound, token
+
+
+def _calendar_confirmation_present(text: str) -> bool:
+    folded = " ".join(_normalize_text(str(text or "")).split())
+    if not folded:
+        return False
+    if re.search(r"\b(?:nao|nem|talvez|depois|outro|outra|mudar|nenhum|nenhuma)\b", folded):
+        return False
+    return bool(re.search(
+        r"^(?:sim|ok|okay|pode ser|fechado|fechou|confirmo|esse|essa|este|esta|"
+        r"o primeiro|o segundo|o terceiro|a primeira|a segunda|a terceira|"
+        r"yes|that works|the first|the second|the third|sí|si|confirmo)\b|"
+        r"\b(?:pode marcar|pode agendar|fica confirmado|quero esse|works for me)\b",
+        folded,
+    ))
+
+
+def _handle_calendar_find_slots(args: dict, **kwargs) -> str:
+    try:
+        chat_id, inbound, token = _calendar_tool_context(kwargs.get("session_id") or "")
+        result = find_available_slots(
+            date_from=str(args.get("date_from") or ""),
+            date_to=str(args.get("date_to") or "") or None,
+            period=str(args.get("period") or "any"),
+        )
+        state = {
+            "kind": "offered",
+            "at": time.time(),
+            "expires_at": time.time() + _CALENDAR_OFFER_TTL_S,
+            "inbound_token": token,
+            "slots": list(result.get("slots") or []),
+            "timezone": result.get("timezone") or "America/Sao_Paulo",
+            "source_text": str(inbound.get("text") or "")[:500],
+        }
+        with _calendar_state_lock:
+            _calendar_turn_state[chat_id] = state
+        logger.info("[calendar] disponibilidade consultada chat=%r slots=%d", chat_id, len(state["slots"]))
+        return _calendar_tool_json(result)
+    except CalendarBookingError as exc:
+        logger.warning("[calendar] consulta bloqueada: %s", exc)
+        return _calendar_tool_json({"status": "error", "error": str(exc)})
+    except Exception as exc:
+        logger.exception("[calendar] consulta falhou")
+        return _calendar_tool_json({"status": "error", "error": f"Falha segura ao consultar agenda: {type(exc).__name__}"})
+
+
+def _calendar_state_for_turn(
+    chat_id: str,
+    inbound_token: tuple[str, float] | None,
+) -> dict:
+    if not chat_id or not inbound_token:
+        return {}
+    with _calendar_state_lock:
+        state = dict(_calendar_turn_state.get(chat_id) or {})
+    if state.get("inbound_token") != inbound_token:
+        return {}
+    if state.get("kind") == "offered" and float(state.get("expires_at") or 0) < time.time():
+        return {}
+    return state
+
+
+def _calendar_local_label(iso_value: str, language: str) -> str:
+    raw = str(iso_value or "").replace("Z", "+00:00")
+    value = datetime.datetime.fromisoformat(raw)
+    weekdays = {
+        "pt": ("segunda", "terça", "quarta", "quinta", "sexta", "sábado", "domingo"),
+        "en": ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"),
+        "es": ("lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"),
+    }
+    names = weekdays.get(language) or weekdays["pt"]
+    return f"{names[value.weekday()]}, {value:%d/%m}, {value:%H:%M}"
+
+
+def _calendar_visible_reply(state: dict, user_message: str) -> str:
+    language = _infer_message_language(user_message)
+    if state.get("kind") == "booked":
+        result = state.get("result") or {}
+        label = _calendar_local_label(str(result.get("start") or ""), language)
+        templates = {
+            "pt": f"Fechado, sua call ficou agendada para {label}, no horário de Goiânia. Se precisar mudar, me avisa por aqui, combinado?",
+            "en": f"Booked. Your call is set for {label}, Goiânia time. If you need to change it, message me here, okay?",
+            "es": f"Listo, tu call quedó agendada para el {label}, horario de Goiânia. Si necesitas cambiarla, avísame por aquí, ¿te parece?",
+        }
+        return templates.get(language) or templates["pt"]
+
+    slots = list(state.get("slots") or [])
+    if not slots:
+        templates = {
+            "pt": "Não encontrei vaga nesse período. Quer tentar outro dia ou manhã/tarde?",
+            "en": "I couldn't find an opening in that window. Want to try another day or morning/afternoon?",
+            "es": "No encontré un horario libre en ese período. ¿Probamos otro día o mañana/tarde?",
+        }
+        return templates.get(language) or templates["pt"]
+    labels = [_calendar_local_label(str(slot.get("start") or ""), language) for slot in slots]
+    lines = "\n".join(f"{idx}. {label}" for idx, label in enumerate(labels, 1))
+    templates = {
+        "pt": f"Tenho estes horários livres, no horário de Goiânia:\n{lines}\nQual deles funciona melhor?",
+        "en": f"These times are open, in Goiânia time:\n{lines}\nWhich one works best?",
+        "es": f"Tengo estos horarios libres, en el horario de Goiânia:\n{lines}\n¿Cuál te queda mejor?",
+    }
+    return templates.get(language) or templates["pt"]
+
+
+def _handle_calendar_book(args: dict, **kwargs) -> str:
+    try:
+        chat_id, inbound, token = _calendar_tool_context(kwargs.get("session_id") or "")
+        with _calendar_state_lock:
+            offered = dict(_calendar_turn_state.get(chat_id) or {})
+        if offered.get("kind") != "offered" or float(offered.get("expires_at") or 0) < time.time():
+            raise CalendarBookingError("Não há uma oferta de horário válida para este lead; consulte novamente.")
+        if offered.get("inbound_token") == token:
+            raise CalendarBookingError("A reserva exige confirmação do lead em uma mensagem posterior à oferta.")
+        inbound_text = str(inbound.get("text") or "")
+        if not _calendar_confirmation_present(inbound_text):
+            raise CalendarBookingError("A mensagem atual não confirma explicitamente uma das vagas oferecidas.")
+
+        start = str(args.get("start") or "")
+        end = str(args.get("end") or "")
+        matching = next(
+            (slot for slot in offered.get("slots") or []
+             if str(slot.get("start") or "") == start and str(slot.get("end") or "") == end),
+            None,
+        )
+        if not matching:
+            raise CalendarBookingError("O horário solicitado não pertence às vagas oferecidas a este lead.")
+
+        contact = _contact_record_for_chat(chat_id) or {}
+        result = create_booking(
+            chat_id=chat_id,
+            start=start,
+            end=end,
+            lead_name=str(contact.get("name") or contact.get("nickname") or ""),
+            purpose="Apresentação comercial da WhatsAYA",
+        )
+        with _calendar_state_lock:
+            _calendar_turn_state[chat_id] = {
+                "kind": "booked",
+                "at": time.time(),
+                "inbound_token": token,
+                "result": dict(result),
+            }
+        logger.info(
+            "[calendar] reserva confirmada chat=%r event=%r start=%r",
+            chat_id,
+            result.get("event_id"),
+            result.get("start"),
+        )
+        return _calendar_tool_json(result)
+    except CalendarBookingError as exc:
+        logger.warning("[calendar] reserva bloqueada: %s", exc)
+        return _calendar_tool_json({"status": "error", "error": str(exc)})
+    except Exception as exc:
+        logger.exception("[calendar] reserva falhou")
+        return _calendar_tool_json({"status": "error", "error": f"Falha segura ao reservar agenda: {type(exc).__name__}"})
+
+
 _CONTACT_BLOCKED_TOOLS = frozenset({
     "clarify",
     "clarifying_questions",
 })
 _CONTACT_ALLOWED_TOOLS = frozenset({
     "delegate_task",
+    _CALENDAR_FIND_TOOL,
+    _CALENDAR_BOOK_TOOL,
 })
 _CONTACT_BLOCK_MESSAGE = (
     "Não use a ferramenta clarify. Se faltar um dado, pergunte no chat "
@@ -14898,6 +15122,8 @@ def transform_llm_output(*args, **kwargs):
         key=lambda record: float(record.get("at") or 0),
     )
     current_inbound = str(payment_inbound.get("text") or "")
+    calendar_state = _calendar_state_for_turn(str(chat_id or ""), consumed_inbound_token)
+    calendar_handled = bool(calendar_state)
 
     if any(re.search(p, str(response_text), re.IGNORECASE) for p in _GATEWAY_PROVIDER_ERROR_PATTERNS):
         logger.warning(f"[transform_llm_output] erro de provider/gateway suprimido chat={chat_id!r}: {response_text!r}")
@@ -14924,6 +15150,14 @@ def transform_llm_output(*args, **kwargs):
         threading.Thread(target=_notify_bg, daemon=True, name="wa-handoff-notify").start()
 
     response_text, handoff_reason, handoff_summary = _extract_handoff_details(str(response_text))
+    if calendar_handled:
+        # A oferta/reserva real substitui qualquer texto ou handoff inventado pelo modelo.
+        # O link privado do evento nunca é enviado ao lead.
+        if handoff_reason is not None:
+            logger.info("[calendar] handoff do modelo suprimido após ação real chat=%r", chat_id)
+        handoff_reason = None
+        handoff_summary = None
+        response_text = _calendar_visible_reply(calendar_state, current_inbound)
     if handoff_reason is not None and _suppress_model_handoff_for_technical_question(
         current_inbound
     ):
@@ -14936,7 +15170,7 @@ def transform_llm_output(*args, **kwargs):
     if handoff_reason is not None:
         _spawn_handoff_notify(handoff_reason, handoff_summary or "")
 
-    if config.plugin_config_subdir == "instance":
+    if config.plugin_config_subdir == "instance" and not calendar_handled:
         try:
             contact_info = _contact_record_for_chat(chat_id)
             _soul, payment_rules = _load_support_files()
@@ -14989,7 +15223,13 @@ def transform_llm_output(*args, **kwargs):
         _spawn_handoff_notify(gate_handoff, gate_handoff_summary or "")
 
     response_text = _vary_repeated_acknowledgement(str(response_text), str(chat_id or ""))
-    clean_text = _prepare_contact_reply(str(response_text))
+    # A resposta de agenda já foi montada a partir do payload verificado. O limpador
+    # comercial genérico remove listas numeradas e apagaria justamente as vagas.
+    clean_text = (
+        str(response_text).strip()
+        if calendar_handled
+        else _prepare_contact_reply(str(response_text))
+    )
     if not clean_text:
         return "\n"
 
@@ -15551,6 +15791,27 @@ def register(ctx):
     # pre_gateway_dispatch local removido (usando a versão global do módulo)
 
     # pre_llm_call local removido (usando a versão global do módulo)
+
+    # Tools mínimos da agenda comercial. O check_fn deixa ambos invisíveis até o
+    # OAuth possuir refresh token + escopo de Calendar.
+    ctx.register_tool(
+        name=_CALENDAR_FIND_TOOL,
+        toolset=_CALENDAR_TOOLSET,
+        schema=_CALENDAR_FIND_SCHEMA,
+        handler=_handle_calendar_find_slots,
+        check_fn=calendar_ready,
+        description="Consulta disponibilidade real da agenda comercial da WhatsAYA.",
+        emoji="📅",
+    )
+    ctx.register_tool(
+        name=_CALENDAR_BOOK_TOOL,
+        toolset=_CALENDAR_TOOLSET,
+        schema=_CALENDAR_BOOK_SCHEMA,
+        handler=_handle_calendar_book,
+        check_fn=calendar_ready,
+        description="Reserva uma vaga previamente oferecida e confirmada pelo lead.",
+        emoji="✅",
+    )
 
     ctx.register_hook("pre_gateway_dispatch", pre_gateway_dispatch)
     ctx.register_hook("pre_llm_call", pre_llm_call)
