@@ -9051,6 +9051,8 @@ def _build_support_prompt(
             "no WhatsApp. NÃO se apresente como 'assistente virtual', 'SDR' ou 'atendente' do dono.\n"
             "- PAPEL: atendente comercial no WhatsApp. Responda ao caso sem lista de funcionalidades "
             "ou checklist. Faça no máximo UMA pergunta agora e não repita o que já foi respondido.\n"
+            "- VARIE confirmações: Show, Fechou, Boa, Blz ou Perfeito. Não repita; use Então "
+            "ao confirmar ou resumir.\n"
             "- PREÇO E MOEDA: Brasil = proposta personalizada por projeto, fecha na call, sem tabela. "
             "Estados Unidos = use a condição oficial da base (implementação + mensalidade via "
             "Zelle). Não misture mercados. Pix/Zelle detalhado só se pedirem pagar agora.\n"
@@ -14581,6 +14583,103 @@ def _shape_whatsapp_reply(text: str) -> str:
     return " ".join(body)
 
 
+_ACKNOWLEDGEMENT_OPENER_RE = re.compile(
+    r"^(?P<opener>perfeito|show|fechou|boa|blz|ent[aã]o)"
+    r"(?:\s*[!.,:;…—–-]+)?(?:\s+|$)",
+    re.IGNORECASE,
+)
+_ACKNOWLEDGEMENT_ROTATION = {
+    "perfeito": "Show",
+    "show": "Fechou",
+    "fechou": "Boa",
+    "boa": "Blz",
+    "blz": "Perfeito",
+    "entao": "Fechou",
+}
+_CONFIRMATION_REPLY_RE = re.compile(
+    r"\b(?:recapitul\w*|resum\w*|confirm\w*|combin\w*|hor[aá]rio\w*|"
+    r"manh[aã]|tarde|noite|encaminh\w*|te\s+chamo|seguem\s+os\s+dados|"
+    r"comprovante|pr[oó]ximo\s+passo)\b",
+    re.IGNORECASE,
+)
+
+
+def _recent_aya_acknowledgement(chat_id: str) -> str:
+    """Último abridor curto da AYA, lido localmente sem acrescentar latência de rede."""
+    if not chat_id or not _MSG_DB_PATH.is_file():
+        return ""
+    candidates = {str(chat_id)}
+    local, _, domain = str(chat_id).partition("@")
+    local = local.split(":", 1)[0]
+    if domain == "lid":
+        phone = _lid_to_phone.get(local)
+        if phone:
+            candidates.add(f"{str(phone).split('@')[0].split(':')[0]}@s.whatsapp.net")
+    elif domain == "s.whatsapp.net":
+        target_digits = "".join(c for c in local if c.isdigit())
+        for lid, phone in _lid_to_phone.items():
+            phone_digits = "".join(c for c in str(phone).split("@")[0] if c.isdigit())
+            if phone_digits == target_digits:
+                candidates.add(f"{str(lid).split('@')[0].split(':')[0]}@lid")
+
+    placeholders = ",".join("?" for _candidate in candidates)
+    try:
+        with sqlite3.connect(f"file:{_MSG_DB_PATH}?mode=ro", uri=True, timeout=2) as conn:
+            rows = conn.execute(
+                f"""
+                SELECT body FROM messages
+                WHERE chat_id IN ({placeholders}) AND from_me = 1
+                  AND body IS NOT NULL AND body != ''
+                ORDER BY timestamp DESC LIMIT 6
+                """,
+                tuple(candidates),
+            ).fetchall()
+    except sqlite3.Error:
+        return ""
+
+    for (body,) in rows:
+        match = _ACKNOWLEDGEMENT_OPENER_RE.match(str(body or "").strip())
+        if match:
+            return _normalize_text(match.group("opener"))
+    return ""
+
+
+def _vary_repeated_acknowledgement(text: str, chat_id: str) -> str:
+    """Evita o mesmo 'Perfeito/Show/Boa...' em respostas próximas da AYA."""
+    value = str(text or "").strip()
+    match = _ACKNOWLEDGEMENT_OPENER_RE.match(value)
+    if not match:
+        return value
+
+    current = _normalize_text(match.group("opener"))
+    if not current or _recent_aya_acknowledgement(chat_id) != current:
+        return value
+
+    rest = value[match.end():].lstrip()
+    is_confirmation = bool(_CONFIRMATION_REPLY_RE.search(rest))
+    replacement = (
+        "Então"
+        if is_confirmation and current != "entao"
+        else _ACKNOWLEDGEMENT_ROTATION.get(current, "Show")
+    )
+    if not rest:
+        rewritten = f"{replacement}!"
+    elif replacement == "Então":
+        if not re.match(r"^(?:AYA|IA|WhatsApp|Pix|Zelle|CNPJ|EUA)\b", rest):
+            rest = rest[:1].lower() + rest[1:]
+        rewritten = f"Então, {rest}"
+    else:
+        rest = rest[:1].upper() + rest[1:]
+        rewritten = f"{replacement}! {rest}"
+    logger.info(
+        "[contact-reply] confirmação variada chat=%r %s→%s",
+        chat_id,
+        current,
+        _normalize_text(replacement),
+    )
+    return rewritten
+
+
 def _prepare_contact_reply(response_text: str) -> str:
     """Filtra a resposta de contato. String vazia = suprimir o envio."""
     clean_text = _EXEC_PATTERN.sub("", response_text or "").strip()
@@ -14889,6 +14988,7 @@ def transform_llm_output(*args, **kwargs):
     if gate_handoff is not None and handoff_reason is None:
         _spawn_handoff_notify(gate_handoff, gate_handoff_summary or "")
 
+    response_text = _vary_repeated_acknowledgement(str(response_text), str(chat_id or ""))
     clean_text = _prepare_contact_reply(str(response_text))
     if not clean_text:
         return "\n"

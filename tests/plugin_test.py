@@ -7458,6 +7458,80 @@ class TestPostLlmCall(BaseWhatsAppManagerTest):
 class TestPrepareContactReply(BaseWhatsAppManagerTest):
     """Filtro de resposta a contatos: redação seletiva + vazamento interno (§17)."""
 
+    def test_perfeito_repetido_varia_para_show(self):
+        import whatsapp_manager
+        with patch.object(
+            whatsapp_manager, "_recent_aya_acknowledgement", return_value="perfeito"
+        ):
+            out = whatsapp_manager._vary_repeated_acknowledgement(
+                "Perfeito! Isso já alivia bastante a rotina. Quantos contatos chegam por dia?",
+                "5511@s.whatsapp.net",
+            )
+        self.assertEqual(
+            out,
+            "Show! Isso já alivia bastante a rotina. Quantos contatos chegam por dia?",
+        )
+
+    def test_confirmacao_repetida_usa_entao(self):
+        import whatsapp_manager
+        with patch.object(
+            whatsapp_manager, "_recent_aya_acknowledgement", return_value="show"
+        ):
+            out = whatsapp_manager._vary_repeated_acknowledgement(
+                "Show! Te chamo aqui com um horário certinho de manhã. Pode ser assim?",
+                "5511@s.whatsapp.net",
+            )
+        self.assertEqual(
+            out,
+            "Então, te chamo aqui com um horário certinho de manhã. Pode ser assim?",
+        )
+
+    def test_boa_repetida_varia_para_blz(self):
+        import whatsapp_manager
+        with patch.object(
+            whatsapp_manager, "_recent_aya_acknowledgement", return_value="boa"
+        ):
+            out = whatsapp_manager._vary_repeated_acknowledgement(
+                "Boa! Ela acaba ficando sobrecarregada no WhatsApp?",
+                "5511@s.whatsapp.net",
+            )
+        self.assertEqual(out, "Blz! Ela acaba ficando sobrecarregada no WhatsApp?")
+
+    def test_ultimo_abridor_considera_so_mensagens_da_aya(self):
+        import whatsapp_manager
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "messages.db"
+            with sqlite3.connect(db_path) as conn:
+                conn.execute(
+                    "CREATE TABLE messages (chat_id TEXT, from_me INTEGER, body TEXT, timestamp INTEGER)"
+                )
+                conn.executemany(
+                    "INSERT INTO messages VALUES (?, ?, ?, ?)",
+                    [
+                        ("5511@s.whatsapp.net", 1, "Show! Topa uma call?", 1),
+                        ("5511@s.whatsapp.net", 0, "Perfeito, pode ser de manhã", 2),
+                    ],
+                )
+            with patch.object(whatsapp_manager, "_MSG_DB_PATH", db_path):
+                opener = whatsapp_manager._recent_aya_acknowledgement(
+                    "5511@s.whatsapp.net"
+                )
+        self.assertEqual(opener, "show")
+
+    def test_abridor_diferente_nao_e_reescrito(self):
+        import whatsapp_manager
+        with patch.object(
+            whatsapp_manager, "_recent_aya_acknowledgement", return_value="show"
+        ):
+            out = whatsapp_manager._vary_repeated_acknowledgement(
+                "Perfeito! O investimento é personalizado. Ainda topa a call?",
+                "5511@s.whatsapp.net",
+            )
+        self.assertEqual(
+            out,
+            "Perfeito! O investimento é personalizado. Ainda topa a call?",
+        )
+
     def test_third_party_phone_redacted(self):
         import whatsapp_manager
         out = whatsapp_manager._prepare_contact_reply("ligue para 11999887766 ok?")
@@ -9987,6 +10061,9 @@ class TestPromptDietAndPrefixOrder(unittest.TestCase):
         self.assertIn("SIGILO COMERCIAL", bloco)
         self.assertIn("NUNCA use ferramentas", bloco)
         self.assertIn("FORMATO DA RESPOSTA", bloco)
+        self.assertIn("VARIE confirmações", bloco)
+        self.assertIn("Blz", bloco)
+        self.assertIn("Então", bloco)
         self.assertGreater(bloco.find("FORMATO DA RESPOSTA"), bloco.find("ONBOARDING SÓ DEPOIS DA VENDA"))
 
     def test_constraints_medem_menos_depois_da_dieta(self):
