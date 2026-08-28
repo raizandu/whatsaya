@@ -36,6 +36,12 @@ class TestAyaMarketRules(unittest.TestCase):
         self.assertIn("'platform': 'whatsapp'", COMPOSE)
         self.assertIn("'profile': 'whatsapp'", COMPOSE)
 
+    def test_runtime_batches_quick_lead_fragments_for_fourteen_seconds(self):
+        self.assertIn(
+            "WHATSAPP_DEBOUNCE_INITIAL_MS=${WHATSAPP_DEBOUNCE_INITIAL_MS:-14000}",
+            COMPOSE,
+        )
+
     def test_united_states_is_confirmed_without_advertising_spanish(self):
         """EUA é mercado confirmado; espanhol não entra como idioma da oferta."""
         normalized = RULES.lower()

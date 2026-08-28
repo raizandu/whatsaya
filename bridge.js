@@ -239,10 +239,10 @@ const CHUNK_DELAY_MS = parseInt(process.env.WHATSAPP_CHUNK_DELAY_MS || '300', 10
 // convergindo para MIN. Isso acomoda tanto digitadores lentos quanto rápidos.
 //
 // Fórmula: nextTimer = max(MIN_MS, INITIAL_MS × DECAY^(parts-1))
-// Ex (defaults): 1 frag→15s, 2→9s, 3→5.4s, 4→3.2s, 5+→2s
+// Ex (defaults): 1 frag→14s, 2→8.4s, 3→5s, 4→3s, 5+→2s
 //
 // Para desabilitar: WHATSAPP_DEBOUNCE_INITIAL_MS=0
-const WHATSAPP_DEBOUNCE_INITIAL_MS = parseInt(process.env.WHATSAPP_DEBOUNCE_INITIAL_MS || '15000', 10);
+const WHATSAPP_DEBOUNCE_INITIAL_MS = parseInt(process.env.WHATSAPP_DEBOUNCE_INITIAL_MS || '14000', 10);
 const WHATSAPP_DEBOUNCE_MIN_MS     = parseInt(process.env.WHATSAPP_DEBOUNCE_MIN_MS     || '2000',  10);
 const WHATSAPP_DEBOUNCE_DECAY      = parseFloat(process.env.WHATSAPP_DEBOUNCE_DECAY    || '0.6');
 // No self-chat (o dono falando consigo mesmo), pular o debounce por padrão — respostas
@@ -663,9 +663,9 @@ const debounceBuffer = new Map();
  * @param {number} parts - Nº de fragmentos já acumulados (incluindo o atual)
  * @returns {number} Delay em ms
  *
- * Tabela com defaults (INITIAL=15000, MIN=2000, DECAY=0.6):
- *   parts=1 → 15000ms | parts=2 → 9000ms | parts=3 → 5400ms
- *   parts=4 → 3240ms  | parts=5+ → 2000ms (floor)
+ * Tabela com defaults (INITIAL=14000, MIN=2000, DECAY=0.6):
+ *   parts=1 → 14000ms | parts=2 → 8400ms | parts=3 → 5040ms
+ *   parts=4 → 3024ms  | parts=5+ → 2000ms (floor)
  */
 function calcDebounceDelay(parts) {
   if (WHATSAPP_DEBOUNCE_INITIAL_MS <= 0) return 0;

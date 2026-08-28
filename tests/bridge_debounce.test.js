@@ -1,0 +1,54 @@
+import test from 'node:test';
+import assert from 'node:assert';
+import fs from 'node:fs';
+import path from 'node:path';
+
+const TEST_ROOT = path.join('/tmp', `whatsaya-bridge-debounce-test-${process.pid}`);
+fs.mkdirSync(TEST_ROOT, { recursive: true });
+process.on('exit', () => fs.rmSync(TEST_ROOT, { recursive: true, force: true }));
+process.env.HOME = TEST_ROOT;
+process.env.WHATSAPP_HISTORY_DB_PATH = path.join(TEST_ROOT, 'whatsapp_messages.db');
+process.env.WHATSAPP_HISTORY_PERSIST_DISABLED = 'true';
+process.env.WHATSAPP_OWNER_NUMBER = '99999';
+process.env.WHATSAPP_ALLOWED_USERS = 'client123';
+process.env.WHATSAPP_MODE = 'bot';
+process.env.WHATSAPP_DEBOUNCE_INITIAL_MS = '120';
+process.env.WHATSAPP_DEBOUNCE_MIN_MS = '30';
+process.env.WHATSAPP_DEBOUNCE_DECAY = '0.5';
+process.env.WHATSAPP_DEBOUNCE_SKIP_SELF_CHAT = 'true';
+
+const {
+  clearRecentlyProcessedIds,
+  getMessageQueue,
+  onMessagesUpsert,
+} = await import('../bridge.js');
+
+const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+const inbound = (id, body) => ({
+  messages: [{
+    key: {
+      id,
+      fromMe: false,
+      remoteJid: 'client123@s.whatsapp.net',
+    },
+    message: { conversation: body },
+  }],
+  type: 'notify',
+});
+
+test('quick text fragments become one ordered inbound batch', async () => {
+  clearRecentlyProcessedIds();
+  getMessageQueue().length = 0;
+
+  await onMessagesUpsert(inbound('debounce-1', 'Sim, pode ser'));
+  await wait(60);
+  await onMessagesUpsert(inbound('debounce-2', 'Quanto q custa?'));
+
+  assert.strictEqual(getMessageQueue().length, 0);
+  await wait(100);
+
+  const queue = getMessageQueue();
+  assert.strictEqual(queue.length, 1);
+  assert.strictEqual(queue[0].body, 'Sim, pode ser\nQuanto q custa?');
+  assert.deepStrictEqual(queue[0].debounceIds, ['debounce-1', 'debounce-2']);
+});

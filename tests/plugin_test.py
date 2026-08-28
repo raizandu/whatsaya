@@ -10762,6 +10762,31 @@ class TestQaFinalBrasilGoLive(unittest.TestCase):
         self.assertTrue(reason)
         self.assertTrue(visible.rstrip().endswith("?"), visible)
 
+    def test_aceite_de_call_com_preco_responde_as_duas_intencoes_uma_vez(self):
+        historico = (
+            "Lead: Chegam uns 10 pacientes por dia\n"
+            "AYA: Faz sentido eu te mostrar como ficaria isso funcionando na sua clínica. "
+            "Topa uma call rápida essa semana?\n"
+        )
+        out = self._gate(
+            "Sim, pode ser\nQuanto q custa?",
+            "Show! Período de manhã ou tarde fica melhor pra você?",
+            historico=historico,
+            contact={"market_id": "BR", "language": "pt"},
+        )
+        folded = whatsapp_manager._normalize_text(out)
+
+        self.assertIn("investimento", folded)
+        self.assertIn("personalizado", folded)
+        self.assertEqual(folded.count("manha ou tarde"), 1)
+        self.assertEqual(out.count("[[HANDOFF:"), 1)
+        visible, reason = whatsapp_manager._extract_handoff(out)
+        self.assertTrue(reason)
+        self.assertEqual(visible.count("?"), 1)
+        self.assertTrue(visible.rstrip().endswith("?"), visible)
+        self.assertNotIn("agendado", folded)
+        self.assertNotIn("confirmado", folded)
+
     def test_preferencia_no_aceite_da_call_e_preservada_no_handoff(self):
         historico = (
             "Lead: Sou psicoterapeuta e preciso de ajuda com agendamento\n"

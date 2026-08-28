@@ -13170,6 +13170,20 @@ _CONSULTING_CALL_PENDING = {
         "¿Todavía te parece bien agendar esa conversación?"
     ),
 }
+_CONSULTING_CALL_ACCEPTED_PRICE = {
+    "pt": (
+        "O investimento é personalizado pro que a AYA vai assumir no seu atendimento. "
+        "A gente fecha isso nessa call, olhando o seu caso."
+    ),
+    "en": (
+        "The investment is tailored to what AYA will handle in your customer service. "
+        "We define it in this call based on your case."
+    ),
+    "es": (
+        "La inversión se personaliza según lo que la AYA asumirá en tu atención. "
+        "La definimos en esta call viendo tu caso."
+    ),
+}
 # QA 25/08: o lead insistiu no valor e recebeu o mesmo parágrafo. Fallback não
 # pode soar de script. Sem ponto em "Entendo." — vira bolha órfã (soma ≥ 110).
 _CONSULTING_TRIAGE_REPEAT = {
@@ -13500,8 +13514,20 @@ def _enforce_aya_payment_output_gate(
                     _SALES_CALL_PREFERENCE_REPLY.get(language)
                     or _SALES_CALL_PREFERENCE_REPLY["pt"]
                 )
-                return template.format(preference=preference)
-            return _SALES_CALL_REPLY.get(language) or _SALES_CALL_REPLY["pt"]
+                call_reply = template.format(preference=preference)
+            else:
+                call_reply = _SALES_CALL_REPLY.get(language) or _SALES_CALL_REPLY["pt"]
+            if _asks_about_price(user_message):
+                market = _canonical_commercial_market(turn_contact)
+                price_reply = (
+                    _aya_market_price_line("US", language, rules_content)
+                    if market == "US"
+                    else _CONSULTING_CALL_ACCEPTED_PRICE.get(language)
+                    or _CONSULTING_CALL_ACCEPTED_PRICE["pt"]
+                )
+                if price_reply:
+                    return f"{price_reply}\n\n{call_reply}"
+            return call_reply
         if preference and _history_has_call_handoff_started(call_history):
             template = (
                 _SALES_CALL_PREFERENCE_ACK.get(language)

@@ -121,7 +121,7 @@
 #   WHATSAPP_CONNECTION_NAME Nome da conexão exibido no Dashboard (padrão: EmpreendedorSerial)
 #
 # ⏳ DEBOUNCE DE MENSAGENS (agrupa fragmentos de texto antes de processar)
-#   WHATSAPP_DEBOUNCE_INITIAL_MS      Espera inicial em ms antes de processar (padrão: 2500)
+#   WHATSAPP_DEBOUNCE_INITIAL_MS      Espera inicial em ms antes de processar (padrão: 14000)
 #   WHATSAPP_DEBOUNCE_MIN_MS          Piso do decaimento progressivo em ms (padrão: 1500)
 #   WHATSAPP_DEBOUNCE_DECAY           Fator de decaimento a cada fragmento novo (padrão: 0.6)
 #   WHATSAPP_DEBOUNCE_SKIP_SELF_CHAT  Pular debounce no self-chat do dono (padrão: true)
@@ -576,7 +576,7 @@ services:
       - WHATSAPP_DEPLOY_COMMIT=${WHATSAPP_DEPLOY_COMMIT:-}
 
       # Debounce de mensagens (agrupa fragmentos de texto antes de processar)
-      - WHATSAPP_DEBOUNCE_INITIAL_MS=${WHATSAPP_DEBOUNCE_INITIAL_MS:-2500}
+      - WHATSAPP_DEBOUNCE_INITIAL_MS=${WHATSAPP_DEBOUNCE_INITIAL_MS:-14000}
       - WHATSAPP_DEBOUNCE_MIN_MS=${WHATSAPP_DEBOUNCE_MIN_MS:-1500}
       - WHATSAPP_DEBOUNCE_DECAY=${WHATSAPP_DEBOUNCE_DECAY:-0.6}
       - WHATSAPP_DEBOUNCE_SKIP_SELF_CHAT=${WHATSAPP_DEBOUNCE_SKIP_SELF_CHAT:-true}
