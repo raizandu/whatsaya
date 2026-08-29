@@ -128,6 +128,26 @@ class CalendarBookingTests(unittest.TestCase):
         )
         self.assertEqual(result["slots"][0]["start"], "2026-08-31T08:00:00-03:00")
 
+    def test_find_slots_honors_exact_preferred_time_across_days(self):
+        service = FakeService(busy=[{
+            "start": "2026-08-31T14:00:00-03:00",
+            "end": "2026-08-31T14:30:00-03:00",
+        }])
+        result = cb.find_available_slots(
+            date_from="2026-08-29",
+            date_to="2026-09-10",
+            period="afternoon",
+            preferred_time="14:00",
+            now=datetime(2026, 8, 28, 16, 32, tzinfo=TZ),
+            service=service,
+        )
+
+        self.assertEqual([slot["start"] for slot in result["slots"]], [
+            "2026-09-01T14:00:00-03:00",
+            "2026-09-02T14:00:00-03:00",
+            "2026-09-03T14:00:00-03:00",
+        ])
+
     def test_create_booking_rechecks_availability_and_sends_no_invite(self):
         service = FakeService()
         with patch("calendar_booking.datetime") as mocked_datetime:

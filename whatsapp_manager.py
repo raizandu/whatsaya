@@ -11619,6 +11619,10 @@ _CALENDAR_FIND_SCHEMA = {
             "date_from": {"type": "string", "description": "Primeiro dia da busca, YYYY-MM-DD."},
             "date_to": {"type": "string", "description": "Último dia da busca, YYYY-MM-DD; máximo 14 dias."},
             "period": {"type": "string", "enum": ["any", "morning", "afternoon"]},
+            "preferred_time": {
+                "type": "string",
+                "description": "Horário exato preferido, HH:MM, quando o lead informar um.",
+            },
         },
         "required": ["date_from"],
     },
@@ -11653,6 +11657,15 @@ _CALENDAR_WEEKDAY_ALIASES = {
     5: ("sabado", "saturday"),
     6: ("domingo", "sunday"),
 }
+
+
+def _history_lead_names(contact_info: dict | None) -> tuple[str, ...]:
+    record = contact_info or {}
+    return tuple(
+        str(record.get(field) or "")
+        for field in ("name", "nickname", "pet_name")
+        if str(record.get(field) or "").strip()
+    )
 
 
 def _calendar_is_ready() -> bool:
@@ -11709,6 +11722,68 @@ def _calendar_period_from_text(text: str) -> str:
     if re.search(r"\b(?:tarde|afternoon|por la tarde|final da tarde|fim da tarde)\b", folded):
         return "afternoon"
     return "any"
+
+
+def _calendar_time_from_text(text: str) -> str | None:
+    """Extrai horário explícito sem confundir um dia do mês com uma hora."""
+    folded = " ".join(_normalize_text(str(text or "")).split())
+    explicit = re.search(
+        r"\b([01]?\d|2[0-3])(?::([0-5]\d)|h(?:([0-5]\d))?|\s*horas?)\b",
+        folded,
+    )
+    if explicit:
+        return f"{int(explicit.group(1)):02d}:{int(explicit.group(2) or explicit.group(3) or 0):02d}"
+    contextual = re.search(
+        r"\b(?:as|umas?|around|about|a las)\s+([01]?\d|2[0-3])\b",
+        folded,
+    )
+    if contextual:
+        return f"{int(contextual.group(1)):02d}:00"
+    return None
+
+
+def _calendar_period_from_history(
+    history: str,
+    user_message: str,
+    lead_names: tuple[str, ...] = (),
+) -> str:
+    """Mantém a preferência do lead quando dia e período chegam em mensagens separadas."""
+    direct = _calendar_period_from_text(user_message)
+    if direct != "any":
+        return direct
+    direct_time = _calendar_time_from_text(user_message)
+    if direct_time:
+        return "morning" if int(direct_time[:2]) < 12 else "afternoon"
+    _from_me, lead_messages = _history_from_me_and_lead(history, lead_names=lead_names)
+    for message in reversed(lead_messages):
+        period = _calendar_period_from_text(message)
+        if period != "any":
+            return period
+        preferred_time = _calendar_time_from_text(message)
+        if preferred_time:
+            return "morning" if int(preferred_time[:2]) < 12 else "afternoon"
+    return "any"
+
+
+def _calendar_requests_availability(text: str) -> bool:
+    folded = " ".join(_normalize_text(str(text or "")).split())
+    return bool(re.search(
+        r"\b(?:qual|quais|que)\s+(?:dia|dias|horario|horarios|vaga|vagas)\b"
+        r".{0,30}\b(?:tem|disponivel|disponiveis|livre|livres)\b"
+        r"|\bquando\b.{0,30}\b(?:tem|disponivel|disponiveis|livre|livres)\b",
+        folded,
+    ))
+
+
+def _calendar_search_window(
+    now: datetime.datetime | None = None,
+) -> tuple[str, str]:
+    reference = now or datetime.datetime.now(business_timezone())
+    if reference.tzinfo is not None:
+        reference = reference.astimezone(business_timezone())
+    first_day = reference.date()
+    last_day = first_day + datetime.timedelta(days=13)
+    return first_day.isoformat(), last_day.isoformat()
 
 
 def _calendar_date_from_text(
@@ -11802,14 +11877,19 @@ def _calendar_selected_slot(text: str, slots: list[dict]) -> dict | None:
     return None
 
 
-def _calendar_open_offer(chat_id: str) -> dict:
+def _calendar_active_state(chat_id: str) -> dict:
     with _calendar_state_lock:
         state = dict(_calendar_turn_state.get(chat_id) or {})
-    if state.get("kind") != "offered":
+    if state.get("kind") not in {"collecting", "empty", "offered"}:
         return {}
     if float(state.get("expires_at") or 0) < time.time():
         return {}
     return state
+
+
+def _calendar_open_offer(chat_id: str) -> dict:
+    state = _calendar_active_state(chat_id)
+    return state if state.get("kind") == "offered" else {}
 
 
 def _orchestrate_calendar_turn(
@@ -11828,7 +11908,10 @@ def _orchestrate_calendar_turn(
     if not token:
         return False
 
-    offered = _calendar_open_offer(chat_id)
+    active_state = _calendar_active_state(chat_id)
+    offered = active_state if active_state.get("kind") == "offered" else {}
+    preferred_time = _calendar_time_from_text(user_message)
+    lead_names = _history_lead_names(_contact_record_for_chat(chat_id))
     if offered and offered.get("inbound_token") != token:
         selected = _calendar_selected_slot(user_message, list(offered.get("slots") or []))
         if selected:
@@ -11836,19 +11919,50 @@ def _orchestrate_calendar_turn(
             return result.get("status") in {"created", "already_exists"}
 
     date_from = _calendar_date_from_text(user_message, now=now)
-    if not date_from:
-        return False
     call_is_open = (
-        _history_has_pending_sales_call(history)
-        or _history_has_call_handoff_started(history)
+        _history_has_pending_sales_call(history, lead_names=lead_names)
+        or _history_has_call_handoff_started(history, lead_names=lead_names)
         or _wants_sales_call(user_message)
+        or bool(active_state)
     )
     if not call_is_open:
         return False
+    period = _calendar_period_from_history(history, user_message, lead_names=lead_names)
+    asks_availability = _calendar_requests_availability(user_message)
+
+    if not date_from and (asks_availability or preferred_time):
+        date_from, date_to = _calendar_search_window(now)
+    else:
+        date_to = None
+
+    if not date_from:
+        if offered and _lead_accepts_pending_call(user_message):
+            offered["inbound_token"] = token
+            offered["reply_kind"] = "choice_required"
+            with _calendar_state_lock:
+                _calendar_turn_state[chat_id] = offered
+            return True
+        if not _lead_accepts_pending_call(user_message):
+            return False
+        state = {
+            "kind": "collecting",
+            "at": time.time(),
+            "expires_at": time.time() + _CALENDAR_OFFER_TTL_S,
+            "inbound_token": token,
+            "slots": [],
+            "period": period,
+            "source_text": str(inbound.get("text") or "")[:500],
+        }
+        with _calendar_state_lock:
+            _calendar_turn_state[chat_id] = state
+        return True
+
     result = json.loads(_handle_calendar_find_slots(
         {
             "date_from": date_from,
-            "period": _calendar_period_from_text(user_message),
+            "date_to": date_to,
+            "period": period,
+            "preferred_time": preferred_time,
         },
         session_id=session_id,
     ))
@@ -11892,15 +12006,25 @@ def _handle_calendar_find_slots(args: dict, **kwargs) -> str:
             date_from=str(args.get("date_from") or ""),
             date_to=str(args.get("date_to") or "") or None,
             period=str(args.get("period") or "any"),
+            preferred_time=str(args.get("preferred_time") or "") or None,
         )
+        slots = list(result.get("slots") or [])
+        period = str(args.get("period") or "any")
+        preferred_time = str(args.get("preferred_time") or "") or None
         state = {
-            "kind": "offered",
+            "kind": "offered" if slots else "empty",
             "at": time.time(),
             "expires_at": time.time() + _CALENDAR_OFFER_TTL_S,
             "inbound_token": token,
-            "slots": list(result.get("slots") or []),
+            "slots": slots,
             "timezone": result.get("timezone") or "America/Sao_Paulo",
             "source_text": str(inbound.get("text") or "")[:500],
+            "query": {
+                "date_from": str(args.get("date_from") or ""),
+                "date_to": str(args.get("date_to") or "") or None,
+                "period": period,
+                "preferred_time": preferred_time,
+            },
         }
         with _calendar_state_lock:
             _calendar_turn_state[chat_id] = state
@@ -11924,7 +12048,9 @@ def _calendar_state_for_turn(
         state = dict(_calendar_turn_state.get(chat_id) or {})
     if state.get("inbound_token") != inbound_token:
         return {}
-    if state.get("kind") == "offered" and float(state.get("expires_at") or 0) < time.time():
+    if state.get("kind") in {"collecting", "empty", "offered"} and float(
+        state.get("expires_at") or 0
+    ) < time.time():
         return {}
     return state
 
@@ -11943,6 +12069,15 @@ def _calendar_local_label(iso_value: str, language: str) -> str:
 
 def _calendar_visible_reply(state: dict, user_message: str) -> str:
     language = _infer_message_language(user_message)
+    if state.get("reply_kind") == "choice_required":
+        return _CALENDAR_CHOICE_REQUIRED.get(language) or _CALENDAR_CHOICE_REQUIRED["pt"]
+    if state.get("kind") == "collecting":
+        if str(state.get("period") or "any") != "any":
+            return _CALENDAR_ASK_DAY.get(language) or _CALENDAR_ASK_DAY["pt"]
+        return (
+            _CALENDAR_ASK_DAY_AND_PERIOD.get(language)
+            or _CALENDAR_ASK_DAY_AND_PERIOD["pt"]
+        )
     if state.get("kind") == "booked":
         result = state.get("result") or {}
         label = _calendar_local_label(str(result.get("start") or ""), language)
@@ -12786,19 +12921,24 @@ def _current_message_has_business_context(text: str) -> bool:
     return bool(_CURRENT_BUSINESS_CONTEXT_RE.search(_normalize_text(str(text or ""))))
 
 
-def _history_has_pending_sales_call(history: str) -> bool:
+def _history_has_pending_sales_call(
+    history: str,
+    lead_names: tuple[str, ...] = (),
+) -> bool:
     """A AYA convidou para uma call e ainda não confirmou o encaminhamento."""
-    from_me, _lead_msgs = _history_from_me_and_lead(history)
-    folded = _normalize_text(from_me)
+    from_me, _lead_msgs = _history_from_me_and_lead(history, lead_names=lead_names)
+    folded = " ".join(_normalize_text(from_me).split())
     if not folded:
         return False
     invited = bool(
         re.search(
-            r"\b(?:call|reuniao|conversa)\b.{0,80}\b(?:topa|marcar|agendar|podemos|faz sentido)\b"
-            r"|\b(?:topa|marcar|agendar|podemos|faz sentido)\b.{0,80}\b(?:call|reuniao|conversa)\b",
+            r"\b(?:call|reuniao|conversa)\b.{0,160}\b(?:topa|marcar|agendar|podemos|posso|faz sentido|quer avancar)\b"
+            r"|\b(?:topa|marcar|agendar|podemos|posso|faz sentido|quer avancar)\b.{0,160}\b(?:call|reuniao|conversa)\b",
             folded,
         )
     )
+    if re.search(r"\bnao posso\b.{0,160}\b(?:call|reuniao|conversa)\b", folded):
+        invited = False
     completed = bool(
         re.search(
             r"\b(?:encaminh|conect)\w*\b.{0,80}\b(?:equipe|time)\b"
@@ -12809,8 +12949,11 @@ def _history_has_pending_sales_call(history: str) -> bool:
     return invited and not completed
 
 
-def _history_has_call_handoff_started(history: str) -> bool:
-    from_me, _lead_msgs = _history_from_me_and_lead(history)
+def _history_has_call_handoff_started(
+    history: str,
+    lead_names: tuple[str, ...] = (),
+) -> bool:
+    from_me, _lead_msgs = _history_from_me_and_lead(history, lead_names=lead_names)
     folded = _normalize_text(from_me)
     return bool(
         re.search(
@@ -13300,7 +13443,10 @@ def _enforce_aya_capability_output_gate(
                 history = ""
         templates = (
             _INTEGRATION_PENDING_CALL_REPLY
-            if _history_has_pending_sales_call(str(history or ""))
+            if _history_has_pending_sales_call(
+                str(history or ""),
+                lead_names=_history_lead_names(contact_info),
+            )
             else _INTEGRATION_CALL_REPLY
         )
         return templates.get(language) or templates["pt"]
@@ -13354,9 +13500,10 @@ def _conversation_state_block(
         contact_info = _contact_record_for_chat(chat_id)
 
     record = contact_info or {}
+    lead_names = _history_lead_names(record)
     from_me, lead_msgs = _history_from_me_and_lead(
         history,
-        lead_names=(record.get("name"), record.get("nickname"), record.get("pet_name")),
+        lead_names=lead_names,
     )
     facts: list[str] = []
 
@@ -13399,7 +13546,7 @@ def _conversation_state_block(
         )
 
     if (
-        _history_has_pending_sales_call(history)
+        _history_has_pending_sales_call(history, lead_names=lead_names)
         and _mentions_specific_integration(user_message)
     ):
         facts.append(
@@ -13900,8 +14047,15 @@ def _enforce_aya_payment_output_gate(
         except Exception:
             call_history = ""
         preference = _call_preference_from_text(user_message, language)
-        pending_call = _history_has_pending_sales_call(call_history)
-        handoff_started = _history_has_call_handoff_started(call_history)
+        lead_names = _history_lead_names(turn_contact)
+        pending_call = _history_has_pending_sales_call(
+            call_history,
+            lead_names=lead_names,
+        )
+        handoff_started = _history_has_call_handoff_started(
+            call_history,
+            lead_names=lead_names,
+        )
         if _calendar_is_ready() and (pending_call or handoff_started):
             if _calendar_open_offer(chat_id):
                 return _CALENDAR_CHOICE_REQUIRED.get(language) or _CALENDAR_CHOICE_REQUIRED["pt"]
@@ -14003,11 +14157,7 @@ def _enforce_aya_payment_output_gate(
             price_history = _fetch_chat_history(chat_id, limit=40) if chat_id else ""
         except Exception:
             price_history = ""
-        lead_names = tuple(
-            str(turn_contact.get(field) or "")
-            for field in ("name", "nickname", "pet_name")
-            if str(turn_contact.get(field) or "").strip()
-        )
+        lead_names = _history_lead_names(turn_contact)
         _from_me, price_lead_messages = _history_from_me_and_lead(
             price_history,
             lead_names=lead_names,
@@ -14036,7 +14186,7 @@ def _enforce_aya_payment_output_gate(
                     or _CONSULTING_TRIAGE_REPEAT["pt"]
                 )
             return ack + frase
-        if _history_has_pending_sales_call(price_history):
+        if _history_has_pending_sales_call(price_history, lead_names=lead_names):
             return ack + (
                 _CONSULTING_CALL_PENDING.get(language)
                 or _CONSULTING_CALL_PENDING["pt"]

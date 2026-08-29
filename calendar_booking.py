@@ -127,6 +127,16 @@ def _coerce_period(value: str) -> str:
     return aliases[period]
 
 
+def _coerce_preferred_time(value: str | None) -> time | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        return datetime.strptime(raw, "%H:%M").time()
+    except ValueError as exc:
+        raise CalendarBookingError("preferred_time deve estar no formato HH:MM.") from exc
+
+
 def _round_up(value: datetime, minutes: int = 30) -> datetime:
     value = value.replace(second=0, microsecond=0)
     remainder = value.minute % minutes
@@ -174,6 +184,7 @@ def find_available_slots(
     date_from: str,
     date_to: str | None = None,
     period: str = "any",
+    preferred_time: str | None = None,
     duration_minutes: int = DEFAULT_DURATION_MINUTES,
     max_slots: int = MAX_SLOTS,
     now: datetime | None = None,
@@ -195,6 +206,7 @@ def find_available_slots(
     if duration != DEFAULT_DURATION_MINUTES:
         raise CalendarBookingError(f"As calls comerciais duram {DEFAULT_DURATION_MINUTES} minutos.")
     normalized_period = _coerce_period(period)
+    preferred_clock = _coerce_preferred_time(preferred_time)
 
     current = (now or datetime.now(tz)).astimezone(tz)
     min_lead = max(0, int(os.getenv("WHATSAPP_CALENDAR_MIN_LEAD_MINUTES", "120")))
@@ -213,12 +225,23 @@ def find_available_slots(
     while day <= last_day and len(slots) < limit:
         if day.weekday() < 5:
             window_start, window_end = _business_bounds(day, tz, normalized_period)
-            cursor = _round_up(max(window_start, earliest), 30)
-            while cursor + timedelta(minutes=duration) <= window_end and len(slots) < limit:
+            if preferred_clock is not None:
+                cursor = datetime.combine(day, preferred_clock, tz)
                 slot_end = cursor + timedelta(minutes=duration)
-                if not _overlaps(cursor, slot_end, busy):
+                if (
+                    cursor >= window_start
+                    and cursor >= earliest
+                    and slot_end <= window_end
+                    and not _overlaps(cursor, slot_end, busy)
+                ):
                     slots.append({"start": cursor.isoformat(), "end": slot_end.isoformat()})
-                cursor += timedelta(minutes=30)
+            else:
+                cursor = _round_up(max(window_start, earliest), 30)
+                while cursor + timedelta(minutes=duration) <= window_end and len(slots) < limit:
+                    slot_end = cursor + timedelta(minutes=duration)
+                    if not _overlaps(cursor, slot_end, busy):
+                        slots.append({"start": cursor.isoformat(), "end": slot_end.isoformat()})
+                    cursor += timedelta(minutes=30)
         day += timedelta(days=1)
 
     return {
