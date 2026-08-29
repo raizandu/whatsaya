@@ -54,6 +54,19 @@ class _Events:
             return _Request(error=self.service.insert_error)
         payload = dict(kwargs["body"])
         payload["htmlLink"] = "https://calendar.google.test/event"
+        if self.service.conference_data is not None:
+            payload["conferenceData"] = self.service.conference_data
+        return _Request(payload)
+
+    def patch(self, **kwargs):
+        self.service.patch_calls.append(kwargs)
+        payload = dict(self.service.existing_event or {})
+        payload.update(kwargs.get("body") or {})
+        payload["id"] = kwargs["eventId"]
+        payload.setdefault("htmlLink", "https://calendar.google.test/event")
+        if self.service.conference_data is not None:
+            payload["conferenceData"] = self.service.conference_data
+        self.service.existing_event = payload
         return _Request(payload)
 
     def get(self, **kwargs):
@@ -73,12 +86,19 @@ class _Events:
 
 
 class FakeService:
-    def __init__(self, busy=None, insert_error=None, existing_event=None):
+    def __init__(self, busy=None, insert_error=None, existing_event=None, conference_data=None):
         self.busy = busy or []
         self.insert_error = insert_error
         self.existing_event = existing_event
+        self.conference_data = conference_data or {
+            "entryPoints": [{
+                "entryPointType": "video",
+                "uri": "https://meet.google.com/test-link",
+            }],
+        }
         self.freebusy_bodies = []
         self.insert_calls = []
+        self.patch_calls = []
         self.get_calls = []
 
     def freebusy(self):
@@ -89,6 +109,13 @@ class FakeService:
 
 
 class CalendarBookingTests(unittest.TestCase):
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self._db_path = Path(self._tmpdir.name) / "calendar-bookings.db"
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
     def test_calendar_ready_requires_refresh_token_and_calendar_scope(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "token.json"
@@ -160,6 +187,7 @@ class CalendarBookingTests(unittest.TestCase):
                 lead_name="Maria",
                 purpose="Demonstração da AYA",
                 service=service,
+                db_path=self._db_path,
             )
         self.assertEqual(result["status"], "created")
         self.assertEqual(len(service.insert_calls), 1)
@@ -169,6 +197,72 @@ class CalendarBookingTests(unittest.TestCase):
         self.assertNotIn("attendees", call["body"])
         self.assertIn("Maria", call["body"]["summary"])
         self.assertNotIn("5562999999999", call["body"]["extendedProperties"]["private"]["whatsayaChat"])
+
+    def test_create_booking_requests_google_meet_returns_safe_link_and_persists_date(self):
+        chat_id = "5562999999999@s.whatsapp.net"
+        meet_link = "https://meet.google.com/abc-defg-hij"
+        raw_meet_link = f"{meet_link}?authuser=0#details"
+        service = FakeService(conference_data={
+            "entryPoints": [{
+                "entryPointType": "video",
+                "uri": raw_meet_link,
+                "label": "meet.google.com/abc-defg-hij",
+            }],
+        })
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "calendar-bookings.db"
+            with patch("calendar_booking.datetime") as mocked_datetime:
+                mocked_datetime.now.return_value = datetime(2026, 8, 28, 10, 0, tzinfo=TZ)
+                mocked_datetime.fromisoformat.side_effect = datetime.fromisoformat
+                result = cb.create_booking(
+                    chat_id=chat_id,
+                    start="2026-08-31T14:00:00-03:00",
+                    end="2026-08-31T14:30:00-03:00",
+                    lead_name="Maria",
+                    purpose="Demonstração da AYA",
+                    service=service,
+                    db_path=str(db_path),
+                )
+
+            call = service.insert_calls[0]
+            self.assertEqual(call.get("conferenceDataVersion"), 1)
+            request = call["body"]["conferenceData"]["createRequest"]
+            self.assertTrue(request["requestId"])
+            self.assertEqual(request["conferenceSolutionKey"]["type"], "hangoutsMeet")
+            self.assertEqual(result["meet_link"], meet_link)
+            self.assertNotIn("conferenceData", result)
+
+            stored = cb.get_booking(chat_id, db_path=str(db_path))
+            self.assertEqual(stored["start"], result["start"])
+            self.assertEqual(stored["end"], result["end"])
+            self.assertEqual(stored["meet_link"], meet_link)
+
+    def test_pending_google_meet_is_polled_before_confirmation(self):
+        meet_link = "https://meet.google.com/abc-defg-hij"
+        pending = {
+            "id": "event-pending",
+            "conferenceData": {
+                "createRequest": {"status": {"statusCode": "pending"}},
+            },
+        }
+        service = FakeService(
+            existing_event={
+                "id": "event-pending",
+                "conferenceData": {
+                    "entryPoints": [{"entryPointType": "video", "uri": meet_link}],
+                    "createRequest": {"status": {"statusCode": "success"}},
+                },
+            },
+        )
+
+        with patch("calendar_booking.time_module.sleep") as sleep:
+            event, returned_link = cb._ensure_event_meet(service, pending, "event-pending")
+
+        self.assertEqual(returned_link, meet_link)
+        self.assertEqual(event["id"], "event-pending")
+        self.assertEqual(len(service.get_calls), 1)
+        self.assertFalse(service.patch_calls)
+        sleep.assert_called_once()
 
     def test_create_booking_fails_closed_when_slot_is_busy(self):
         service = FakeService(busy=[{
@@ -184,8 +278,80 @@ class CalendarBookingTests(unittest.TestCase):
                     start="2026-08-31T14:00:00-03:00",
                     end="2026-08-31T14:30:00-03:00",
                     service=service,
+                    db_path=self._db_path,
                 )
         self.assertFalse(service.insert_calls)
+
+    def test_reschedule_patches_existing_event_and_updates_persisted_booking(self):
+        chat_id = "5562999999999@s.whatsapp.net"
+        old_start = "2026-08-31T14:00:00-03:00"
+        old_end = "2026-08-31T14:30:00-03:00"
+        new_start = "2026-09-01T15:00:00-03:00"
+        new_end = "2026-09-01T15:30:00-03:00"
+        meet_link = "https://meet.google.com/abc-defg-hij"
+        service = FakeService(conference_data={
+            "entryPoints": [{"entryPointType": "video", "uri": meet_link}],
+        })
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "calendar-bookings.db"
+            with patch("calendar_booking.datetime") as mocked_datetime:
+                mocked_datetime.now.return_value = datetime(2026, 8, 28, 10, 0, tzinfo=TZ)
+                mocked_datetime.fromisoformat.side_effect = datetime.fromisoformat
+                original = cb.create_booking(
+                    chat_id=chat_id,
+                    start=old_start,
+                    end=old_end,
+                    lead_name="Maria",
+                    service=service,
+                    db_path=str(db_path),
+                )
+
+            service.insert_calls.clear()
+            service.patch_calls.clear()
+            with patch("calendar_booking.datetime") as mocked_datetime:
+                mocked_datetime.now.return_value = datetime(2026, 8, 28, 10, 0, tzinfo=TZ)
+                mocked_datetime.fromisoformat.side_effect = datetime.fromisoformat
+                moved = cb.reschedule_booking(
+                    chat_id=chat_id,
+                    start=new_start,
+                    end=new_end,
+                    lead_name="Maria",
+                    service=service,
+                    db_path=str(db_path),
+                )
+
+            self.assertEqual(moved["status"], "rescheduled")
+            self.assertEqual(moved["event_id"], original["event_id"])
+            self.assertEqual(moved["meet_link"], meet_link)
+            self.assertEqual(len(service.patch_calls), 1)
+            self.assertFalse(service.insert_calls)
+            self.assertEqual(service.patch_calls[0]["eventId"], original["event_id"])
+
+            stored = cb.get_booking(chat_id, db_path=str(db_path))
+            self.assertEqual(stored["event_id"], original["event_id"])
+            self.assertEqual(stored["start"], moved["start"])
+            self.assertEqual(stored["end"], moved["end"])
+            self.assertEqual(stored["meet_link"], meet_link)
+
+            service.patch_calls.clear()
+            service.insert_calls.clear()
+            with patch("calendar_booking.datetime") as mocked_datetime:
+                mocked_datetime.now.return_value = datetime(2026, 8, 28, 10, 0, tzinfo=TZ)
+                mocked_datetime.fromisoformat.side_effect = datetime.fromisoformat
+                repeated = cb.reschedule_booking(
+                    chat_id=chat_id,
+                    start=new_start,
+                    end=new_end,
+                    lead_name="Maria",
+                    service=service,
+                    db_path=str(db_path),
+                )
+
+            self.assertEqual(repeated["status"], "already_exists")
+            self.assertEqual(repeated["event_id"], original["event_id"])
+            self.assertFalse(service.patch_calls)
+            self.assertFalse(service.insert_calls)
 
     def test_create_booking_is_idempotent_on_google_conflict(self):
         class ConflictError(RuntimeError):
@@ -202,6 +368,7 @@ class CalendarBookingTests(unittest.TestCase):
                 start="2026-08-31T14:00:00-03:00",
                 end="2026-08-31T14:30:00-03:00",
                 service=service,
+                db_path=self._db_path,
             )
         self.assertEqual(result["status"], "already_exists")
         self.assertEqual(len(service.get_calls), 1)
@@ -225,6 +392,7 @@ class CalendarBookingTests(unittest.TestCase):
                 start="2026-08-31T14:00:00-03:00",
                 end="2026-08-31T14:30:00-03:00",
                 service=service,
+                db_path=self._db_path,
             )
         self.assertEqual(result["status"], "already_exists")
         self.assertEqual(len(service.get_calls), 1)

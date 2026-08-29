@@ -8,6 +8,7 @@ seguia "lembrando" do lead depois do reset.
 from __future__ import annotations
 
 import json
+import hashlib
 import sqlite3
 import sys
 import tempfile
@@ -137,8 +138,21 @@ class ResetProfileStateTest(unittest.TestCase):
             hermes = base / ".hermes"
             root_db = hermes / "state.db"
             profile_db = hermes / "profiles" / "whatsapp" / "state.db"
+            booking_db = hermes / "calendar_bookings.db"
             self._create_state_db(root_db, target)
             self._create_state_db(profile_db, target, keep)
+            with sqlite3.connect(booking_db) as conn:
+                conn.execute(
+                    "CREATE TABLE current_bookings (chat_key TEXT PRIMARY KEY, event_id TEXT)"
+                )
+                conn.execute(
+                    "INSERT INTO current_bookings VALUES (?, ?)",
+                    (hashlib.sha256(target.encode()).hexdigest()[:32], "target-event"),
+                )
+                conn.execute(
+                    "INSERT INTO current_bookings VALUES (?, ?)",
+                    (hashlib.sha256(keep.encode()).hexdigest()[:32], "keep-event"),
+                )
 
             with mock.patch("wa_reset_contact.fetch_lid_map", return_value={}):
                 result = main([target, "--base", str(base), "--apply"])
@@ -155,6 +169,14 @@ class ResetProfileStateTest(unittest.TestCase):
                     "SELECT COUNT(*) FROM sessions WHERE user_id = ?", (keep,)
                 ).fetchone()[0]
             self.assertEqual(keep_count, 1)
+            with sqlite3.connect(booking_db) as conn:
+                events = [
+                    row[0]
+                    for row in conn.execute(
+                        "SELECT event_id FROM current_bookings ORDER BY event_id"
+                    )
+                ]
+            self.assertEqual(events, ["keep-event"])
 
 
 if __name__ == "__main__":

@@ -27,6 +27,7 @@ Duas armadilhas que este script existe para não repetir:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -103,9 +104,14 @@ def _where(col: str, n: int) -> str:
     return "(" + " OR ".join([f"{col} LIKE ?"] * n) + ")"
 
 
-def _targets(hermes: Path, patterns: list[str]):
+def _targets(hermes: Path, patterns: list[str], identifiers: list[str]):
     p = patterns
     pp = patterns + patterns
+    booking_keys = [
+        hashlib.sha256(identifier.encode("utf-8")).hexdigest()[:32]
+        for identifier in identifiers
+    ]
+    booking_placeholders = ",".join("?" for _key in booking_keys)
     targets = [
         ("whatsapp_messages/messages", hermes / "whatsapp_messages.db",
          "FROM messages WHERE " + _where("chat_id", len(p)), p),
@@ -115,6 +121,8 @@ def _targets(hermes: Path, patterns: list[str]):
          "FROM followup_jobs WHERE " + _where("chat_id", len(p)), p),
         ("followups/crm_outbox", hermes / "commercial_followups.db",
          "FROM crm_outbox WHERE " + _where("chat_id", len(p)), p),
+        ("calendar_bookings/current_bookings", hermes / "calendar_bookings.db",
+         f"FROM current_bookings WHERE chat_key IN ({booking_placeholders})", booking_keys),
     ]
     for state_db in find_state_files(hermes):
         relative = state_db.relative_to(hermes).as_posix()
@@ -167,7 +175,7 @@ def main(argv: list[str]) -> int:
     print()
 
     patterns = [f"%{i}%" for i in idents]
-    alvos = _targets(hermes, patterns)
+    alvos = _targets(hermes, patterns, idents)
 
     backup = None
     if args.apply:

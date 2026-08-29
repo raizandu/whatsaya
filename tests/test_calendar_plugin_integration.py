@@ -136,10 +136,11 @@ class CalendarPluginIntegrationTests(unittest.TestCase):
         booked = {
             "status": "created",
             "event_id": "event-1",
-            "summary": "Call WhatsAYA — Lead",
+            "summary": "Reunião WhatsAYA — Lead",
             "start": first["start"],
             "end": first["end"],
             "timezone": "America/Sao_Paulo",
+            "meet_link": "https://meet.google.com/test-link",
             "htmlLink": "https://calendar.google.test/private",
         }
         with patch("whatsapp_manager.create_booking", return_value=booked) as create:
@@ -149,6 +150,125 @@ class CalendarPluginIntegrationTests(unittest.TestCase):
         self.assertEqual(wm._calendar_turn_state[self.chat]["kind"], "booked")
         self.assertEqual(wm._calendar_turn_state[self.chat]["inbound_token"], token)
         self.assertEqual(create.call_args.kwargs["purpose"], "Apresentação comercial da WhatsAYA")
+
+    def test_meet_link_is_sent_only_after_confirmed_booking(self):
+        first = self._slots()["slots"][0]
+        offer_token = self._inbound("msg-offer-meet", "Quero segunda à tarde")
+        wm._calendar_turn_state[self.chat] = {
+            "kind": "offered",
+            "action": "book",
+            "at": time.time(),
+            "expires_at": time.time() + 600,
+            "inbound_token": offer_token,
+            "slots": [first],
+            "query": {"period": "afternoon", "max_slots": 1},
+        }
+        meet_link = "https://meet.google.com/abc-defg-hij"
+        before_confirmation = wm._calendar_visible_reply(
+            wm._calendar_turn_state[self.chat],
+            "Quero segunda à tarde",
+        )
+        self.assertNotIn(meet_link, before_confirmation)
+
+        self._inbound("msg-confirm-meet", "Sim, pode marcar")
+        booked = {
+            "status": "created",
+            "event_id": "event-meet",
+            "summary": "Reunião WhatsAYA — Lead",
+            "start": first["start"],
+            "end": first["end"],
+            "timezone": "America/Sao_Paulo",
+            "meet_link": meet_link,
+        }
+        with patch("whatsapp_manager.create_booking", return_value=booked) as create:
+            result = json.loads(wm._handle_calendar_book(first, session_id=self.session))
+
+        self.assertEqual(result["status"], "created")
+        create.assert_called_once()
+        confirmation = wm._calendar_visible_reply(
+            wm._calendar_turn_state[self.chat],
+            "Sim, pode marcar",
+        )
+        self.assertIn(meet_link, confirmation)
+        self.assertRegex(confirmation.lower(), r"reuni[aã]o|liga[cç][aã]o")
+        self.assertNotRegex(confirmation.lower(), r"\bcall\b")
+
+    def test_reschedule_requires_new_slot_confirmation_and_reuses_persisted_booking(self):
+        old = {
+            "status": "created",
+            "event_id": "event-old",
+            "start": "2026-08-31T14:00:00-03:00",
+            "end": "2026-08-31T14:30:00-03:00",
+            "timezone": "America/Sao_Paulo",
+            "meet_link": "https://meet.google.com/abc-defg-hij",
+        }
+        new = {
+            "start": "2026-09-01T15:00:00-03:00",
+            "end": "2026-09-01T15:30:00-03:00",
+        }
+        offer_token = self._inbound("msg-reschedule-offer", "Quero remarcar")
+        wm._calendar_turn_state[self.chat] = {
+            "kind": "offered",
+            "action": "reschedule",
+            "at": time.time(),
+            "expires_at": time.time() + 600,
+            "inbound_token": offer_token,
+            "slots": [new],
+            "booking": old,
+            "result": old,
+            "query": {"period": "afternoon", "max_slots": 1},
+        }
+
+        with patch("whatsapp_manager.reschedule_booking") as reschedule:
+            rejected = json.loads(wm._handle_calendar_book(new, session_id=self.session))
+        self.assertEqual(rejected["status"], "error")
+        reschedule.assert_not_called()
+
+        self._inbound("msg-reschedule-confirm", "Sim, esse horário funciona")
+        moved = dict(old, status="rescheduled", start=new["start"], end=new["end"])
+        with patch("whatsapp_manager.reschedule_booking", return_value=moved) as reschedule, \
+             patch("whatsapp_manager.create_booking") as create:
+            result = json.loads(wm._handle_calendar_book(new, session_id=self.session))
+
+        self.assertEqual(result["status"], "rescheduled")
+        reschedule.assert_called_once()
+        kwargs = reschedule.call_args.kwargs
+        self.assertEqual(kwargs["chat_id"], self.chat)
+        self.assertEqual(kwargs["start"], new["start"])
+        self.assertEqual(kwargs["end"], new["end"])
+        create.assert_not_called()
+        self.assertEqual(wm._calendar_turn_state[self.chat]["kind"], "booked")
+        self.assertEqual(
+            wm._calendar_turn_state[self.chat]["result"]["event_id"],
+            old["event_id"],
+        )
+
+    def test_lead_facing_calendar_language_uses_reuniao_or_ligacao_not_call(self):
+        states = [
+            {
+                "kind": "collecting",
+                "period": "any",
+                "slots": [],
+            },
+            {
+                "kind": "offered",
+                "slots": [self._slots()["slots"][0]],
+            },
+            {
+                "kind": "booked",
+                "result": {
+                    "start": "2026-08-31T14:00:00-03:00",
+                    "end": "2026-08-31T14:30:00-03:00",
+                    "meet_link": "https://meet.google.com/abc-defg-hij",
+                },
+            },
+        ]
+        for state in states:
+            with self.subTest(kind=state["kind"]):
+                reply = wm._calendar_visible_reply(state, "Sim")
+                self.assertNotRegex(reply.lower(), r"\bcall\b")
+        booked_reply = wm._calendar_visible_reply(states[-1], "Sim")
+        self.assertRegex(booked_reply.lower(), r"reuni[aã]o|liga[cç][aã]o")
 
     def test_book_rejects_slot_not_returned_by_google(self):
         self._inbound("msg-find", "Pode ser segunda à tarde")
@@ -412,10 +532,11 @@ class CalendarPluginIntegrationTests(unittest.TestCase):
         booked = {
             "status": "created",
             "event_id": "event-nearest",
-            "summary": "Call WhatsAYA — Gustavo",
+            "summary": "Reunião WhatsAYA — Gustavo",
             "start": first["start"],
             "end": first["end"],
             "timezone": "America/Sao_Paulo",
+            "meet_link": "https://meet.google.com/test-link",
         }
 
         with patch("whatsapp_manager.calendar_ready", return_value=True), \
@@ -430,6 +551,53 @@ class CalendarPluginIntegrationTests(unittest.TestCase):
         self.assertTrue(handled)
         create.assert_called_once()
         self.assertEqual(wm._calendar_turn_state[self.chat]["kind"], "booked")
+
+    def test_booking_failure_stays_retryable_without_fake_confirmation(self):
+        first = self._slots()["slots"][0]
+        old_token = self._inbound("msg-offered-retry", "Quero esse horário")
+        wm._calendar_turn_state[self.chat] = {
+            "kind": "offered",
+            "action": "book",
+            "at": time.time(),
+            "expires_at": time.time() + 600,
+            "inbound_token": old_token,
+            "slots": [first],
+        }
+        token = self._inbound("msg-confirm-retry", "Sim")
+
+        with patch("whatsapp_manager.calendar_ready", return_value=True), \
+             patch("whatsapp_manager.create_booking", return_value={
+                 "status": "created",
+                 "event_id": "event-without-meet",
+                 "start": first["start"],
+                 "end": first["end"],
+                 "meet_link": "",
+             }):
+            handled = wm._orchestrate_calendar_turn(
+                chat_id=self.chat,
+                session_id=self.session,
+                user_message="Sim",
+                history=self._gustavo_call_history(),
+            )
+
+        state = wm._calendar_turn_state[self.chat]
+        self.assertTrue(handled)
+        self.assertEqual(state["kind"], "offered")
+        self.assertEqual(state["reply_kind"], "book_retry")
+        self.assertEqual(state["inbound_token"], token)
+        visible = wm._calendar_visible_reply(state, "Sim")
+        self.assertIn("mesmo horário", visible)
+        self.assertNotRegex(visible.lower(), r"\bcall\b")
+
+    def test_external_meeting_terminology_never_exposes_call(self):
+        self.assertEqual(
+            wm._externalize_meeting_term("Topa uma call rápida?", "Quero entender"),
+            "Topa uma reunião rápida?",
+        )
+        self.assertEqual(
+            wm._externalize_meeting_term("Can we book a call?", "How does it work?"),
+            "Can we book a meeting?",
+        )
 
     def test_active_calendar_prompt_says_to_offer_the_nearest_slot(self):
         block = wm._calendar_prompt_block(True)

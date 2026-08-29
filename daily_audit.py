@@ -543,6 +543,51 @@ FALLBACK_PHRASES: tuple[str, ...] = (
     "anything before the integration is confirmed. Can I show you that on a quick call?",
     "Ese flujo de agenda debe definirse durante la configuración para no prometer algo "
     "antes de confirmar la integración. ¿Te lo muestro en una llamada rápida?",
+    # Terminologia externa vigente. As versões com "call" acima permanecem para
+    # classificar corretamente conversas históricas anteriores à migração.
+    "O investimento muda de acordo com o que a AYA vai assumir no seu atendimento. "
+    "A gente fecha isso depois de entender melhor o cenário, numa reunião rápida. "
+    "Pra qual tipo de negócio seria?",
+    "The investment depends on what AYA will handle in your customer service. "
+    "We define it after understanding the scenario in a short meeting. "
+    "What type of business is it for?",
+    "La inversión depende de lo que la AYA asumirá en tu atención. "
+    "La definimos después de entender el escenario en una reunión corta. "
+    "¿Para qué tipo de negocio sería?",
+    "O investimento é personalizado pro que a AYA vai assumir no seu atendimento. "
+    "A gente fecha isso numa reunião rápida, olhando o seu caso. "
+    "Ainda topa a gente marcar essa conversa?",
+    "The investment is tailored to what AYA will handle in your customer service. "
+    "We define it in a short meeting based on your case. "
+    "Are you still open to scheduling that conversation?",
+    "La inversión se personaliza según lo que la AYA asumirá en tu atención. "
+    "La definimos en una reunión corta viendo tu caso. "
+    "¿Todavía te parece bien agendar esa conversación?",
+    "Entendo — a gente ajusta o projeto ao que vocês realmente precisam. "
+    "Se fizer sentido, agenda uma reunião curta pra fechar a proposta.",
+    "Got it — we size the project to what you actually need. If it still "
+    "makes sense, we book a short meeting to close the proposal.",
+    "Entiendo — ajustamos el proyecto a lo que realmente necesitan. Si te "
+    "hace sentido, agendamos una reunión corta para cerrar la propuesta.",
+    "Ah, que maravilha! Pra entender como construir a AYA na sua operação e te "
+    "apresentar como ela funciona, vamos marcar uma reunião rápida. Qual dia fica "
+    "melhor pra você esta semana?",
+    "That's great! To understand how to build AYA into your operation and show you "
+    "how it works, let's schedule a quick meeting. Which day works best for you this week?",
+    "Essa integração específica eu prefiro confirmar direitinho na configuração pra "
+    "não te passar errado, mas isso não muda o essencial do atendimento. Ainda topa "
+    "a gente marcar aquela reunião?",
+    "I'd rather confirm that specific integration during configuration so I don't give "
+    "you the wrong information, but it doesn't change the core service. Are you still "
+    "up for that meeting?",
+    "Essa integração específica eu prefiro confirmar direitinho na configuração pra "
+    "não te passar errado. Faz sentido a gente olhar isso numa reunião rápida?",
+    "I'd rather confirm that specific integration during configuration so I don't give "
+    "you the wrong information. Does it make sense to review it in a quick meeting?",
+    "Essa parte de agenda precisa ser alinhada na configuração pra eu não te prometer "
+    "algo sem a integração confirmada. Faz sentido eu te mostrar isso numa reunião rápida?",
+    "That scheduling flow needs to be aligned during configuration so I don't promise "
+    "anything before the integration is confirmed. Can I show you that in a quick meeting?",
     # _SCOPE_CLARIFICATION_REPLY
     "Tudo bem por aqui! Você chegou querendo saber mais sobre a AYA, ou é sobre outra coisa?",
     "All good here! Did you reach out to learn more about AYA, or is it about something else?",

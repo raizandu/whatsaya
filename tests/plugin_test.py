@@ -848,7 +848,7 @@ class TestLLMContextAndPrompting(BaseWhatsAppManagerTest):
         self.assertIn("NÃO USE TRAVESSÃO", ctx)
         self.assertIn("AGENDA OU AGENDAMENTO", ctx)
         self.assertIn("INTENÇÃO FORTE + DÚVIDA TÉCNICA", ctx)
-        self.assertIn("RETOME A CALL PENDENTE", ctx)
+        self.assertIn("RETOME A REUNIÃO PENDENTE", ctx)
 
     def test_build_support_prompt_injects_market_metadata_without_language_reclassification(self):
         import whatsapp_manager
@@ -8481,7 +8481,8 @@ class TestTransformLlmOutput(BaseWhatsAppManagerTest):
         sent = mock_send.call_args.args[1]
         folded = whatsapp_manager._normalize_text(sent)
         self.assertIn("confirmar", folded)
-        self.assertIn("call", folded)
+        self.assertIn("reuniao", folded)
+        self.assertNotIn("call", folded)
         self.assertNotIn("integra automaticamente", folded)
 
     def test_zelle_details_are_blocked_for_price_question(self):
@@ -10270,7 +10271,8 @@ class TestQaFinalBrasilGoLive(unittest.TestCase):
         )
         folded = whatsapp_manager._normalize_text(out)
         self.assertIn("investimento", folded)
-        self.assertIn("call", folded)
+        self.assertIn("reuniao", folded)
+        self.assertNotIn("call", folded)
         self.assertIn("tipo de negocio", folded)
         self.assertNotIn("contatos por dia", folded)
         self.assertTrue(out.rstrip().endswith("?"), out)
@@ -10495,7 +10497,7 @@ class TestQaFinalBrasilGoLive(unittest.TestCase):
             user_message="Aqui usamos o Astrea, será que conseguimos integrar?",
         )
         folded_integracao = whatsapp_manager._normalize_text(integracao)
-        self.assertIn("retome o convite da call", folded_integracao)
+        self.assertIn("retome o convite da reuniao", folded_integracao)
         self.assertIn("ressalve somente a integracao", folded_integracao)
 
         compra_forte = whatsapp_manager._conversation_state_block(
@@ -10510,7 +10512,7 @@ class TestQaFinalBrasilGoLive(unittest.TestCase):
         )
         folded_compra = whatsapp_manager._normalize_text(compra_forte)
         self.assertIn("intencao forte de compra", folded_compra)
-        self.assertIn("leve direto para a call", folded_compra)
+        self.assertIn("leve direto para a reuniao", folded_compra)
 
     def test_integracao_nao_confirmada_nao_inventa_e_retoma_call_pendente(self):
         historico = (
@@ -10526,7 +10528,8 @@ class TestQaFinalBrasilGoLive(unittest.TestCase):
         )
         folded = whatsapp_manager._normalize_text(out)
         self.assertIn("confirmar", folded)
-        self.assertIn("call", folded)
+        self.assertIn("reuniao", folded)
+        self.assertNotIn("call", folded)
         self.assertIn("ainda topa", folded)
         self.assertNotIn("integra com o astrea automaticamente", folded)
         self.assertTrue(out.rstrip().endswith("?"), out)
@@ -10559,7 +10562,8 @@ class TestQaFinalBrasilGoLive(unittest.TestCase):
             history="Lead: Sou psicoterapeuta e atendo sozinho\n",
         )
         folded = whatsapp_manager._normalize_text(out)
-        self.assertIn("call", folded)
+        self.assertIn("reuniao", folded)
+        self.assertNotIn("call", folded)
         self.assertNotIn("reservei", folded)
         self.assertNotIn("confirmado", folded)
         self.assertTrue(out.rstrip().endswith("?"), out)
@@ -10576,7 +10580,8 @@ class TestQaFinalBrasilGoLive(unittest.TestCase):
         )
         folded = whatsapp_manager._normalize_text(out)
         self.assertIn("maravilha", folded)
-        self.assertIn("call", folded)
+        self.assertIn("reuniao", folded)
+        self.assertNotIn("call", folded)
         self.assertNotIn("sobe todos os documentos automaticamente", folded)
         self.assertTrue(out.rstrip().endswith("?"), out)
 
@@ -10627,7 +10632,8 @@ class TestQaFinalBrasilGoLive(unittest.TestCase):
             whatsapp_manager._normalize_text(out),
             whatsapp_manager._normalize_text(primeiro),
         )
-        self.assertIn("call", folded)
+        self.assertIn("reuniao", folded)
+        self.assertNotIn("call", folded)
         self.assertNotIn("1.500", out)
         self.assertNotIn("contatos por dia", folded)
 
@@ -10685,7 +10691,8 @@ class TestQaFinalBrasilGoLive(unittest.TestCase):
         )
         folded = whatsapp_manager._normalize_text(out)
         self.assertIn("personalizado", folded)
-        self.assertIn("call", folded)
+        self.assertIn("reuniao", folded)
+        self.assertNotIn("call", folded)
         self.assertIn("ainda topa", folded)
         self.assertNotIn("contatos por dia", folded)
         self.assertNotIn("1.500", out)
@@ -10741,7 +10748,8 @@ class TestQaFinalBrasilGoLive(unittest.TestCase):
         )
         folded = whatsapp_manager._normalize_text(out)
         self.assertNotIn("contatos por dia", folded)
-        self.assertIn("call", folded)
+        self.assertIn("reuniao", folded)
+        self.assertNotIn("call", folded)
 
     def test_quero_avancar_handoff_natural(self):
         out = self._gate(

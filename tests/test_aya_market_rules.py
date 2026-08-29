@@ -139,7 +139,8 @@ class TestAyaMarketRules(unittest.TestCase):
         self.assertIn("negócio e o problema na mesma mensagem", combined)
         self.assertIn("agenda ou agendamento", combined)
         self.assertIn("intenção forte de compra", combined)
-        self.assertIn("retome o convite da call", combined)
+        self.assertIn("retome o convite da reunião", combined)
+        self.assertIn("nunca use “call”", combined)
         self.assertNotIn("no máximo **duas perguntas** na conversa inteira", SOUL.lower())
 
 
