@@ -11623,6 +11623,12 @@ _CALENDAR_FIND_SCHEMA = {
                 "type": "string",
                 "description": "Horário exato preferido, HH:MM, quando o lead informar um.",
             },
+            "max_slots": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 3,
+                "description": "Quantidade máxima de sugestões; use 1 para propor a mais próxima.",
+            },
         },
         "required": ["date_from"],
     },
@@ -11684,10 +11690,11 @@ def _calendar_rules_for_prompt(rules_content: str, *, enabled: bool) -> str:
         return rules
     replacement = (
         "### Agenda e call no estado atual\n\n"
-        "A agenda comercial da WhatsAYA está ativa nesta operação. Depois que o lead "
-        "aceitar a call, consulte disponibilidade real e ofereça somente as vagas "
-        "confirmadas pelo sistema. Reserve apenas após ele escolher uma opção em uma "
-        "mensagem posterior. Não faça handoff nesse fluxo.\n\n"
+        "A agenda comercial da WhatsAYA está ativa nesta operação. Assim que o lead "
+        "aceitar a call, consulte a disponibilidade real e sugira o horário livre mais "
+        "próximo. Reserve apenas após ele confirmar essa sugestão em uma mensagem posterior. "
+        "Se ele recusar, pergunte quando ficaria melhor e valide a nova preferência na "
+        "agenda. Não faça handoff nesse fluxo.\n\n"
     )
     if _CALENDAR_RULES_SECTION_RE.search(rules):
         return _CALENDAR_RULES_SECTION_RE.sub(replacement, rules, count=1).strip()
@@ -11706,10 +11713,12 @@ def _calendar_prompt_block(enabled: bool) -> str:
         "### AGENDA COMERCIAL DA WHATSAYA ###\n"
         "Agenda comercial da WhatsAYA: ATIVA. Este status vale para marcar a call comercial "
         "da WhatsAYA, não para prometer integração com a agenda do negócio do lead.\n"
-        f"Quando houver dia ou janela definida, use {_CALENDAR_FIND_TOOL} e responda somente "
-        "com as vagas verificadas. Se não houver vaga, peça outro dia ou período.\n"
-        f"Depois de oferecer as opções, use {_CALENDAR_BOOK_TOOL} somente quando o lead escolher "
-        "claramente uma delas em uma mensagem posterior. Um 'sim' sem indicar qual opção não basta.\n"
+        f"Assim que o lead aceitar a call, use {_CALENDAR_FIND_TOOL} e sugira somente o horário "
+        "livre mais próximo confirmado pelo sistema. Se o lead recusar, pergunte quando ficaria "
+        "melhor e valide a nova preferência na agenda real. Se não houver vaga, peça outro dia "
+        "ou período.\n"
+        f"Use {_CALENDAR_BOOK_TOOL} somente quando o lead confirmar a sugestão em uma mensagem "
+        "posterior. Um 'sim' confirma somente quando existe uma única sugestão aberta.\n"
         "Não faça handoff quando a consulta ou a reserva real da agenda estiver em andamento.\n"
         "### FIM AGENDA COMERCIAL ###\n\n"
     )
@@ -11771,6 +11780,20 @@ def _calendar_requests_availability(text: str) -> bool:
         r"\b(?:qual|quais|que)\s+(?:dia|dias|horario|horarios|vaga|vagas)\b"
         r".{0,30}\b(?:tem|disponivel|disponiveis|livre|livres)\b"
         r"|\bquando\b.{0,30}\b(?:tem|disponivel|disponiveis|livre|livres)\b",
+        folded,
+    ))
+
+
+def _calendar_offer_declined(text: str) -> bool:
+    """Reconhece recusa da sugestão sem interpretar a frase como nova preferência."""
+    folded = " ".join(_normalize_text(str(text or "")).split())
+    if not folded or _calendar_confirmation_present(text):
+        return False
+    return bool(re.search(
+        r"^(?:nao|no|nop|nope)\b"
+        r"|\b(?:nao da|nao consigo|nao posso|nao funciona|outro horario|outra hora|"
+        r"doesn.?t work|can.?t make it|cannot make it|another time|"
+        r"no me sirve|no puedo|otro horario)\b",
         folded,
     ))
 
@@ -11911,12 +11934,28 @@ def _orchestrate_calendar_turn(
     active_state = _calendar_active_state(chat_id)
     offered = active_state if active_state.get("kind") == "offered" else {}
     preferred_time = _calendar_time_from_text(user_message)
+    direct_period = _calendar_period_from_text(user_message)
+    accepts_call = _lead_accepts_pending_call(user_message)
     lead_names = _history_lead_names(_contact_record_for_chat(chat_id))
     if offered and offered.get("inbound_token") != token:
         selected = _calendar_selected_slot(user_message, list(offered.get("slots") or []))
         if selected:
             result = json.loads(_handle_calendar_book(selected, session_id=session_id))
             return result.get("status") in {"created", "already_exists"}
+        if _calendar_offer_declined(user_message):
+            state = {
+                "kind": "collecting",
+                "reply_kind": "ask_preference_after_decline",
+                "at": time.time(),
+                "expires_at": time.time() + _CALENDAR_OFFER_TTL_S,
+                "inbound_token": token,
+                "slots": [],
+                "period": "any",
+                "source_text": str(inbound.get("text") or "")[:500],
+            }
+            with _calendar_state_lock:
+                _calendar_turn_state[chat_id] = state
+            return True
 
     date_from = _calendar_date_from_text(user_message, now=now)
     call_is_open = (
@@ -11930,19 +11969,25 @@ def _orchestrate_calendar_turn(
     period = _calendar_period_from_history(history, user_message, lead_names=lead_names)
     asks_availability = _calendar_requests_availability(user_message)
 
-    if not date_from and (asks_availability or preferred_time):
+    should_suggest_nearest = bool(
+        asks_availability
+        or preferred_time
+        or direct_period != "any"
+        or (accepts_call and not active_state)
+    )
+    if not date_from and should_suggest_nearest:
         date_from, date_to = _calendar_search_window(now)
     else:
         date_to = None
 
     if not date_from:
-        if offered and _lead_accepts_pending_call(user_message):
+        if offered and accepts_call:
             offered["inbound_token"] = token
             offered["reply_kind"] = "choice_required"
             with _calendar_state_lock:
                 _calendar_turn_state[chat_id] = offered
             return True
-        if not _lead_accepts_pending_call(user_message):
+        if not accepts_call:
             return False
         state = {
             "kind": "collecting",
@@ -11963,6 +12008,7 @@ def _orchestrate_calendar_turn(
             "date_to": date_to,
             "period": period,
             "preferred_time": preferred_time,
+            "max_slots": 1,
         },
         session_id=session_id,
     ))
@@ -12007,6 +12053,7 @@ def _handle_calendar_find_slots(args: dict, **kwargs) -> str:
             date_to=str(args.get("date_to") or "") or None,
             period=str(args.get("period") or "any"),
             preferred_time=str(args.get("preferred_time") or "") or None,
+            max_slots=int(args.get("max_slots") or 3),
         )
         slots = list(result.get("slots") or [])
         period = str(args.get("period") or "any")
@@ -12024,6 +12071,7 @@ def _handle_calendar_find_slots(args: dict, **kwargs) -> str:
                 "date_to": str(args.get("date_to") or "") or None,
                 "period": period,
                 "preferred_time": preferred_time,
+                "max_slots": int(args.get("max_slots") or 3),
             },
         }
         with _calendar_state_lock:
@@ -12064,13 +12112,20 @@ def _calendar_local_label(iso_value: str, language: str) -> str:
         "es": ("lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"),
     }
     names = weekdays.get(language) or weekdays["pt"]
-    return f"{names[value.weekday()]}, {value:%d/%m}, {value:%H:%M}"
+    connectors = {"pt": "às", "en": "at", "es": "a las"}
+    connector = connectors.get(language) or connectors["pt"]
+    return f"{names[value.weekday()]}, {value:%d/%m}, {connector} {value:%H:%M}"
 
 
 def _calendar_visible_reply(state: dict, user_message: str) -> str:
     language = _infer_message_language(user_message)
     if state.get("reply_kind") == "choice_required":
         return _CALENDAR_CHOICE_REQUIRED.get(language) or _CALENDAR_CHOICE_REQUIRED["pt"]
+    if state.get("reply_kind") == "ask_preference_after_decline":
+        return (
+            _CALENDAR_ASK_PREFERENCE_AFTER_DECLINE.get(language)
+            or _CALENDAR_ASK_PREFERENCE_AFTER_DECLINE["pt"]
+        )
     if state.get("kind") == "collecting":
         if str(state.get("period") or "any") != "any":
             return _CALENDAR_ASK_DAY.get(language) or _CALENDAR_ASK_DAY["pt"]
@@ -12094,6 +12149,23 @@ def _calendar_visible_reply(state: dict, user_message: str) -> str:
             "pt": "Não encontrei vaga nesse período. Quer tentar outro dia ou manhã/tarde?",
             "en": "I couldn't find an opening in that window. Want to try another day or morning/afternoon?",
             "es": "No encontré un horario libre en ese período. ¿Probamos otro día o mañana/tarde?",
+        }
+        return templates.get(language) or templates["pt"]
+    if len(slots) == 1:
+        label = _calendar_local_label(str(slots[0].get("start") or ""), language)
+        templates = {
+            "pt": (
+                f"Boa! O horário livre mais próximo é {label}, no horário de Goiânia. "
+                "Funciona para você?"
+            ),
+            "en": (
+                f"Great! The nearest open time is {label}, Goiânia time. "
+                "Does that work for you?"
+            ),
+            "es": (
+                f"¡Bien! El horario libre más próximo es {label}, horario de Goiânia. "
+                "¿Te funciona?"
+            ),
         }
         return templates.get(language) or templates["pt"]
     labels = [_calendar_local_label(str(slot.get("start") or ""), language) for slot in slots]
@@ -13793,6 +13865,11 @@ _CALENDAR_ASK_DAY_AND_PERIOD = {
     "pt": "Show! Qual dia e período, manhã ou tarde, funcionam melhor para você?",
     "en": "Great! Which day and period, morning or afternoon, work best for you?",
     "es": "¡Perfecto! ¿Qué día y período, mañana o tarde, te vienen mejor?",
+}
+_CALENDAR_ASK_PREFERENCE_AFTER_DECLINE = {
+    "pt": "Sem problema. Quando ficaria melhor para você?",
+    "en": "No problem. When would work better for you?",
+    "es": "No hay problema. ¿Cuándo te vendría mejor?",
 }
 _CALENDAR_CHOICE_REQUIRED = {
     "pt": "Boa! Qual dos horários que te enviei você prefere: 1, 2 ou 3?",

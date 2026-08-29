@@ -212,6 +212,7 @@ class CalendarPluginIntegrationTests(unittest.TestCase):
             date_to=None,
             period="morning",
             preferred_time=None,
+            max_slots=1,
         )
         self.assertEqual(wm._calendar_turn_state[self.chat]["kind"], "empty")
         self.assertEqual(wm._calendar_turn_state[self.chat]["slots"], [])
@@ -234,26 +235,38 @@ class CalendarPluginIntegrationTests(unittest.TestCase):
             "afternoon",
         )
 
-    def test_call_acceptance_enters_calendar_collection_before_handoff(self):
+    def test_call_acceptance_suggests_nearest_real_slot_before_handoff(self):
         token = self._inbound("msg-accept", "Sim")
         history = self._gustavo_call_history().replace("Lead:", "Gustavo:")
+        nearest = dict(self._slots(), slots=self._slots()["slots"][:1])
+        now = datetime(2026, 8, 28, 16, 32, tzinfo=ZoneInfo("America/Sao_Paulo"))
 
         with patch("whatsapp_manager.calendar_ready", return_value=True), \
-             patch("whatsapp_manager._contact_record_for_chat", return_value={"name": "Gustavo"}):
+             patch("whatsapp_manager._contact_record_for_chat", return_value={"name": "Gustavo"}), \
+             patch("whatsapp_manager.find_available_slots", return_value=nearest) as find:
             handled = wm._orchestrate_calendar_turn(
                 chat_id=self.chat,
                 session_id=self.session,
                 user_message="Sim",
                 history=history,
-                now=datetime(2026, 8, 28, 16, 32, tzinfo=ZoneInfo("America/Sao_Paulo")),
+                now=now,
             )
 
         self.assertTrue(handled)
+        find.assert_called_once_with(
+            date_from="2026-08-28",
+            date_to="2026-09-10",
+            period="any",
+            preferred_time=None,
+            max_slots=1,
+        )
         state = wm._calendar_turn_state[self.chat]
-        self.assertEqual(state["kind"], "collecting")
+        self.assertEqual(state["kind"], "offered")
         self.assertEqual(state["inbound_token"], token)
         visible = wm._calendar_visible_reply(state, "Sim")
-        self.assertIn("Qual dia e período", visible)
+        self.assertIn("horário livre mais próximo", visible)
+        self.assertIn("às 14:00", visible)
+        self.assertIn("Funciona para você?", visible)
         self.assertNotIn("HANDOFF", visible)
 
     def test_date_query_keeps_afternoon_from_previous_lead_message(self):
@@ -284,6 +297,7 @@ class CalendarPluginIntegrationTests(unittest.TestCase):
             date_to=None,
             period="afternoon",
             preferred_time=None,
+            max_slots=1,
         )
         state = wm._calendar_turn_state[self.chat]
         self.assertEqual(state["kind"], "empty")
@@ -314,6 +328,7 @@ class CalendarPluginIntegrationTests(unittest.TestCase):
             date_to="2026-09-10",
             period="afternoon",
             preferred_time=None,
+            max_slots=1,
         )
         self.assertEqual(wm._calendar_turn_state[self.chat]["kind"], "offered")
 
@@ -350,7 +365,112 @@ class CalendarPluginIntegrationTests(unittest.TestCase):
             date_to="2026-09-10",
             period="afternoon",
             preferred_time="16:00",
+            max_slots=1,
         )
+
+    def test_rejected_suggestion_asks_when_would_work_better(self):
+        old_token = self._inbound("msg-suggestion", "Sim")
+        wm._calendar_turn_state[self.chat] = {
+            "kind": "offered",
+            "at": time.time(),
+            "expires_at": time.time() + 600,
+            "inbound_token": old_token,
+            "slots": self._slots()["slots"][:1],
+            "query": {"period": "any", "max_slots": 1},
+        }
+        token = self._inbound("msg-decline", "Esse horário não dá")
+
+        with patch("whatsapp_manager.calendar_ready", return_value=True):
+            handled = wm._orchestrate_calendar_turn(
+                chat_id=self.chat,
+                session_id=self.session,
+                user_message="Esse horário não dá",
+                history=self._gustavo_call_history(),
+            )
+
+        self.assertTrue(handled)
+        state = wm._calendar_turn_state[self.chat]
+        self.assertEqual(state["kind"], "collecting")
+        self.assertEqual(state["reply_kind"], "ask_preference_after_decline")
+        self.assertEqual(state["inbound_token"], token)
+        visible = wm._calendar_visible_reply(state, "Esse horário não dá")
+        self.assertIn("Quando ficaria melhor para você?", visible)
+        self.assertNotIn("HANDOFF", visible)
+
+    def test_simple_yes_books_the_single_nearest_suggestion(self):
+        first = self._slots()["slots"][0]
+        old_token = self._inbound("msg-suggestion", "Sim")
+        wm._calendar_turn_state[self.chat] = {
+            "kind": "offered",
+            "at": time.time(),
+            "expires_at": time.time() + 600,
+            "inbound_token": old_token,
+            "slots": [first],
+            "query": {"period": "any", "max_slots": 1},
+        }
+        self._inbound("msg-confirm-nearest", "Sim")
+        booked = {
+            "status": "created",
+            "event_id": "event-nearest",
+            "summary": "Call WhatsAYA — Gustavo",
+            "start": first["start"],
+            "end": first["end"],
+            "timezone": "America/Sao_Paulo",
+        }
+
+        with patch("whatsapp_manager.calendar_ready", return_value=True), \
+             patch("whatsapp_manager.create_booking", return_value=booked) as create:
+            handled = wm._orchestrate_calendar_turn(
+                chat_id=self.chat,
+                session_id=self.session,
+                user_message="Sim",
+                history=self._gustavo_call_history(),
+            )
+
+        self.assertTrue(handled)
+        create.assert_called_once()
+        self.assertEqual(wm._calendar_turn_state[self.chat]["kind"], "booked")
+
+    def test_active_calendar_prompt_says_to_offer_the_nearest_slot(self):
+        block = wm._calendar_prompt_block(True)
+        self.assertIn("horário livre mais próximo", block)
+        self.assertIn("Se o lead recusar", block)
+
+    def test_period_after_rejection_is_validated_against_nearest_real_slot(self):
+        old_token = self._inbound("msg-decline", "Esse horário não dá")
+        wm._calendar_turn_state[self.chat] = {
+            "kind": "collecting",
+            "reply_kind": "ask_preference_after_decline",
+            "at": time.time(),
+            "expires_at": time.time() + 600,
+            "inbound_token": old_token,
+            "slots": [],
+            "period": "any",
+        }
+        self._inbound("msg-new-period", "De tarde")
+        nearest = dict(self._slots(), slots=self._slots()["slots"][:1])
+        now = datetime(2026, 8, 28, 16, 32, tzinfo=ZoneInfo("America/Sao_Paulo"))
+
+        with patch("whatsapp_manager.calendar_ready", return_value=True), \
+             patch("whatsapp_manager.find_available_slots", return_value=nearest) as find:
+            handled = wm._orchestrate_calendar_turn(
+                chat_id=self.chat,
+                session_id=self.session,
+                user_message="De tarde",
+                history=self._gustavo_call_history(),
+                now=now,
+            )
+
+        self.assertTrue(handled)
+        find.assert_called_once_with(
+            date_from="2026-08-28",
+            date_to="2026-09-10",
+            period="afternoon",
+            preferred_time=None,
+            max_slots=1,
+        )
+        visible = wm._calendar_visible_reply(wm._calendar_turn_state[self.chat], "De tarde")
+        self.assertIn("horário livre mais próximo", visible)
 
     def test_empty_query_is_not_mistaken_for_an_open_offer(self):
         token = self._inbound("msg-empty", "Pode ser amanhã")
