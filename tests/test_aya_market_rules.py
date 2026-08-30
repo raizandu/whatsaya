@@ -56,6 +56,14 @@ class TestAyaMarketRules(unittest.TestCase):
             COMPOSE,
         )
 
+    def test_runtime_enables_read_receipts_in_adapter_config(self):
+        self.assertIn("wa_send_read_receipts = (", COMPOSE)
+        self.assertIn("wa['send_read_receipts'] = wa_send_read_receipts", COMPOSE)
+        self.assertIn(
+            "WHATSAPP_SEND_READ_RECEIPTS=${WHATSAPP_SEND_READ_RECEIPTS:-true}",
+            COMPOSE,
+        )
+
     def test_runtime_does_not_stack_legacy_first_response_delay(self):
         self.assertIn(
             "WHATSAPP_FIRST_RESPONSE_DELAY_S=${WHATSAPP_FIRST_RESPONSE_DELAY_S:-0}",

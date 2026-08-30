@@ -286,6 +286,10 @@ services:
         owner_reasoning_effort = os.environ.get('WHATSAPP_OWNER_REASONING_EFFORT') or 'high'
         wa_mode = os.environ.get('WHATSAPP_MODE') or 'bot'
         wa_allowed = os.environ.get('WHATSAPP_ALLOWED_USERS') or '*'
+        wa_send_read_receipts = (
+            (os.environ.get('WHATSAPP_SEND_READ_RECEIPTS') or 'true').strip().lower()
+            not in {'0', 'false', 'no', 'off'}
+        )
 
         # Fallback quando o provider principal (openai-codex, plano ChatGPT Plus com
         # teto fixo diario) estoura a cota: sem isso o Hermes esgota as 3 retries e
@@ -316,17 +320,18 @@ services:
                          'basic_auth': {'username': usr, 'password_hash': hash_password(pwd)}})
             cfg['dashboard'] = dash
             owner_jid = ''.join(c for c in (os.environ.get('WHATSAPP_OWNER_NUMBER') or '') if c.isdigit())
+            plats = cfg.get('platforms') if isinstance(cfg.get('platforms'), dict) else {}
+            wa = plats.get('whatsapp') if isinstance(plats.get('whatsapp'), dict) else {}
+            wa['enabled'] = True
+            wa['send_read_receipts'] = wa_send_read_receipts
             if owner_jid:
-                plats = cfg.get('platforms') if isinstance(cfg.get('platforms'), dict) else {}
-                wa = plats.get('whatsapp') if isinstance(plats.get('whatsapp'), dict) else {}
-                wa['enabled'] = True
                 wa['home_channel'] = {
                     'platform': 'whatsapp',
                     'chat_id': owner_jid + '@s.whatsapp.net',
                     'name': 'Home',
                 }
-                plats['whatsapp'] = wa
-                cfg['platforms'] = plats
+            plats['whatsapp'] = wa
+            cfg['platforms'] = plats
             cfg['session_reset'] = {'notify_user': False}
             gateway_cfg = cfg.get('gateway') if isinstance(cfg.get('gateway'), dict) else {}
             gateway_cfg['delivery_ledger'] = False
