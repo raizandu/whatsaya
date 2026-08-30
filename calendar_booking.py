@@ -143,7 +143,6 @@ def get_booking(
     if not path.is_file():
         return None
     with _BOOKING_DB_LOCK:
-        _ensure_booking_store(path)
         with contextlib.closing(
             sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5)
         ) as conn:

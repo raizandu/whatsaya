@@ -126,6 +126,31 @@ class CalendarBookingTests(unittest.TestCase):
                 path.write_text(json.dumps({"refresh_token": "x", "scopes": ["gmail"]}))
                 self.assertFalse(cb.calendar_ready())
 
+    def test_get_booking_is_read_only_for_existing_store(self):
+        stored = {
+            "event_id": "event-read-only",
+            "start": "2026-08-31T08:00:00-03:00",
+            "end": "2026-08-31T08:30:00-03:00",
+            "timezone": "America/Sao_Paulo",
+            "meet_link": "https://meet.google.com/read-only-link",
+            "htmlLink": "https://calendar.google.test/private",
+        }
+        cb._persist_booking(
+            chat_id="5562999999999@s.whatsapp.net",
+            result=stored,
+            db_path=self._db_path,
+        )
+
+        with patch("calendar_booking._ensure_booking_store") as ensure:
+            result = cb.get_booking(
+                "5562999999999@s.whatsapp.net",
+                db_path=self._db_path,
+            )
+
+        ensure.assert_not_called()
+        self.assertEqual(result["event_id"], stored["event_id"])
+        self.assertEqual(result["meet_link"], stored["meet_link"])
+
     def test_find_slots_skips_busy_period_and_returns_three_real_slots(self):
         service = FakeService(busy=[{
             "start": "2026-08-31T08:00:00-03:00",

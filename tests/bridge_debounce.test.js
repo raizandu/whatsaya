@@ -17,6 +17,7 @@ process.env.WHATSAPP_DEBOUNCE_MIN_MS = '30';
 process.env.WHATSAPP_DEBOUNCE_DECAY = '0.5';
 process.env.WHATSAPP_DEBOUNCE_SKIP_SELF_CHAT = 'true';
 process.env.WHATSAPP_DEBOUNCE_TYPING_REFRESH_MS = '25';
+process.env.WHATSAPP_SEND_READ_RECEIPTS = 'true';
 
 const {
   clearRecentlyProcessedIds,
@@ -26,9 +27,13 @@ const {
 } = await import('../bridge.js');
 
 const presenceUpdates = [];
+const readReceiptKeys = [];
 setSock({
   sendPresenceUpdate: async (state, chatId) => {
     presenceUpdates.push({ state, chatId, at: Date.now() });
+  },
+  readMessages: async (keys) => {
+    readReceiptKeys.push(...keys);
   },
 });
 
@@ -49,8 +54,10 @@ test('quick text fragments become one ordered inbound batch', async () => {
   clearRecentlyProcessedIds();
   getMessageQueue().length = 0;
   presenceUpdates.length = 0;
+  readReceiptKeys.length = 0;
 
   await onMessagesUpsert(inbound('debounce-1', 'Sim, pode ser'));
+  assert.deepStrictEqual(readReceiptKeys.map(key => key.id), ['debounce-1']);
   assert.strictEqual(presenceUpdates[0]?.state, 'composing');
   assert.strictEqual(presenceUpdates[0]?.chatId, 'client123@s.whatsapp.net');
 
@@ -62,6 +69,11 @@ test('quick text fragments become one ordered inbound batch', async () => {
 
   await wait(25);
   await onMessagesUpsert(inbound('debounce-2', 'Quanto q custa?'));
+  assert.deepStrictEqual(
+    readReceiptKeys.map(key => key.id),
+    ['debounce-1', 'debounce-2'],
+    'each inbound fragment should be marked read before the debounce flush',
+  );
 
   assert.strictEqual(getMessageQueue().length, 0);
   await wait(100);

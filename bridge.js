@@ -202,8 +202,8 @@ try {
     .digest('hex')
     .slice(0, 16);
 } catch {}
-const SEND_READ_RECEIPTS = ['1', 'true', 'yes', 'on'].includes(
-  String(process.env.WHATSAPP_SEND_READ_RECEIPTS || '').toLowerCase(),
+const SEND_READ_RECEIPTS = !['0', 'false', 'no', 'off'].includes(
+  String(process.env.WHATSAPP_SEND_READ_RECEIPTS || 'true').trim().toLowerCase(),
 );
 const HISTORY_PERSIST_DISABLED = ['1', 'true', 'yes', 'on'].includes(
   String(process.env.WHATSAPP_HISTORY_PERSIST_DISABLED || '').toLowerCase(),
@@ -695,6 +695,25 @@ function startDebounceTyping(chatId) {
   return typingTimer;
 }
 
+async function markInboundMessageRead(msg) {
+  if (
+    !SEND_READ_RECEIPTS
+    || msg?.key?.fromMe
+    || !msg?.key
+    || !sock
+    || typeof sock.readMessages !== 'function'
+  ) {
+    return;
+  }
+  try {
+    await sock.readMessages([msg.key]);
+  } catch (err) {
+    if (WHATSAPP_DEBUG) {
+      console.log(`[bridge] read receipt failed: ${err?.message || err}`);
+    }
+  }
+}
+
 /**
  * Calcula o próximo timer de debounce com decay exponencial.
  * @param {number} parts - Nº de fragmentos já acumulados (incluindo o atual)
@@ -864,6 +883,7 @@ let onMessagesUpsert = async ({ messages, type }) => {
     // never alter the lead's memory, intent or commercial stage.
     if (isQaWatchFeedbackMessage(msg)) {
       try {
+        await markInboundMessageRead(msg);
         const result = recordQaWatchFeedback(msg);
         await sendWithTimeout(rawChatId, {
           react: { text: result.recorded ? '✅' : '⚠️', key: msg.key },
@@ -1071,6 +1091,7 @@ let onMessagesUpsert = async ({ messages, type }) => {
         } catch {}
         continue;
       }
+      await markInboundMessageRead(msg);
     }
 
     const messageContent = getMessageContent(msg);

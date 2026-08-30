@@ -12019,6 +12019,23 @@ def _orchestrate_calendar_turn(
             with _calendar_state_lock:
                 _calendar_turn_state[chat_id] = state
             return True
+        has_new_preference = bool(
+            _calendar_date_from_text(user_message, now=now)
+            or preferred_time
+            or direct_period != "any"
+            or _calendar_requests_availability(user_message)
+        )
+        if not has_new_preference:
+            offered.update({
+                "kind": "offered",
+                "reply_kind": "choice_required",
+                "at": time.time(),
+                "expires_at": time.time() + _CALENDAR_OFFER_TTL_S,
+                "inbound_token": token,
+            })
+            with _calendar_state_lock:
+                _calendar_turn_state[chat_id] = offered
+            return True
 
     date_from = _calendar_date_from_text(user_message, now=now)
     call_is_open = (
@@ -12118,8 +12135,13 @@ def _calendar_confirmation_present(text: str) -> bool:
         return False
     if re.search(r"\b(?:nao|nem|talvez|depois|outro|outra|mudar|nenhum|nenhuma)\b", folded):
         return False
+    folded = re.sub(
+        r"^(?:(?:hum+|hm+|ah+|aah+|boa|show|blz|beleza|entao|perfeito)[,.:;!?\s]+)+",
+        "",
+        folded,
+    )
     return bool(re.search(
-        r"^(?:sim|ok|okay|pode ser|fechado|fechou|confirmo|esse|essa|este|esta|"
+        r"^(?:sim|ok|okay|pode ser|pode sim|fechado|fechou|confirmo|esse|essa|este|esta|"
         r"o primeiro|o segundo|o terceiro|a primeira|a segunda|a terceira|"
         r"yes|that works|the first|the second|the third|sí|si|confirmo)\b|"
         r"\b(?:pode marcar|pode agendar|fica confirmado|quero esse|works for me)\b",
@@ -12221,6 +12243,24 @@ def _calendar_visible_reply(state: dict, user_message: str) -> str:
     if state.get("reply_kind") == "book_retry":
         return _CALENDAR_BOOK_RETRY_REPLY.get(language) or _CALENDAR_BOOK_RETRY_REPLY["pt"]
     if state.get("reply_kind") == "choice_required":
+        slots = list(state.get("slots") or [])
+        if len(slots) == 1:
+            label = _calendar_local_label(str(slots[0].get("start") or ""), language)
+            templates = {
+                "pt": f"Só pra confirmar: {label}, no horário de Goiânia, funciona para você?",
+                "en": f"Just to confirm: {label}, Goiânia time, does that work for you?",
+                "es": f"Solo para confirmar: {label}, horario de Goiânia, ¿te funciona?",
+            }
+            return templates.get(language) or templates["pt"]
+        if slots:
+            count = len(slots)
+            options = ", ".join(str(index) for index in range(1, count + 1))
+            templates = {
+                "pt": f"Boa! Qual dos horários que te enviei você prefere: {options}?",
+                "en": f"Great! Which of the times I sent do you prefer: {options}?",
+                "es": f"¡Bien! ¿Cuál de los horarios que te envié prefieres: {options}?",
+            }
+            return templates.get(language) or templates["pt"]
         return _CALENDAR_CHOICE_REQUIRED.get(language) or _CALENDAR_CHOICE_REQUIRED["pt"]
     if state.get("reply_kind") == "ask_preference_after_decline":
         return (
@@ -12301,6 +12341,49 @@ def _calendar_visible_reply(state: dict, user_message: str) -> str:
         "es": f"Tengo estos horarios libres, en el horario de Goiânia:\n{lines}\n¿Cuál te queda mejor?",
     }
     return templates.get(language) or templates["pt"]
+
+
+_CALENDAR_COMPLETION_CLAIM_RE = re.compile(
+    r"(?:"
+    r"\b(?:reuniao|ligacao|meeting|reunion)\b.{0,90}"
+    r"\b(?:agendad|marcad|confirmad|reservad|solicitad|scheduled|confirmed|booked)\w*"
+    r"|\b(?:agendad|marcad|confirmad|reservad|solicitad|scheduled|confirmed|booked)\w*"
+    r".{0,90}\b(?:reuniao|ligacao|meeting|reunion)\b"
+    r"|\b(?:equipe|time|team)\b.{0,90}\b(?:confirmacao|confirmar|confirmation|link)\b"
+    r")",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _calendar_guard_completion_claim(
+    response_text: str,
+    *,
+    user_message: str,
+    chat_id: str,
+) -> str:
+    """Só confirma uma reunião do modelo quando há reserva persistida com Meet."""
+    text = str(response_text or "")
+    folded = _normalize_text(text)
+    if not _calendar_is_ready() or not _CALENDAR_COMPLETION_CLAIM_RE.search(folded):
+        return text
+    try:
+        booking = get_booking(chat_id)
+    except Exception as exc:
+        booking = None
+        logger.warning(
+            "[calendar] confirmação do modelo sem persistência legível chat=%r error=%s",
+            chat_id,
+            type(exc).__name__,
+        )
+    if booking and _calendar_safe_meet_link(str(booking.get("meet_link") or "")):
+        logger.info("[calendar] confirmação do modelo reconstruída da reserva real chat=%r", chat_id)
+        return _calendar_visible_reply(
+            {"kind": "booked", "action": "book", "result": dict(booking)},
+            user_message,
+        )
+    language = _infer_message_language(user_message)
+    logger.warning("[calendar] falsa confirmação do modelo bloqueada chat=%r", chat_id)
+    return _CALENDAR_BOOK_RETRY_REPLY.get(language) or _CALENDAR_BOOK_RETRY_REPLY["pt"]
 
 
 def _handle_calendar_book(args: dict, **kwargs) -> str:
@@ -15840,6 +15923,15 @@ def transform_llm_output(*args, **kwargs):
         handoff_reason = None
         handoff_summary = None
         response_text = _calendar_visible_reply(calendar_state, current_inbound)
+    else:
+        guarded_calendar_reply = _calendar_guard_completion_claim(
+            str(response_text),
+            user_message=current_inbound,
+            chat_id=str(chat_id or ""),
+        )
+        if guarded_calendar_reply != str(response_text):
+            response_text = guarded_calendar_reply
+            calendar_handled = True
     if handoff_reason is not None and _suppress_model_handoff_for_technical_question(
         current_inbound
     ):

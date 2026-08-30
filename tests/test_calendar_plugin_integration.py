@@ -552,6 +552,141 @@ class CalendarPluginIntegrationTests(unittest.TestCase):
         create.assert_called_once()
         self.assertEqual(wm._calendar_turn_state[self.chat]["kind"], "booked")
 
+    def test_natural_confirmation_with_filler_books_single_suggestion(self):
+        first = self._slots()["slots"][0]
+        old_token = self._inbound("msg-tony-offer", "Funciona para você?")
+        wm._calendar_turn_state[self.chat] = {
+            "kind": "offered",
+            "action": "book",
+            "at": time.time(),
+            "expires_at": time.time() + 600,
+            "inbound_token": old_token,
+            "slots": [first],
+            "query": {"period": "any", "max_slots": 1},
+        }
+        self._inbound("msg-tony-confirm", "hum pode sim")
+        booked = {
+            "status": "created",
+            "event_id": "event-tony",
+            "summary": "Reunião WhatsAYA — Tony",
+            "start": first["start"],
+            "end": first["end"],
+            "timezone": "America/Sao_Paulo",
+            "meet_link": "https://meet.google.com/tony-test-link",
+        }
+
+        with patch("whatsapp_manager.calendar_ready", return_value=True), \
+             patch("whatsapp_manager.create_booking", return_value=booked) as create:
+            handled = wm._orchestrate_calendar_turn(
+                chat_id=self.chat,
+                session_id=self.session,
+                user_message="hum pode sim",
+                history=self._gustavo_call_history(),
+            )
+
+        self.assertTrue(handled)
+        create.assert_called_once()
+        self.assertEqual(wm._calendar_turn_state[self.chat]["kind"], "booked")
+
+    def test_unrecognized_offer_reply_stays_in_calendar_flow(self):
+        first = self._slots()["slots"][0]
+        old_token = self._inbound("msg-unclear-offer", "Funciona para você?")
+        wm._calendar_turn_state[self.chat] = {
+            "kind": "offered",
+            "action": "book",
+            "at": time.time(),
+            "expires_at": time.time() + 600,
+            "inbound_token": old_token,
+            "slots": [first],
+            "query": {"period": "any", "max_slots": 1},
+        }
+        token = self._inbound("msg-unclear-reply", "vou conferir aqui")
+
+        with patch("whatsapp_manager.calendar_ready", return_value=True), \
+             patch("whatsapp_manager.create_booking") as create:
+            handled = wm._orchestrate_calendar_turn(
+                chat_id=self.chat,
+                session_id=self.session,
+                user_message="vou conferir aqui",
+                history=self._gustavo_call_history(),
+            )
+
+        self.assertTrue(handled)
+        create.assert_not_called()
+        state = wm._calendar_turn_state[self.chat]
+        self.assertEqual(state["kind"], "offered")
+        self.assertEqual(state["reply_kind"], "choice_required")
+        self.assertEqual(state["inbound_token"], token)
+        visible = wm._calendar_visible_reply(state, "vou conferir aqui")
+        self.assertIn("funciona para você?", visible)
+
+    def test_unverified_model_booking_claim_is_replaced(self):
+        fake_confirmation = (
+            "Perfeito, Tony. Fica solicitada a reunião para segunda às 08:00. "
+            "A equipe vai te enviar a confirmação final com o link."
+        )
+
+        with patch("whatsapp_manager.calendar_ready", return_value=True), \
+             patch("whatsapp_manager.get_booking", return_value=None):
+            guarded = wm._calendar_guard_completion_claim(
+                fake_confirmation,
+                user_message="hum pode sim",
+                chat_id=self.chat,
+            )
+
+        self.assertIn("Não consegui concluir a confirmação", guarded)
+        self.assertNotIn("equipe", guarded.lower())
+        self.assertNotIn("link", guarded.lower())
+
+    def test_transform_never_delivers_unverified_booking_claim(self):
+        self._inbound("msg-fake-confirmation", "hum pode sim")
+        wm._register_contact_turn(self.chat, self.session, "hum pode sim")
+        wm._HUMAN_DELIVER_SYNC = True
+        fake_confirmation = (
+            "Perfeito. Fica solicitada a reunião para segunda às 08:00. "
+            "A equipe vai enviar o link depois."
+        )
+
+        with patch("whatsapp_manager.calendar_ready", return_value=True), \
+             patch("whatsapp_manager.get_booking", return_value=None), \
+             patch("whatsapp_manager._assert_delivery_allowed"), \
+             patch("whatsapp_manager._maybe_send_voice", return_value=None), \
+             patch("whatsapp_manager._persist_turn_sent_to_disk"), \
+             patch("whatsapp_manager._human_send", return_value="wamid-safe") as send:
+            result = wm.transform_llm_output(
+                "transform_llm_output",
+                platform="whatsapp",
+                session_id=self.session,
+                assistant_response=fake_confirmation,
+            )
+
+        self.assertEqual(result, "\n")
+        visible = send.call_args.args[1]
+        self.assertIn("Não consegui concluir a confirmação", visible)
+        self.assertNotIn("equipe", visible.lower())
+        self.assertNotIn("link", visible.lower())
+
+    def test_model_booking_claim_uses_only_persisted_meet(self):
+        booking = {
+            "event_id": "event-real",
+            "start": "2026-08-31T08:00:00-03:00",
+            "end": "2026-08-31T08:30:00-03:00",
+            "timezone": "America/Sao_Paulo",
+            "meet_link": "https://meet.google.com/real-safe-link",
+            "status": "active",
+        }
+
+        with patch("whatsapp_manager.calendar_ready", return_value=True), \
+             patch("whatsapp_manager.get_booking", return_value=booking):
+            guarded = wm._calendar_guard_completion_claim(
+                "Sua reunião está confirmada.",
+                user_message="Está confirmado?",
+                chat_id=self.chat,
+            )
+
+        self.assertIn(booking["meet_link"], guarded)
+        self.assertNotRegex(guarded.lower(), r"\bcall\b")
+
     def test_booking_failure_stays_retryable_without_fake_confirmation(self):
         first = self._slots()["slots"][0]
         old_token = self._inbound("msg-offered-retry", "Quero esse horário")

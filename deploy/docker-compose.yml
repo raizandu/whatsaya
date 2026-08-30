@@ -125,6 +125,7 @@
 #   WHATSAPP_DEBOUNCE_DECAY           Fator de decaimento a cada fragmento novo (padrão: 0.6)
 #   WHATSAPP_DEBOUNCE_SKIP_SELF_CHAT  Pular debounce no self-chat do dono (padrão: true)
 #   WHATSAPP_DEBOUNCE_TYPING_REFRESH_MS Renovar "digitando" durante a espera (padrão: 5000)
+#   WHATSAPP_SEND_READ_RECEIPTS       Marcar mensagens aceitas como lidas (padrão: true)
 #
 # 🔑 GOOGLE CLOUD / OAUTH
 #   GOOGLE_CLIENT_ID       Client ID para autenticação OAuth (Calendar, Drive, etc.)
@@ -553,6 +554,12 @@ services:
               % (client_model, client_provider))
         PYCFG
 
+        calendar_db=/opt/data/.hermes/calendar_bookings.db
+        if [ -e "$${calendar_db}" ]; then
+          chown 10000:10000 "$${calendar_db}"
+          chmod 600 "$${calendar_db}"
+        fi
+
         exec hermes gateway run
 
     volumes:
@@ -610,6 +617,7 @@ services:
       - WHATSAPP_DEBOUNCE_DECAY=${WHATSAPP_DEBOUNCE_DECAY:-0.6}
       - WHATSAPP_DEBOUNCE_SKIP_SELF_CHAT=${WHATSAPP_DEBOUNCE_SKIP_SELF_CHAT:-true}
       - WHATSAPP_DEBOUNCE_TYPING_REFRESH_MS=${WHATSAPP_DEBOUNCE_TYPING_REFRESH_MS:-5000}
+      - WHATSAPP_SEND_READ_RECEIPTS=${WHATSAPP_SEND_READ_RECEIPTS:-true}
       # O debounce já é a espera humanizada. Não empilhe outro delay no primeiro turno.
       - WHATSAPP_FIRST_RESPONSE_DELAY_S=${WHATSAPP_FIRST_RESPONSE_DELAY_S:-0}
 
