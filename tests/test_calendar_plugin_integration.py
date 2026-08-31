@@ -192,6 +192,8 @@ class CalendarPluginIntegrationTests(unittest.TestCase):
         self.assertIn(meet_link, confirmation)
         self.assertRegex(confirmation.lower(), r"reuni[aã]o|liga[cç][aã]o")
         self.assertNotRegex(confirmation.lower(), r"\bcall\b")
+        self.assertLess(confirmation.index(meet_link), confirmation.rfind("?"))
+        self.assertTrue(confirmation.rstrip().endswith("?"), confirmation)
 
     def test_reschedule_requires_new_slot_confirmation_and_reuses_persisted_booking(self):
         old = {
@@ -587,6 +589,116 @@ class CalendarPluginIntegrationTests(unittest.TestCase):
         self.assertTrue(handled)
         create.assert_called_once()
         self.assertEqual(wm._calendar_turn_state[self.chat]["kind"], "booked")
+
+    def test_funciona_books_single_suggestion_without_asking_again(self):
+        first = self._slots()["slots"][0]
+        old_token = self._inbound("msg-funciona-offer", "Funciona para você?")
+        wm._calendar_turn_state[self.chat] = {
+            "kind": "offered",
+            "action": "reschedule",
+            "at": time.time(),
+            "expires_at": time.time() + 600,
+            "inbound_token": old_token,
+            "slots": [first],
+            "query": {"period": "afternoon", "max_slots": 1},
+        }
+        self._inbound("msg-funciona-confirm", "funciona")
+        booked = {
+            "status": "rescheduled",
+            "event_id": "event-tony-funciona",
+            "summary": "Reunião WhatsAYA — Tony",
+            "start": first["start"],
+            "end": first["end"],
+            "timezone": "America/Sao_Paulo",
+            "meet_link": "https://meet.google.com/tony-funciona-link",
+        }
+
+        with patch("whatsapp_manager.calendar_ready", return_value=True), \
+             patch("whatsapp_manager.reschedule_booking", return_value=booked) as reschedule:
+            handled = wm._orchestrate_calendar_turn(
+                chat_id=self.chat,
+                session_id=self.session,
+                user_message="funciona",
+                history=self._gustavo_call_history(),
+            )
+
+        self.assertTrue(handled)
+        reschedule.assert_called_once()
+        state = wm._calendar_turn_state[self.chat]
+        self.assertEqual(state["kind"], "booked")
+        self.assertNotEqual(state.get("reply_kind"), "choice_required")
+
+    def test_confirmation_language_accepts_natural_yes_but_preserves_negatives(self):
+        for message in (
+            "funciona",
+            "pra mim funciona",
+            "isso funciona pra mim",
+            "dá certo",
+            "vai dar certo",
+            "serve pra mim",
+            "combinado",
+        ):
+            with self.subTest(message=message):
+                self.assertTrue(wm._calendar_confirmation_present(message))
+
+        for message in (
+            "não funciona",
+            "não dá certo",
+            "não vai dar",
+            "talvez funcione",
+            "como funciona?",
+        ):
+            with self.subTest(message=message):
+                self.assertFalse(wm._calendar_confirmation_present(message))
+
+    def test_explicit_new_time_wins_over_decline_in_open_offer(self):
+        first = self._slots()["slots"][0]
+        old_token = self._inbound("msg-reschedule-noon", "Pode ser às 12:00?")
+        wm._calendar_turn_state[self.chat] = {
+            "kind": "offered",
+            "action": "reschedule",
+            "at": time.time(),
+            "expires_at": time.time() + 600,
+            "inbound_token": old_token,
+            "slots": [first],
+            "query": {"period": "afternoon", "max_slots": 1},
+        }
+        self._inbound("msg-reschedule-fifteen", "não pode ser tipo as 15:00?")
+        at_fifteen = dict(self._slots(), slots=[{
+            "start": "2026-08-31T15:00:00-03:00",
+            "end": "2026-08-31T15:30:00-03:00",
+        }])
+        current_booking = {
+            "event_id": "event-tony-existing",
+            "start": "2026-08-31T12:00:00-03:00",
+            "end": "2026-08-31T12:30:00-03:00",
+            "meet_link": "https://meet.google.com/tony-existing-link",
+        }
+        now = datetime(2026, 8, 28, 16, 32, tzinfo=ZoneInfo("America/Sao_Paulo"))
+
+        with patch("whatsapp_manager.calendar_ready", return_value=True), \
+             patch("whatsapp_manager.get_booking", return_value=current_booking), \
+             patch("whatsapp_manager.find_available_slots", return_value=at_fifteen) as find:
+            handled = wm._orchestrate_calendar_turn(
+                chat_id=self.chat,
+                session_id=self.session,
+                user_message="não pode ser tipo as 15:00?",
+                history=self._gustavo_call_history(),
+                now=now,
+            )
+
+        self.assertTrue(handled)
+        find.assert_called_once_with(
+            date_from="2026-08-28",
+            date_to="2026-09-10",
+            period="afternoon",
+            preferred_time="15:00",
+            max_slots=1,
+        )
+        state = wm._calendar_turn_state[self.chat]
+        self.assertEqual(state["kind"], "offered")
+        self.assertEqual(state["action"], "reschedule")
+        self.assertEqual(state["slots"][0]["start"], "2026-08-31T15:00:00-03:00")
 
     def test_unrecognized_offer_reply_stays_in_calendar_flow(self):
         first = self._slots()["slots"][0]

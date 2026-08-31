@@ -2585,7 +2585,8 @@ _NOT_A_PERSON_NAME = {
     "beleza", "show", "ok", "opa", "oi", "oie", "sim", "nao", "não", "claro",
     "perfeito", "valeu", "obrigado", "obrigada", "fechou", "combinado",
     "entendi", "legal", "top", "blz", "tmj", "fala", "eita", "cara", "mano",
-    "bom", "dia", "tarde", "noite",
+    "bom", "dia", "tarde", "noite", "funciona", "serve", "pode", "vamos",
+    "quero", "preciso", "prefiro", "consigo", "consegue", "certo", "correto",
 }
 _SELF_INTRO_NAME = re.compile(
     r"(?:meu\s+nome\s+[eé]\s+|me\s+chamo\s+|pode\s+me\s+chamar\s+de\s+|"
@@ -2594,6 +2595,12 @@ _SELF_INTRO_NAME = re.compile(
     re.I,
 )
 _JUST_A_NAME = re.compile(r"^[A-Za-zÀ-ÿ]{2,20}[.!]?$")
+_BARE_CONVERSATIONAL_REPLY_RE = re.compile(
+    r"^(?:funciona|serve|pode|vamos|quero|gostaria|preciso|prefiro|consigo|"
+    r"consegue|entendo|entendi|combinado|fechado|certo|correto|isso|esse|essa|"
+    r"aqui|agora|hoje|amanha)$",
+    re.IGNORECASE,
+)
 
 
 def _is_usable_person_name(name: str | None) -> bool:
@@ -2632,7 +2639,11 @@ def _resolve_lead_spoken_name(contact_info: dict | None, bridge_name: str | None
     return None
 
 
-def _extract_self_introduced_name(message: str) -> str | None:
+def _extract_self_introduced_name(
+    message: str,
+    *,
+    allow_bare: bool = True,
+) -> str | None:
     """Pega o nome se a pessoa se apresentou. Não trata 'beleza'/'ok' como nome."""
     blob = (message or "").strip()
     if not blob:
@@ -2640,8 +2651,14 @@ def _extract_self_introduced_name(message: str) -> str | None:
     match = _SELF_INTRO_NAME.search(blob)
     if match and _is_usable_person_name(match.group(1)):
         return _spoken_first_name(match.group(1))
+    if not allow_bare:
+        return None
     candidate = blob.rstrip(".!")
-    if _JUST_A_NAME.match(blob) and _is_usable_person_name(candidate):
+    if (
+        _JUST_A_NAME.match(blob)
+        and not _BARE_CONVERSATIONAL_REPLY_RE.fullmatch(candidate)
+        and _is_usable_person_name(candidate)
+    ):
         # "Brasil" / "Goiânia" / "Miami" são lugar, não nome (QA ao vivo 25/08).
         if _country_reply_market(candidate):
             return None
@@ -6520,6 +6537,67 @@ _SCOPE_CLARIFICATION_REPLY = {
     "en": "All good here! Did you reach out to learn more about AYA, or is it about something else?",
     "es": "¡Todo bien por aquí! ¿Llegaste para saber más sobre la AYA o es por otra cosa?",
 }
+_UNRELATED_TASK_REDIRECT = {
+    "pt": (
+        "Eu cuido da conversa comercial sobre a AYA no WhatsApp. "
+        "Quer continuar vendo como ela funcionaria no seu atendimento?"
+    ),
+    "en": (
+        "I handle the sales conversation about AYA on WhatsApp. "
+        "Would you like to continue exploring how it could work for your customer service?"
+    ),
+    "es": (
+        "Me encargo de la conversación comercial sobre AYA en WhatsApp. "
+        "¿Quieres seguir viendo cómo funcionaría en tu atención al cliente?"
+    ),
+}
+_GENERIC_PROGRAMMING_ACTION_RE = re.compile(
+    r"\b(?:retorne|devolva|mande|envie|gere|crie|escreva|faca|implemente|"
+    r"desenvolva|programe|return|give|send|generate|create|write|implement|"
+    r"develop|program|devuelve|devuelveme|genera|crea|escribe|implementa|"
+    r"desarrolla|programa)\b",
+    re.IGNORECASE,
+)
+_GENERIC_PROGRAMMING_SUBJECT_RE = re.compile(
+    r"\b(?:codigo|code|script|python|javascript|typescript|java|algoritmo|"
+    r"algorithm|funcao|function|programa|program|fibonacci)\b",
+    re.IGNORECASE,
+)
+_GENERIC_TASK_ENGLISH_RE = re.compile(
+    r"\b(?:return|give|send|generate|create|write|implement|develop|code|"
+    r"function|algorithm|sequence)\b",
+    re.IGNORECASE,
+)
+_GENERIC_TASK_SPANISH_RE = re.compile(
+    r"\b(?:devuelve|devuelveme|genera|crea|escribe|implementa|desarrolla|"
+    r"funcion|algoritmo|secuencia)\b",
+    re.IGNORECASE,
+)
+
+
+def _unrelated_assistant_task_redirect(message_text: str) -> str | None:
+    """Desvia pedidos genéricos de programação sem bloquear dúvidas sobre a AYA."""
+    normalized = " ".join(_normalize_text(str(message_text or "")).split())
+    if not normalized:
+        return None
+    if not (
+        _GENERIC_PROGRAMMING_ACTION_RE.search(normalized)
+        and _GENERIC_PROGRAMMING_SUBJECT_RE.search(normalized)
+    ):
+        return None
+    if (
+        _has_commercial_scope_signal(normalized)
+        or _has_explicit_purchase_intent(normalized)
+        or _has_strong_purchase_with_technical_need(normalized)
+    ):
+        return None
+    language = _infer_message_language(str(message_text or ""))
+    if not language and _GENERIC_TASK_ENGLISH_RE.search(normalized):
+        language = "en"
+    elif not language and _GENERIC_TASK_SPANISH_RE.search(normalized):
+        language = "es"
+    language = language or "pt"
+    return _UNRELATED_TASK_REDIRECT.get(language) or _UNRELATED_TASK_REDIRECT["pt"]
 
 
 def _write_personal_contacts_atomic(contacts: dict) -> None:
@@ -9468,6 +9546,212 @@ def _transcribe_outgoing_audio(event, media_info: dict) -> None:
         logger.warning(f"[audio-out] Erro ao transcrever áudio enviado: {e}")
 
 
+def _schedule_deterministic_contact_reply(
+    *,
+    chat_id: str,
+    session_id: str,
+    user_message: str,
+    response_text: str,
+    consumed_inbound_token: tuple[str, float] | None,
+) -> bool:
+    """Entrega uma resposta determinística pelo mesmo caminho seguro do LLM.
+
+    O fast path não pode limpar o inbound nem consumir o binding antes de saber que
+    a reserva e o agendamento foram aceitos. Quando qualquer etapa falha, deixamos
+    o turno intacto para o Hermes seguir pelo LLM normal.
+    """
+    clean_text = str(response_text or "").strip()
+    if not chat_id or not session_id or not clean_text or not consumed_inbound_token:
+        return False
+    current_token = _inbound_record_token(
+        _current_inbound_record(chat_id, session_id)
+    )
+    if current_token != consumed_inbound_token:
+        logger.info(
+            "[deterministic-fast-path] inbound mudou antes da reserva chat=%r",
+            chat_id,
+        )
+        return False
+
+    turn_key = _register_contact_turn(chat_id, session_id, user_message)
+    if not turn_key:
+        return False
+
+    try:
+        reserved, reserved_key = _reserve_contact_send(
+            session_id,
+            chat_id,
+            clean_text,
+            expected_turn_key=turn_key,
+        )
+    except Exception as err:
+        logger.warning(
+            "[deterministic-fast-path] reserva falhou chat=%r error=%s",
+            chat_id,
+            type(err).__name__,
+        )
+        return False
+    if not reserved or not reserved_key:
+        return False
+
+    try:
+        scheduled = _schedule_contact_reply(
+            chat_id,
+            clean_text,
+            reserved_key,
+            consumed_inbound_token=consumed_inbound_token,
+        )
+    except Exception as err:
+        # _schedule_contact_reply normalmente libera a reserva quando não consegue
+        # criar a thread. Repetimos a operação de forma idempotente para o caso de
+        # um scheduler customizado levantar antes de fazer sua própria limpeza.
+        _complete_contact_send(reserved_key, delivered=False, uncertain=False)
+        logger.warning(
+            "[deterministic-fast-path] agendamento falhou chat=%r error=%s",
+            chat_id,
+            type(err).__name__,
+        )
+        return False
+    if not scheduled:
+        # Um scheduler customizado pode devolver False sem fazer sua própria
+        # limpeza. Libere a reserva para que o mesmo turno possa seguir pelo LLM.
+        _complete_contact_send(reserved_key, delivered=False, uncertain=False)
+        return False
+
+    # O binding só é consumido depois que o scheduler aceitou o turno. O inbound
+    # em si será removido por _deliver_contact_reply após o messageId confirmado.
+    _consume_turn_from_current_context(turn_key)
+    logger.info(
+        "[deterministic-fast-path] resposta agendada chat=%r turn=%r",
+        chat_id,
+        turn_key,
+    )
+    return True
+
+
+def _try_deterministic_contact_fast_path(
+    *,
+    chat_id: str,
+    session_id: str,
+    user_message: str,
+    inbound_was_voice: bool = False,
+    has_media: bool = False,
+) -> bool:
+    """Tenta somente abertura padrão e agenda, falhando aberto para o LLM.
+
+    Áudio/STT e qualquer mídia ficam fora deste caminho. A resposta só sai quando
+    o texto foi produzido por uma guarda determinística e o token do inbound ainda
+    é o mesmo no momento da reserva.
+    """
+    message = str(user_message or "").strip()
+    if (
+        not chat_id
+        or not session_id
+        or not message
+        or inbound_was_voice
+        or has_media
+    ):
+        return False
+
+    def _current_token() -> tuple[str, float] | None:
+        return _inbound_record_token(_current_inbound_record(chat_id, session_id))
+
+    normalized = _normalize_text(message)
+    opening_candidate = bool(
+        config.plugin_config_subdir == "instance"
+        and _AYA_OPENING_INQUIRY_RE.search(normalized)
+        and not _AYA_OPENING_NEGATIVE_RE.search(normalized)
+    )
+    if opening_candidate:
+        try:
+            history = _fetch_chat_history(chat_id, limit=40)
+        except Exception as err:
+            logger.warning(
+                "[deterministic-fast-path] histórico da abertura indisponível chat=%r error=%s",
+                chat_id,
+                type(err).__name__,
+            )
+            history = ""
+        opening_reply = _enforce_aya_opening_output_gate(
+            "",
+            user_message=message,
+            history=history,
+        )
+        # A guarda pode retornar vazio quando já há uma abertura no histórico ou
+        # quando o histórico não está disponível. Só a constante aprovada autoriza
+        # o bypass do LLM.
+        if opening_reply.strip() == _AYA_STANDARD_OPENING_PT:
+            token = _current_token()
+            if token and _schedule_deterministic_contact_reply(
+                chat_id=chat_id,
+                session_id=session_id,
+                user_message=message,
+                response_text=opening_reply,
+                consumed_inbound_token=token,
+            ):
+                return True
+
+    # Não consultamos a agenda para mensagens sem qualquer sinal determinístico.
+    # Aceites curtos entram como candidato porque podem responder a um convite
+    # registrado no histórico; nesse caso a própria orquestração valida o contexto.
+    calendar_candidate = bool(
+        _calendar_active_state(chat_id)
+        or _mentions_appointment_need(message)
+        or _wants_sales_call(message)
+        or _calendar_requests_availability(message)
+        or _calendar_reschedule_requested(message)
+        or _calendar_date_from_text(message)
+        or _calendar_time_from_text(message)
+        or _calendar_offer_declined(message)
+        or _lead_accepts_pending_call(message)
+    )
+    if not calendar_candidate:
+        return False
+
+    try:
+        history = _fetch_chat_history(chat_id, limit=50)
+    except Exception as err:
+        logger.warning(
+            "[deterministic-fast-path] histórico da agenda indisponível chat=%r error=%s",
+            chat_id,
+            type(err).__name__,
+        )
+        history = ""
+    try:
+        handled = _orchestrate_calendar_turn(
+            chat_id=chat_id,
+            session_id=session_id,
+            user_message=message,
+            history=history,
+        )
+    except Exception as err:
+        logger.warning(
+            "[deterministic-fast-path] orquestração da agenda falhou chat=%r error=%s",
+            chat_id,
+            type(err).__name__,
+        )
+        return False
+    if not handled:
+        return False
+
+    token = _current_token()
+    if not token:
+        return False
+    state = _calendar_state_for_turn(chat_id, token)
+    if not state:
+        # Estado ausente ou pertencente a outro inbound: LLM segue e o inbound fica
+        # pendente para ser limpo apenas após uma entrega confirmada.
+        return False
+    visible_reply = _calendar_visible_reply(state, message)
+    return _schedule_deterministic_contact_reply(
+        chat_id=chat_id,
+        session_id=session_id,
+        user_message=message,
+        response_text=visible_reply,
+        consumed_inbound_token=token,
+    )
+
+
 def pre_gateway_dispatch(*args, **kwargs):
     context = kwargs.get("context")
     if not context:
@@ -10980,10 +11264,15 @@ def pre_gateway_dispatch(*args, **kwargs):
                 event.body = merged
             logger.info(f"[inbound-buf] juntou {buf_chat!r}: {merged[:120]!r}")
 
+        scope_redirect = _unrelated_assistant_task_redirect(
+            str(getattr(event, "text", "") or "")
+        )
+
     # Roteamento Dinâmico de Perfil + Modelo (Dono vs Clientes). No Hermes
     # atual o perfil pertence ao SessionSource e entra no session_key; o antigo
     # `_session_profile_overrides` não existe. Portanto o source precisa ser
     # carimbado ANTES de calcular a chave da sessão.
+    session_key = ""
     try:
         target_profile = "default" if (is_owner and is_self_chat) else "whatsapp"
         event.source.profile = target_profile
@@ -11033,6 +11322,35 @@ def pre_gateway_dispatch(*args, **kwargs):
             getattr(event, "text", "") or "",
             staged_metadata,
         )
+        # Redirect de tarefa genérica também passa pelo binding/reserva do turno.
+        # Se a entrega não puder ser agendada, falha aberto para o LLM sem apagar o
+        # inbound; assim não há envio direto sem watchdog nem deduplicação.
+        if (
+            scope_redirect
+            and not _is_historical_event
+            and not inbound_was_voice
+            and not media_info.get("has_media")
+        ):
+            fast_session = str(session_key or sender_id or chat_id or "")
+            redirect_token = _inbound_record_token(
+                _current_inbound_record(chat_id, fast_session)
+            )
+            if redirect_token and _schedule_deterministic_contact_reply(
+                chat_id=str(chat_id),
+                session_id=fast_session,
+                user_message=str(getattr(event, "text", "") or ""),
+                response_text=scope_redirect,
+                consumed_inbound_token=redirect_token,
+            ):
+                logger.info(
+                    "[commercial-scope] tarefa genérica bloqueada antes do LLM chat=%r",
+                    chat_id,
+                )
+                return {"action": "skip", "reason": "outside-commercial-scope"}
+            logger.warning(
+                "[commercial-scope] redirect não agendado; liberando LLM chat=%r",
+                chat_id,
+            )
         # Handoff determinístico: pedido explícito de humano não pode depender de o
         # modelo lembrar do marcador — em 24/08 a AYA prometeu "uma pessoa vai
         # retomar o atendimento" sem [[HANDOFF]] e ninguém foi avisado. O cooldown
@@ -11047,6 +11365,24 @@ def pre_gateway_dispatch(*args, **kwargs):
             threading.Thread(
                 target=_notify_human_request, daemon=True, name="wa-human-request"
             ).start()
+
+        # Abertura padrão e agenda já têm resposta verificável no código. Tente o
+        # fast path somente para texto; qualquer falha de histórico, reserva,
+        # estado ou scheduler cai aberto para o LLM sem limpar o inbound.
+        if (
+            not _is_historical_event
+            and not inbound_was_voice
+            and not media_info.get("has_media")
+        ):
+            fast_session = str(session_key or sender_id or chat_id or "")
+            if _try_deterministic_contact_fast_path(
+                chat_id=str(chat_id),
+                session_id=fast_session,
+                user_message=str(getattr(event, "text", "") or ""),
+                inbound_was_voice=inbound_was_voice,
+                has_media=bool(media_info.get("has_media")),
+            ):
+                return {"action": "skip", "reason": "deterministic-fast-path"}
 
     return None
 
@@ -11352,7 +11688,11 @@ def pre_llm_call(*args, **kwargs):
     if contact_info is None:
         contact_info = {}
 
-    introduced = _extract_self_introduced_name(str(user_msg_now))
+    established_spoken_name = _resolve_lead_spoken_name(contact_info)
+    introduced = _extract_self_introduced_name(
+        str(user_msg_now),
+        allow_bare=not bool(established_spoken_name),
+    )
     persist_key = matched_contact_key or (
         clean_jid if clean_jid in personal_contacts or phone_number not in personal_contacts else phone_number
     )
@@ -11392,7 +11732,7 @@ def pre_llm_call(*args, **kwargs):
         contact_info["spoken_name"] = introduced
         _persist_spoken_name(persist_key, introduced, personal_contacts)
         logger.info(f"[spoken-name] capturado {introduced!r} de {persist_key}")
-    elif not _resolve_lead_spoken_name(contact_info):
+    elif not established_spoken_name:
         try:
             bridge_name = _resolve_contact_name_from_bridge(sender_id or clean_jid)
         except Exception:
@@ -12004,7 +12344,13 @@ def _orchestrate_calendar_turn(
             with _calendar_state_lock:
                 _calendar_turn_state[chat_id] = retry_state
             return True
-        if _calendar_offer_declined(user_message):
+        has_new_preference = bool(
+            _calendar_date_from_text(user_message, now=now)
+            or preferred_time
+            or direct_period != "any"
+            or _calendar_requests_availability(user_message)
+        )
+        if _calendar_offer_declined(user_message) and not has_new_preference:
             state = {
                 "kind": "collecting",
                 "reply_kind": "ask_preference_after_decline",
@@ -12019,12 +12365,6 @@ def _orchestrate_calendar_turn(
             with _calendar_state_lock:
                 _calendar_turn_state[chat_id] = state
             return True
-        has_new_preference = bool(
-            _calendar_date_from_text(user_message, now=now)
-            or preferred_time
-            or direct_period != "any"
-            or _calendar_requests_availability(user_message)
-        )
         if not has_new_preference:
             offered.update({
                 "kind": "offered",
@@ -12140,6 +12480,20 @@ def _calendar_confirmation_present(text: str) -> bool:
         "",
         folded,
     )
+    natural_acceptance = re.fullmatch(
+        r"(?:"
+        r"funciona(?:\s+(?:pra|para)\s+mim)?"
+        r"|(?:pra|para)\s+mim\s+funciona"
+        r"|(?:isso|esse\s+horario|essa\s+hora)\s+funciona(?:\s+(?:pra|para)\s+mim)?"
+        r"|da\s+certo(?:\s+(?:pra|para)\s+mim)?"
+        r"|vai\s+dar\s+certo"
+        r"|serve(?:\s+(?:pra|para)\s+mim)?"
+        r"|combinado"
+        r")(?:\s+sim)?[.!]*",
+        folded,
+    )
+    if natural_acceptance:
+        return True
     return bool(re.search(
         r"^(?:sim|ok|okay|pode ser|pode sim|fechado|fechou|confirmo|esse|essa|este|esta|"
         r"o primeiro|o segundo|o terceiro|a primeira|a segunda|a terceira|"
@@ -15889,6 +16243,19 @@ def transform_llm_output(*args, **kwargs):
     current_inbound = str(payment_inbound.get("text") or "")
     calendar_state = _calendar_state_for_turn(str(chat_id or ""), consumed_inbound_token)
     calendar_handled = bool(calendar_state)
+    # A defesa de escopo pertence ao turno cuja saída está sendo entregue. Um inbound
+    # mais novo pode vetar pagamento, mas não pode fazer uma resposta antiga escapar
+    # desta guarda nem provocar dois redirects para a mensagem nova.
+    scope_inbound = str(consumed_inbound.get("text") or current_inbound)
+    scope_redirect = _unrelated_assistant_task_redirect(scope_inbound)
+    if scope_redirect:
+        response_text = scope_redirect
+        calendar_state = {}
+        calendar_handled = False
+        logger.warning(
+            "[commercial-scope] saída genérica substituída antes da entrega chat=%r",
+            chat_id,
+        )
 
     if any(re.search(p, str(response_text), re.IGNORECASE) for p in _GATEWAY_PROVIDER_ERROR_PATTERNS):
         logger.warning(f"[transform_llm_output] erro de provider/gateway suprimido chat={chat_id!r}: {response_text!r}")

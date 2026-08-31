@@ -324,6 +324,10 @@ services:
             wa = plats.get('whatsapp') if isinstance(plats.get('whatsapp'), dict) else {}
             wa['enabled'] = True
             wa['send_read_receipts'] = wa_send_read_receipts
+            # O bridge já agrupa mensagens rápidas e mantém o indicador de digitação.
+            # Desative o segundo debounce do adaptador Hermes para não somar mais 5s.
+            wa['text_batch_delay_seconds'] = 0.0
+            wa['text_batch_split_delay_seconds'] = 0.0
             if owner_jid:
                 wa['home_channel'] = {
                     'platform': 'whatsapp',

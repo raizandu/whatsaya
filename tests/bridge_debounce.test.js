@@ -28,12 +28,17 @@ const {
 
 const presenceUpdates = [];
 const readReceiptKeys = [];
+let blockReadReceipt = false;
+let releaseReadReceipt = null;
 setSock({
   sendPresenceUpdate: async (state, chatId) => {
     presenceUpdates.push({ state, chatId, at: Date.now() });
   },
   readMessages: async (keys) => {
     readReceiptKeys.push(...keys);
+    if (blockReadReceipt) {
+      await new Promise((resolve) => { releaseReadReceipt = resolve; });
+    }
   },
 });
 
@@ -56,7 +61,21 @@ test('quick text fragments become one ordered inbound batch', async () => {
   presenceUpdates.length = 0;
   readReceiptKeys.length = 0;
 
-  await onMessagesUpsert(inbound('debounce-1', 'Sim, pode ser'));
+  blockReadReceipt = true;
+  const processing = onMessagesUpsert(inbound('debounce-1', 'Sim, pode ser'));
+  const processingOutcome = await Promise.race([
+    processing.then(() => 'completed'),
+    wait(50).then(() => 'blocked'),
+  ]);
+  releaseReadReceipt?.();
+  blockReadReceipt = false;
+  await processing;
+
+  assert.strictEqual(
+    processingOutcome,
+    'completed',
+    'a slow read-receipt acknowledgement must not delay composing or start the debounce late',
+  );
   assert.deepStrictEqual(readReceiptKeys.map(key => key.id), ['debounce-1']);
   assert.strictEqual(presenceUpdates[0]?.state, 'composing');
   assert.strictEqual(presenceUpdates[0]?.chatId, 'client123@s.whatsapp.net');

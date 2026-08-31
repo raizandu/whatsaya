@@ -267,13 +267,16 @@ function sleep(ms) {
 
 function sendWithTimeout(chatId, payload, timeoutMs = SEND_TIMEOUT_MS) {
   let timer;
+  const baileysPayload = typeof payload?.text === 'string' && payload.linkPreview === undefined
+    ? { ...payload, linkPreview: null }
+    : payload;
   const timeoutPromise = new Promise((_, reject) => {
     timer = setTimeout(
       () => reject(new Error(`sendMessage timed out after ${timeoutMs / 1000}s`)),
       timeoutMs,
     );
   });
-  return Promise.race([sock.sendMessage(chatId, payload), timeoutPromise])
+  return Promise.race([sock.sendMessage(chatId, baileysPayload), timeoutPromise])
     .finally(() => clearTimeout(timer));
 }
 
@@ -897,9 +900,6 @@ let onMessagesUpsert = async ({ messages, type }) => {
       }
       continue;
     }
-    if (!HISTORY_PERSIST_DISABLED) {
-      persistLiveMessage(msg);
-    }
     if (WHATSAPP_DEBUG) {
       try {
         console.log(JSON.stringify({
@@ -936,6 +936,12 @@ let onMessagesUpsert = async ({ messages, type }) => {
         console.log(`[bridge] LID chatId ${cleanLid} resolvido via cache para ${chatId}`);
       }
       // Se nao temos no cache, mantemos o LID — whatsapp_manager.py resolve via _resolve_phone_from_jid
+    }
+
+    if (!HISTORY_PERSIST_DISABLED) {
+      const historyKey = { ...msg.key, remoteJid: chatId };
+      if (msg.key.participant) historyKey.participant = senderId;
+      persistLiveMessage({ ...msg, key: historyKey });
     }
 
     const isGroup = chatId.endsWith('@g.us');
@@ -1091,7 +1097,7 @@ let onMessagesUpsert = async ({ messages, type }) => {
         } catch {}
         continue;
       }
-      await markInboundMessageRead(msg);
+      void markInboundMessageRead(msg);
     }
 
     const messageContent = getMessageContent(msg);
@@ -2502,6 +2508,7 @@ export {
   getRecentlySentIds,
   getMessageQueue,
   setSock,
+  sendWithTimeout,
   isSystemError,
   isCoreStatusNotice,
   getRecentLogs,

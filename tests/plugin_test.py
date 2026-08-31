@@ -87,6 +87,75 @@ class BaseWhatsAppManagerTest(unittest.IsolatedAsyncioTestCase):
 
 
 class TestMessageRoutingAndDispatch(BaseWhatsAppManagerTest):
+    def test_unrelated_programming_task_is_redirected_before_llm(self):
+        pre_dispatch = self.ctx.hooks.get("pre_gateway_dispatch")
+        event = MagicMock()
+        event.source.platform = "whatsapp"
+        event.source.user_id = "556281405459@s.whatsapp.net"
+        event.source.chat_id = "556281405459@s.whatsapp.net"
+        event.text = (
+            "me retorne um código python que implemente a sequência de fibonacci"
+        )
+        event.raw = {"messageId": "msg-unrelated-python"}
+        event.raw_message = {"fromMe": False}
+        event.is_historical = False
+        event.has_media = False
+
+        gateway = MagicMock()
+        gateway._session_key_for_source.return_value = "session-unrelated-python"
+        gateway._session_model_overrides = {}
+
+        with patch("whatsapp_manager._human_send") as send, patch(
+            "whatsapp_manager._check_bot_paused", return_value=False
+        ), patch(
+            "whatsapp_manager._check_chat_silenced", return_value=False
+        ), patch(
+            "whatsapp_manager._followup_note_activity"
+        ) as note_activity, patch(
+            "whatsapp_manager._schedule_contact_reply", return_value=True
+        ) as schedule:
+            result = pre_dispatch(
+                "pre_gateway_dispatch", {"event": event, "gateway": gateway}
+            )
+
+        self.assertEqual(
+            result, {"action": "skip", "reason": "outside-commercial-scope"}
+        )
+        send.assert_not_called()
+        schedule.assert_called_once()
+        visible = schedule.call_args.args[1]
+        self.assertIn("AYA", visible)
+        self.assertIn("comercial", visible)
+        self.assertTrue(visible.rstrip().endswith("?"), visible)
+        self.assertNotIn("fibonacci", visible.lower())
+        note_activity.assert_called_once()
+
+    def test_relevant_product_technical_question_still_reaches_llm(self):
+        pre_dispatch = self.ctx.hooks.get("pre_gateway_dispatch")
+        event = MagicMock()
+        event.source.platform = "whatsapp"
+        event.source.user_id = "556281405459@s.whatsapp.net"
+        event.source.chat_id = "556281405459@s.whatsapp.net"
+        event.text = "A AYA consegue integrar um script Python com o meu CRM?"
+        event.raw = {"messageId": "msg-relevant-python"}
+        event.raw_message = {"fromMe": False}
+        event.is_historical = False
+        event.has_media = False
+
+        gateway = MagicMock()
+        gateway._session_key_for_source.return_value = "session-relevant-python"
+        gateway._session_model_overrides = {}
+
+        with patch("whatsapp_manager._human_send") as send, patch(
+            "whatsapp_manager._check_bot_paused", return_value=False
+        ), patch("whatsapp_manager._check_chat_silenced", return_value=False):
+            result = pre_dispatch(
+                "pre_gateway_dispatch", {"event": event, "gateway": gateway}
+            )
+
+        self.assertIsNone(result)
+        send.assert_not_called()
+
     def test_client_profile_is_stamped_before_session_key_without_legacy_override(self):
         """Core 0.20.5 routes profiles through SessionSource.profile.
 
@@ -599,6 +668,66 @@ class TestMessageRoutingAndDispatch(BaseWhatsAppManagerTest):
 
 
 class TestLLMContextAndPrompting(BaseWhatsAppManagerTest):
+    def test_bare_reply_does_not_overwrite_established_spoken_name(self):
+        pre_llm = self.ctx.hooks.get("pre_llm_call")
+        contact_key = "556281405459@s.whatsapp.net"
+        personal_contacts = {
+            contact_key: {
+                "name": "Tony",
+                "relationship": "Cliente",
+                "summary": "Lead da WhatsAYA.",
+                "intent": "Conhecer a AYA.",
+                "frequency": "esporádica",
+                "language": "pt",
+            }
+        }
+        context = {
+            "platform": "whatsapp",
+            "sender_id": contact_key,
+            "user_message": "Gustavo",
+        }
+
+        with patch("whatsapp_manager._load_support_files", return_value=("AYA", "rules")), \
+             patch("whatsapp_manager._load_personal_contacts", return_value=personal_contacts), \
+             patch("whatsapp_manager._fetch_chat_history", return_value=""), \
+             patch("whatsapp_manager._orchestrate_calendar_turn"), \
+             patch("whatsapp_manager._persist_spoken_name") as persist:
+            result = pre_llm("pre_llm_call", context)
+
+        persist.assert_not_called()
+        self.assertEqual(personal_contacts[contact_key]["name"], "Tony")
+        self.assertNotIn("spoken_name", personal_contacts[contact_key])
+        self.assertIn("Nome para usar: Tony", result["context"])
+
+    def test_explicit_introduction_can_correct_established_spoken_name(self):
+        pre_llm = self.ctx.hooks.get("pre_llm_call")
+        contact_key = "556281405459@s.whatsapp.net"
+        personal_contacts = {
+            contact_key: {
+                "name": "Tony",
+                "relationship": "Cliente",
+                "summary": "Lead da WhatsAYA.",
+                "intent": "Conhecer a AYA.",
+                "frequency": "esporádica",
+                "language": "pt",
+            }
+        }
+        context = {
+            "platform": "whatsapp",
+            "sender_id": contact_key,
+            "user_message": "me chamo Gustavo",
+        }
+
+        with patch("whatsapp_manager._load_support_files", return_value=("AYA", "rules")), \
+             patch("whatsapp_manager._load_personal_contacts", return_value=personal_contacts), \
+             patch("whatsapp_manager._fetch_chat_history", return_value=""), \
+             patch("whatsapp_manager._orchestrate_calendar_turn"), \
+             patch("whatsapp_manager._persist_spoken_name") as persist:
+            result = pre_llm("pre_llm_call", context)
+
+        persist.assert_called_once_with(contact_key, "Gustavo", personal_contacts)
+        self.assertIn("Nome para usar: Gustavo", result["context"])
+
     def test_pre_llm_call_owner_context(self):
         pre_llm = self.ctx.hooks.get("pre_llm_call")
         self.assertIsNotNone(pre_llm)
@@ -3790,6 +3919,61 @@ class TestBestContactName(BaseWhatsAppManagerTest):
         from whatsapp_manager import _best_contact_name
         name, source = _best_contact_name("5511@s", "5511@s.whatsapp.net", None, "5511")
         self.assertEqual(source, "fallback")
+
+    def test_bare_confirmation_or_verb_is_not_a_person_name(self):
+        from whatsapp_manager import (
+            _extract_self_introduced_name,
+            _resolve_lead_spoken_name,
+        )
+
+        for message in ("funciona", "Funciona", "pode", "Combinado", "entendi"):
+            with self.subTest(message=message):
+                self.assertIsNone(_extract_self_introduced_name(message))
+        self.assertEqual(
+            _resolve_lead_spoken_name(
+                {"spoken_name": "Funciona", "name": "Tony"}
+            ),
+            "Tony",
+        )
+
+    def test_proper_bare_name_and_explicit_introduction_are_preserved(self):
+        from whatsapp_manager import _extract_self_introduced_name
+
+        self.assertEqual(_extract_self_introduced_name("Tony"), "Tony")
+        self.assertEqual(_extract_self_introduced_name("tony"), "Tony")
+        self.assertEqual(_extract_self_introduced_name("me chamo Tony"), "Tony")
+        self.assertEqual(
+            _extract_self_introduced_name("me chamo Tony", allow_bare=False),
+            "Tony",
+        )
+        self.assertIsNone(
+            _extract_self_introduced_name("Gustavo", allow_bare=False)
+        )
+
+    def test_scope_redirect_uses_the_request_language(self):
+        from whatsapp_manager import _unrelated_assistant_task_redirect
+
+        english = _unrelated_assistant_task_redirect(
+            "write Python code that implements the Fibonacci sequence"
+        )
+        spanish = _unrelated_assistant_task_redirect(
+            "escribe un código Python que implemente la secuencia de Fibonacci"
+        )
+
+        self.assertTrue(english.startswith("I handle the sales conversation"), english)
+        self.assertTrue(english.rstrip().endswith("?"), english)
+        self.assertTrue(spanish.startswith("Me encargo de la conversación"), spanish)
+        self.assertTrue(spanish.rstrip().endswith("?"), spanish)
+
+    def test_scope_redirect_preserves_strong_purchase_with_technical_need(self):
+        from whatsapp_manager import _unrelated_assistant_task_redirect
+
+        self.assertIsNone(
+            _unrelated_assistant_task_redirect(
+                "Quero contratar a AYA. Ela pode criar um script Python para subir "
+                "os documentos dos clientes no meu sistema?"
+            )
+        )
 
 
 class TestCallLlmApi(BaseWhatsAppManagerTest):
@@ -8079,6 +8263,39 @@ class TestTransformLlmOutput(BaseWhatsAppManagerTest):
         )
 
     @patch("whatsapp_manager._human_send")
+    def test_unrelated_programming_task_cannot_leak_code_from_model(self, mock_send):
+        session = "556281405459@s.whatsapp.net"
+        inbound = (
+            "me retorne um código python que implemente a sequência de fibonacci"
+        )
+        model_response = (
+            "```python\n"
+            "def fibonacci(n):\n"
+            "    return n if n < 2 else fibonacci(n - 1) + fibonacci(n - 2)\n"
+            "```"
+        )
+        whatsapp_manager._track_inbound(session, "msg-fibonacci-output", inbound)
+        whatsapp_manager._register_contact_turn(session, session, inbound)
+        whatsapp_manager._track_inbound(session, "msg-after-fibonacci", "Oi, tudo bem?")
+
+        with patch("whatsapp_manager._calendar_state_for_turn", return_value={}):
+            result = self._call(session, model_response)
+
+        self.assertEqual(result, "\n")
+        mock_send.assert_called_once()
+        visible = mock_send.call_args.args[1]
+        folded = whatsapp_manager._normalize_text(visible)
+        self.assertIn("aya", folded)
+        self.assertIn("comercial", folded)
+        self.assertNotIn("fibonacci", folded)
+        self.assertNotIn("```", visible)
+        self.assertNotIn("def ", visible)
+        self.assertTrue(visible.rstrip().endswith("?"), visible)
+        self.assertEqual(
+            whatsapp_manager._current_inbound_text(session), "Oi, tudo bem?"
+        )
+
+    @patch("whatsapp_manager._human_send")
     def test_first_commercial_aya_inquiry_uses_standard_opening(self, mock_send):
         mock_send.return_value = "wamid-opening-first"
         session = "5511888888888@s.whatsapp.net"
@@ -10922,6 +11139,372 @@ class TestQaFinalBrasilGoLive(unittest.TestCase):
         self.assertNotIn("sdr", folded)
         self.assertIn("atendente comercial", folded)
         self.assertEqual(folded.count("?"), 1)
+
+
+class TestDeterministicContactFastPath(BaseWhatsAppManagerTest):
+    """Respostas fixas passam pelo mesmo binding/reserva usado pelo LLM."""
+
+    def setUp(self):
+        super().setUp()
+        self.instance_config_patcher = patch.dict(
+            os.environ, {"WHATSAPP_CONFIG_SUBDIR": "instance"}, clear=False
+        )
+        self.instance_config_patcher.start()
+        whatsapp_manager._turn_key.clear()
+        whatsapp_manager._turn_sent.clear()
+        whatsapp_manager._turn_inflight.clear()
+        whatsapp_manager._turn_inbound.clear()
+        whatsapp_manager._turn_context_bindings.set(())
+        whatsapp_manager._pending_inbound.clear()
+        whatsapp_manager._calendar_turn_state.clear()
+
+    def tearDown(self):
+        whatsapp_manager._turn_key.clear()
+        whatsapp_manager._turn_sent.clear()
+        whatsapp_manager._turn_inflight.clear()
+        whatsapp_manager._turn_inbound.clear()
+        whatsapp_manager._turn_context_bindings.set(())
+        whatsapp_manager._pending_inbound.clear()
+        whatsapp_manager._calendar_turn_state.clear()
+        self.instance_config_patcher.stop()
+        super().tearDown()
+
+    @staticmethod
+    def _stage(chat_id, message_id, text):
+        whatsapp_manager._track_inbound(chat_id, message_id, text)
+        return whatsapp_manager._inbound_record_token(
+            whatsapp_manager._current_inbound_record(chat_id, chat_id)
+        )
+
+    @staticmethod
+    def _dispatch_event(chat_id, message_id, text):
+        event = MagicMock()
+        event.source.platform = "whatsapp"
+        event.source.user_id = chat_id
+        event.source.chat_id = chat_id
+        event.text = text
+        event.raw = {"messageId": message_id}
+        event.raw_message = {"fromMe": False}
+        event.is_historical = False
+        event.has_media = False
+        gateway = MagicMock()
+        gateway._session_key_for_source.return_value = f"session:{message_id}"
+        gateway._session_model_overrides = {}
+        return event, gateway
+
+    def test_hook_primeira_abertura_agenda_exata_e_retorna_skip(self):
+        chat = "5511888888888@s.whatsapp.net"
+        text = "Oi! Queria entender como a AYA funciona"
+        event, gateway = self._dispatch_event(chat, "hook-opening-1", text)
+
+        with patch.dict(
+            os.environ, {"WHATSAPP_INBOUND_BUFFER_S": "0"}, clear=False
+        ), patch(
+            "whatsapp_manager._check_bot_paused", return_value=False
+        ), patch(
+            "whatsapp_manager._check_chat_silenced", return_value=False
+        ), patch(
+            "whatsapp_manager._get_active_owner_status", return_value=None
+        ), patch(
+            "whatsapp_manager._followup_note_activity"
+        ), patch(
+            "whatsapp_manager._fetch_chat_history",
+            return_value=f"Lead: {text}",
+        ), patch(
+            "whatsapp_manager._schedule_contact_reply", return_value=True
+        ) as schedule:
+            result = self.ctx.hooks["pre_gateway_dispatch"](
+                "pre_gateway_dispatch", {"event": event, "gateway": gateway}
+            )
+
+        self.assertEqual(
+            result, {"action": "skip", "reason": "deterministic-fast-path"}
+        )
+        schedule.assert_called_once()
+        self.assertEqual(schedule.call_args.args[0], chat)
+        self.assertEqual(
+            schedule.call_args.args[1], whatsapp_manager._AYA_STANDARD_OPENING_PT
+        )
+        self.assertIn("consumed_inbound_token", schedule.call_args.kwargs)
+
+    def test_hook_abertura_com_aya_previa_cai_no_llm(self):
+        chat = "5511777777777@s.whatsapp.net"
+        text = "Queria entender como a AYA funciona"
+        event, gateway = self._dispatch_event(chat, "hook-opening-repeat", text)
+        history = (
+            "Lead: Oi! Queria entender como a AYA funciona\n"
+            "AYA: Oii, seja muito bem-vinda(o)! Qual o seu negócio hoje?\n"
+            f"Lead: {text}"
+        )
+
+        with patch.dict(
+            os.environ, {"WHATSAPP_INBOUND_BUFFER_S": "0"}, clear=False
+        ), patch(
+            "whatsapp_manager._check_bot_paused", return_value=False
+        ), patch(
+            "whatsapp_manager._check_chat_silenced", return_value=False
+        ), patch(
+            "whatsapp_manager._get_active_owner_status", return_value=None
+        ), patch(
+            "whatsapp_manager._followup_note_activity"
+        ), patch(
+            "whatsapp_manager._fetch_chat_history", return_value=history
+        ), patch(
+            "whatsapp_manager._schedule_contact_reply"
+        ) as schedule:
+            result = self.ctx.hooks["pre_gateway_dispatch"](
+                "pre_gateway_dispatch", {"event": event, "gateway": gateway}
+            )
+
+        self.assertIsNone(result)
+        schedule.assert_not_called()
+
+    def test_primeira_abertura_agenda_resposta_fixa_e_consumes_binding(self):
+        chat = "5511888888888@s.whatsapp.net"
+        text = "Oi! Queria entender como a AYA funciona"
+        token = self._stage(chat, "fast-opening-1", text)
+
+        with patch(
+            "whatsapp_manager._fetch_chat_history",
+            return_value=f"Lead: {text}",
+        ), patch(
+            "whatsapp_manager._schedule_contact_reply",
+            return_value=True,
+        ) as schedule:
+            handled = whatsapp_manager._try_deterministic_contact_fast_path(
+                chat_id=chat,
+                session_id=chat,
+                user_message=text,
+            )
+
+        self.assertTrue(handled)
+        schedule.assert_called_once()
+        self.assertEqual(schedule.call_args.args[0], chat)
+        self.assertEqual(
+            schedule.call_args.args[1], whatsapp_manager._AYA_STANDARD_OPENING_PT
+        )
+        self.assertEqual(schedule.call_args.kwargs["consumed_inbound_token"], token)
+        self.assertEqual(whatsapp_manager._turn_context_bindings.get(), ())
+
+    def test_abertura_repetida_com_aya_no_historico_cai_no_llm(self):
+        chat = "5511777777777@s.whatsapp.net"
+        text = "Queria entender como a AYA funciona"
+        self._stage(chat, "fast-opening-repeat", text)
+        history = (
+            "Lead: Oi! Queria entender como a AYA funciona\n"
+            "AYA: Oii, seja muito bem-vinda(o)! Qual o seu negócio hoje?\n"
+            f"Lead: {text}"
+        )
+
+        with patch(
+            "whatsapp_manager._fetch_chat_history", return_value=history
+        ), patch("whatsapp_manager._schedule_contact_reply") as schedule:
+            handled = whatsapp_manager._try_deterministic_contact_fast_path(
+                chat_id=chat,
+                session_id=chat,
+                user_message=text,
+            )
+
+        self.assertFalse(handled)
+        schedule.assert_not_called()
+
+    def test_calendario_offered_usa_token_exato_e_agenda(self):
+        chat = "5511666666666@s.whatsapp.net"
+        text = "sim"
+        token = self._stage(chat, "fast-calendar-offered", text)
+        state = {
+            "kind": "offered",
+            "reply_kind": "choice_required",
+            "inbound_token": token,
+            "expires_at": time.time() + 300,
+            "slots": [
+                {
+                    "start": "2099-08-31T15:00:00-03:00",
+                    "end": "2099-08-31T15:30:00-03:00",
+                }
+            ],
+        }
+        whatsapp_manager._calendar_turn_state[chat] = dict(state)
+
+        with patch(
+            "whatsapp_manager._fetch_chat_history", return_value=""
+        ), patch(
+            "whatsapp_manager._orchestrate_calendar_turn", return_value=True
+        ) as orchestrate, patch(
+            "whatsapp_manager._schedule_contact_reply", return_value=True
+        ) as schedule:
+            handled = whatsapp_manager._try_deterministic_contact_fast_path(
+                chat_id=chat,
+                session_id=chat,
+                user_message=text,
+            )
+
+        self.assertTrue(handled)
+        orchestrate.assert_called_once()
+        schedule.assert_called_once()
+        self.assertEqual(schedule.call_args.kwargs["consumed_inbound_token"], token)
+        self.assertIn("15:00", schedule.call_args.args[1])
+
+    def test_calendario_booked_usa_token_exato_e_link(self):
+        chat = "5511555555555@s.whatsapp.net"
+        text = "combinado"
+        token = self._stage(chat, "fast-calendar-booked", text)
+        state = {
+            "kind": "booked",
+            "action": "book",
+            "inbound_token": token,
+            "expires_at": time.time() + 300,
+            "result": {
+                "start": "2099-08-31T15:00:00-03:00",
+                "end": "2099-08-31T15:30:00-03:00",
+                "meet_link": "https://meet.google.com/abc-defg-hij",
+            },
+        }
+        whatsapp_manager._calendar_turn_state[chat] = dict(state)
+
+        with patch(
+            "whatsapp_manager._fetch_chat_history", return_value=""
+        ), patch(
+            "whatsapp_manager._orchestrate_calendar_turn", return_value=True
+        ), patch(
+            "whatsapp_manager._schedule_contact_reply", return_value=True
+        ) as schedule:
+            handled = whatsapp_manager._try_deterministic_contact_fast_path(
+                chat_id=chat,
+                session_id=chat,
+                user_message=text,
+            )
+
+        self.assertTrue(handled)
+        self.assertEqual(schedule.call_args.kwargs["consumed_inbound_token"], token)
+        self.assertIn("meet.google.com/abc-defg-hij", schedule.call_args.args[1])
+
+    def test_estado_ausente_falha_aberto_e_preserva_inbound(self):
+        chat = "5511444444444@s.whatsapp.net"
+        text = "sim"
+        token = self._stage(chat, "fast-calendar-no-state", text)
+
+        with patch(
+            "whatsapp_manager._fetch_chat_history", return_value=""
+        ), patch(
+            "whatsapp_manager._orchestrate_calendar_turn", return_value=True
+        ), patch(
+            "whatsapp_manager._calendar_state_for_turn", return_value={}
+        ), patch("whatsapp_manager._schedule_contact_reply") as schedule:
+            handled = whatsapp_manager._try_deterministic_contact_fast_path(
+                chat_id=chat,
+                session_id=chat,
+                user_message=text,
+            )
+
+        self.assertFalse(handled)
+        schedule.assert_not_called()
+        self.assertEqual(
+            whatsapp_manager._inbound_record_token(
+                whatsapp_manager._current_inbound_record(chat, chat)
+            ),
+            token,
+        )
+
+    def test_scheduler_falha_aberto_sem_consumir_binding(self):
+        chat = "5511333333333@s.whatsapp.net"
+        text = "sim"
+        token = self._stage(chat, "fast-calendar-scheduler-fail", text)
+        state = {
+            "kind": "offered",
+            "reply_kind": "choice_required",
+            "inbound_token": token,
+            "expires_at": time.time() + 300,
+            "slots": [],
+        }
+        whatsapp_manager._calendar_turn_state[chat] = dict(state)
+
+        with patch(
+            "whatsapp_manager._fetch_chat_history", return_value=""
+        ), patch(
+            "whatsapp_manager._orchestrate_calendar_turn", return_value=True
+        ), patch(
+            "whatsapp_manager._schedule_contact_reply", return_value=False
+        ) as schedule:
+            handled = whatsapp_manager._try_deterministic_contact_fast_path(
+                chat_id=chat,
+                session_id=chat,
+                user_message=text,
+            )
+
+        self.assertFalse(handled)
+        schedule.assert_called_once()
+        self.assertTrue(whatsapp_manager._turn_context_bindings.get())
+        self.assertEqual(
+            whatsapp_manager._inbound_record_token(
+                whatsapp_manager._current_inbound_record(chat, chat)
+            ),
+            token,
+        )
+
+    def test_inbound_novo_nao_e_limpado_pelo_turno_deterministico_anterior(self):
+        chat = "5511222222222@s.whatsapp.net"
+        text = "sim"
+        old_token = self._stage(chat, "fast-calendar-old", text)
+        state = {
+            "kind": "booked",
+            "action": "book",
+            "inbound_token": old_token,
+            "expires_at": time.time() + 300,
+            "result": {
+                "start": "2099-08-31T15:00:00-03:00",
+                "end": "2099-08-31T15:30:00-03:00",
+                "meet_link": "https://meet.google.com/abc-defg-hij",
+            },
+        }
+        whatsapp_manager._calendar_turn_state[chat] = dict(state)
+
+        def deliver_and_receive_new(*args, **kwargs):
+            whatsapp_manager._track_inbound(chat, "fast-calendar-new", "mensagem nova")
+            return "wamid-fast-calendar"
+
+        with patch(
+            "whatsapp_manager._fetch_chat_history", return_value=""
+        ), patch(
+            "whatsapp_manager._orchestrate_calendar_turn", return_value=True
+        ), patch(
+            "whatsapp_manager._deliver_contact_reply",
+            side_effect=deliver_and_receive_new,
+        ), patch("whatsapp_manager._assert_delivery_allowed"), patch(
+            "whatsapp_manager._persist_turn_sent_to_disk"
+        ), patch.object(whatsapp_manager, "_HUMAN_DELIVER_SYNC", True):
+            handled = whatsapp_manager._try_deterministic_contact_fast_path(
+                chat_id=chat,
+                session_id=chat,
+                user_message=text,
+            )
+
+        self.assertTrue(handled)
+        self.assertEqual(
+            whatsapp_manager._current_inbound_text(chat, chat), "mensagem nova"
+        )
+        self.assertNotEqual(
+            whatsapp_manager._current_inbound_record(chat, chat).get("message_id"),
+            "fast-calendar-old",
+        )
+
+    def test_audio_nao_entra_no_fast_path(self):
+        chat = "5511111111111@s.whatsapp.net"
+        text = "Oi! Queria entender como a AYA funciona"
+        self._stage(chat, "fast-audio", text)
+        with patch("whatsapp_manager._fetch_chat_history") as history, patch(
+            "whatsapp_manager._schedule_contact_reply"
+        ) as schedule:
+            handled = whatsapp_manager._try_deterministic_contact_fast_path(
+                chat_id=chat,
+                session_id=chat,
+                user_message=text,
+                inbound_was_voice=True,
+            )
+
+        self.assertFalse(handled)
+        history.assert_not_called()
+        schedule.assert_not_called()
 
 
 if __name__ == "__main__":

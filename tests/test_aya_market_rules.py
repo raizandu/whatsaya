@@ -64,6 +64,10 @@ class TestAyaMarketRules(unittest.TestCase):
             COMPOSE,
         )
 
+    def test_bridge_is_the_only_whatsapp_text_debounce(self):
+        self.assertIn("wa['text_batch_delay_seconds'] = 0.0", COMPOSE)
+        self.assertIn("wa['text_batch_split_delay_seconds'] = 0.0", COMPOSE)
+
     def test_runtime_does_not_stack_legacy_first_response_delay(self):
         self.assertIn(
             "WHATSAPP_FIRST_RESPONSE_DELAY_S=${WHATSAPP_FIRST_RESPONSE_DELAY_S:-0}",

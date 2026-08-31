@@ -28,6 +28,7 @@ const {
   getRecentlySentIds,
   getMessageQueue,
   setSock,
+  sendWithTimeout,
   isSystemError,
   getRecentLogs,
   resolveContactName,
@@ -113,6 +114,11 @@ test('WhatsApp Bridge Regression Tests', async (t) => {
     );
     assert.ok(mockSock.sentMessages.length > 0, 'Should send pause confirmation message');
     assert.ok(mockSock.sentMessages[0].payload.text.includes('pausado'), 'Confirmation should contain paused text');
+    assert.strictEqual(
+      mockSock.sentMessages[0].payload.linkPreview,
+      null,
+      'text sends must explicitly disable Baileys URL preview fetching',
+    );
 
     // Clear confirmation message
     mockSock.sentMessages = [];
@@ -141,6 +147,16 @@ test('WhatsApp Bridge Regression Tests', async (t) => {
     );
     assert.ok(mockSock.sentMessages.length > 0, 'Should send resume confirmation message');
     assert.ok(mockSock.sentMessages[0].payload.text.includes('ativo'), 'Confirmation should contain active text');
+  });
+
+  await t.test('1b. Meet URL stays clickable without Baileys fetching a preview', async () => {
+    const message = 'Reunião confirmada: https://meet.google.com/abc-defg-hij';
+    await sendWithTimeout('client123@s.whatsapp.net', { text: message });
+
+    assert.deepStrictEqual(mockSock.sentMessages[0].payload, {
+      text: message,
+      linkPreview: null,
+    });
   });
 
   await t.test('2. Commands in Client Chat should NOT be intercepted (bridge remains unchanged)', async () => {
