@@ -90,9 +90,11 @@ class FollowupPluginIntegrationTest(unittest.TestCase):
         with patch.object(wm, "_followup_enabled", return_value=True), \
              patch.object(wm, "_check_bot_paused", return_value=False), \
              patch.object(wm, "_followup_engine", return_value=engine), \
+             patch.object(wm, "_assert_delivery_allowed"), \
              patch.object(wm, "_followup_bridge_send", return_value="wamid-123") as send:
             self.assertEqual(wm._tick_followups(), 1)
         send.assert_called_once()
+        self.assertEqual(send.call_args.kwargs["require_ai_access"], True)
         self.assertEqual(engine.sent, [(7, "wamid-123")])
         self.assertEqual(engine.uncertain, [])
         self.assertEqual(engine.failed, [])
@@ -102,6 +104,7 @@ class FollowupPluginIntegrationTest(unittest.TestCase):
         with patch.object(wm, "_followup_enabled", return_value=True), \
              patch.object(wm, "_check_bot_paused", return_value=False), \
              patch.object(wm, "_followup_engine", return_value=engine), \
+             patch.object(wm, "_assert_delivery_allowed"), \
              patch.object(wm, "_followup_bridge_send", side_effect=socket.timeout("ambiguous")):
             self.assertEqual(wm._tick_followups(), 0)
         self.assertEqual(engine.sent, [])
@@ -114,6 +117,7 @@ class FollowupPluginIntegrationTest(unittest.TestCase):
         with patch.object(wm, "_followup_enabled", return_value=True), \
              patch.object(wm, "_check_bot_paused", return_value=False), \
              patch.object(wm, "_followup_engine", return_value=engine), \
+             patch.object(wm, "_assert_delivery_allowed"), \
              patch.object(wm, "_followup_bridge_send", side_effect=error):
             self.assertEqual(wm._tick_followups(), 0)
         self.assertEqual(engine.sent, [])
@@ -123,17 +127,83 @@ class FollowupPluginIntegrationTest(unittest.TestCase):
     def test_bridge_sender_returns_real_id(self):
         response = MagicMock()
         response.read.return_value = json.dumps({"success": True, "messageId": "abc-123"}).encode()
-        with patch("urllib.request.urlopen") as urlopen:
+        with patch.object(wm, "_assert_delivery_allowed") as gate, \
+             patch("urllib.request.urlopen") as urlopen:
             urlopen.return_value.__enter__.return_value = response
             self.assertEqual(wm._followup_bridge_send(JOB["chat_id"], "mensagem contextual"), "abc-123")
+        gate.assert_called_once_with(JOB["chat_id"], require_ai_access=True)
 
     def test_bridge_sender_rejects_success_without_id(self):
         response = MagicMock()
         response.read.return_value = json.dumps({"success": True}).encode()
-        with patch("urllib.request.urlopen") as urlopen:
+        with patch.object(wm, "_assert_delivery_allowed"), \
+             patch("urllib.request.urlopen") as urlopen:
             urlopen.return_value.__enter__.return_value = response
             with self.assertRaises(RuntimeError):
                 wm._followup_bridge_send(JOB["chat_id"], "mensagem contextual")
+
+    def test_bridge_sender_policy_block_prevents_post(self):
+        with patch.object(
+            wm,
+            "_assert_delivery_allowed",
+            side_effect=wm.DeliveryBlocked("ai desabilitada"),
+        ) as gate, patch("urllib.request.urlopen") as urlopen:
+            with self.assertRaises(wm.DeliveryBlocked):
+                wm._followup_bridge_send(JOB["chat_id"], "mensagem contextual")
+
+        gate.assert_called_once_with(JOB["chat_id"], require_ai_access=True)
+        urlopen.assert_not_called()
+
+    def test_tick_revalidates_again_under_contact_lock(self):
+        engine = FakeEngine()
+        response = MagicMock()
+        response.read.return_value = json.dumps({"success": True, "messageId": "wamid-locked"}).encode()
+        with patch.object(wm, "_followup_enabled", return_value=True), \
+             patch.object(wm, "_check_bot_paused", return_value=False), \
+             patch.object(wm, "_followup_engine", return_value=engine), \
+             patch.object(wm, "_assert_delivery_allowed") as gate, \
+             patch("urllib.request.urlopen") as urlopen, \
+             patch.object(engine, "revalidate_claim", wraps=engine.revalidate_claim) as revalidate:
+            urlopen.return_value.__enter__.return_value = response
+            self.assertEqual(wm._tick_followups(), 1)
+
+        self.assertEqual(revalidate.call_count, 2)
+        gate.assert_called_once_with(JOB["chat_id"], require_ai_access=True)
+        self.assertEqual(urlopen.call_count, 1)
+        request = urlopen.call_args.args[0]
+        self.assertEqual(json.loads(request.data.decode())["automation"], True)
+
+    def test_final_revalidation_failure_never_posts_or_marks_sent(self):
+        engine = FakeEngine()
+        with patch.object(wm, "_followup_enabled", return_value=True), \
+             patch.object(wm, "_check_bot_paused", return_value=False), \
+             patch.object(wm, "_followup_engine", return_value=engine), \
+             patch.object(engine, "revalidate_claim", side_effect=[dict(JOB), None]), \
+             patch.object(wm, "_assert_delivery_allowed") as gate, \
+             patch.object(wm, "_followup_bridge_send") as send:
+            self.assertEqual(wm._tick_followups(), 0)
+
+        gate.assert_not_called()
+        send.assert_not_called()
+        self.assertEqual(engine.sent, [])
+
+    def test_policy_block_never_posts_or_marks_sent(self):
+        engine = FakeEngine()
+        with patch.object(wm, "_followup_enabled", return_value=True), \
+             patch.object(wm, "_check_bot_paused", return_value=False), \
+             patch.object(wm, "_followup_engine", return_value=engine), \
+             patch.object(
+                 wm,
+                 "_assert_delivery_allowed",
+                 side_effect=wm.DeliveryBlocked("contato removido da IA"),
+             ) as gate, \
+             patch("urllib.request.urlopen") as urlopen:
+            self.assertEqual(wm._tick_followups(), 0)
+
+        gate.assert_called_once_with(JOB["chat_id"], require_ai_access=True)
+        urlopen.assert_not_called()
+        self.assertEqual(engine.sent, [])
+        self.assertEqual(engine.failed[0][0], JOB["id"])
 
     def test_manual_command_cannot_bypass_disabled_gate(self):
         with patch.object(wm, "_followup_enabled", return_value=False), \
@@ -284,6 +354,43 @@ class FollowupPluginIntegrationTest(unittest.TestCase):
 
         self.assertEqual(ids, [])
         self.assertIsNone(engine.get_lead(chat))
+
+    def test_failed_turn_cas_does_not_consume_newer_followup_snapshot(self):
+        from commercial_followups import FollowupEngine
+
+        chat = "5511999995750@s.whatsapp.net"
+        db = Path(self._policy_tmp.name) / "followups-cas.db"
+        engine = FollowupEngine(db)
+        text_a = "Tenho uma clínica odontológica e recebo perguntas sobre procedimentos"
+        text_b = "Tenho uma clínica odontológica e preciso organizar os retornos"
+        inbound_a = {"message_id": "msg-a", "at": 100.0, "text": text_a}
+        token_a = ("msg-a", 100.0)
+
+        def fail_after_newer_snapshot(*_args, **_kwargs):
+            # Simula B chegando enquanto a entrega A ainda está em andamento.
+            wm._followup_remember_turn(chat, text_b, "msg-b")
+            raise RuntimeError("nenhum messageId confirmado")
+
+        with patch.object(wm, "_followup_engine", return_value=engine), \
+             patch.object(wm, "_followup_skip_contact", return_value=False), \
+             patch.object(wm, "_HUMAN_DELIVER_SYNC", True), \
+             patch.object(wm, "_deliver_contact_reply", side_effect=fail_after_newer_snapshot):
+            wm._followup_remember_turn(chat, text_a, "msg-a")
+            delivered = wm._schedule_contact_reply(
+                chat,
+                "Resposta de A",
+                "turn-a",
+                consumed_inbound_token=token_a,
+                inbound_snapshot=inbound_a,
+            )
+            ids = wm._followup_register_outbound(chat, "out-b")
+
+        self.assertFalse(delivered)
+        self.assertTrue(ids)
+        jobs = engine.get_jobs(chat)
+        self.assertTrue(jobs)
+        self.assertTrue(all(job["context_source_message_id"] == "msg-b" for job in jobs))
+        self.assertNotIn("msg-a", {job["context_source_message_id"] for job in jobs})
 
     def test_crm_outbox_drain_is_fail_closed_without_leads_db(self):
         with patch.dict(wm.os.environ, {"NOTION_API_KEY": "secret_x", "NOTION_LEADS_DB": ""}, clear=False), \

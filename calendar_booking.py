@@ -389,6 +389,28 @@ def _existing_event(api, event_id: str) -> dict[str, Any] | None:
         ) from exc
 
 
+def _event_matches_window(
+    event: dict[str, Any] | None,
+    start: datetime,
+    end: datetime,
+) -> bool:
+    payload = event or {}
+    if str(payload.get("status") or "").lower() == "cancelled":
+        return False
+    try:
+        remote_start = _parse_datetime(
+            str((payload.get("start") or {}).get("dateTime") or ""),
+            "event.start",
+        )
+        remote_end = _parse_datetime(
+            str((payload.get("end") or {}).get("dateTime") or ""),
+            "event.end",
+        )
+    except (AttributeError, CalendarBookingError):
+        return False
+    return remote_start == start and remote_end == end
+
+
 def _safe_meet_link(event: dict[str, Any] | None) -> str:
     payload = event or {}
     candidates = [payload.get("hangoutLink")]
@@ -581,7 +603,12 @@ def reschedule_booking(
     if current is None:
         raise CalendarBookingError("Não encontrei uma reunião ativa para remarcar.")
     start_dt, end_dt = _validated_booking_window(start, end)
-    if current.get("start") == start_dt.isoformat() and current.get("end") == end_dt.isoformat():
+    same_local_window = (
+        current.get("start") == start_dt.isoformat()
+        and current.get("end") == end_dt.isoformat()
+    )
+    current_meet_link = _safe_meet_link({"hangoutLink": current.get("meet_link")})
+    if same_local_window and current_meet_link:
         return dict(current, status="already_exists")
 
     event_id = str(current.get("event_id") or "")
@@ -591,32 +618,46 @@ def reschedule_booking(
         "start": {"dateTime": start_dt.isoformat(), "timeZone": business_timezone().key},
         "end": {"dateTime": end_dt.isoformat(), "timeZone": business_timezone().key},
     }
-    current_meet_link = _safe_meet_link({"hangoutLink": current.get("meet_link")})
     if not current_meet_link:
         body["conferenceData"] = _meet_conference_request(event_id)
 
     with _API_LOCK:
         api = service or _service()
-        if _freebusy(api, start_dt, end_dt):
-            raise CalendarBookingError("Esse horário acabou de ficar ocupado; consulte novas opções.")
-        try:
-            event = api.events().patch(
-                calendarId=calendar_id(),
-                eventId=event_id,
-                body=body,
-                sendUpdates="none",
-                conferenceDataVersion=1,
-            ).execute()
-        except Exception as exc:
-            raise CalendarBookingError(
-                f"Falha ao remarcar no Google Calendar: {type(exc).__name__}"
-            ) from exc
-        meet_link = _safe_meet_link(event) or current_meet_link
-        if not meet_link:
+        already_rescheduled = False
+        if same_local_window:
+            event = _existing_event(api, event_id)
+            if not _event_matches_window(event, start_dt, end_dt):
+                raise CalendarBookingError(
+                    "A reunião ativa no Google Calendar não corresponde ao horário salvo."
+                )
+            already_rescheduled = True
+        elif _freebusy(api, start_dt, end_dt):
+            event = _existing_event(api, event_id)
+            if not _event_matches_window(event, start_dt, end_dt):
+                raise CalendarBookingError("Esse horário acabou de ficar ocupado; consulte novas opções.")
+            already_rescheduled = True
+        else:
+            try:
+                event = api.events().patch(
+                    calendarId=calendar_id(),
+                    eventId=event_id,
+                    body=body,
+                    sendUpdates="none",
+                    conferenceDataVersion=1,
+                ).execute()
+            except Exception as exc:
+                raise CalendarBookingError(
+                    f"Falha ao remarcar no Google Calendar: {type(exc).__name__}"
+                ) from exc
+        if same_local_window:
             event, meet_link = _ensure_event_meet(api, event, event_id)
+        else:
+            meet_link = _safe_meet_link(event) or current_meet_link
+            if not meet_link:
+                event, meet_link = _ensure_event_meet(api, event, event_id)
 
     result = {
-        "status": "rescheduled",
+        "status": "already_rescheduled" if already_rescheduled else "rescheduled",
         "event_id": event.get("id") or event_id,
         "summary": event.get("summary") or "Reunião WhatsAYA",
         "start": start_dt.isoformat(),

@@ -8,6 +8,7 @@ import time
 import unittest
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
@@ -23,26 +24,58 @@ class CalendarPluginIntegrationTests(unittest.TestCase):
         wm._calendar_turn_state.clear()
         wm._sender_to_chat.clear()
         wm._pending_inbound.clear()
+        wm._pending_inbound_queue.clear()
         wm._turn_key.clear()
         wm._turn_inbound.clear()
         wm._turn_sent.clear()
         wm._turn_inflight.clear()
         wm._turn_context_bindings.set(())
+        wm._core_turn_bindings.clear()
         wm._sender_to_chat[self.session] = self.chat
+        self.core_turn_id = ""
+        self.runtime_turn_patcher = patch(
+            "whatsapp_manager._runtime_turn_for_session",
+            side_effect=self._runtime_turn,
+        )
+        self.runtime_turn_patcher.start()
+        self.contact_access_patcher = patch(
+            "whatsapp_manager._contact_has_explicit_ai_access",
+            return_value=True,
+        )
+        self.contact_access_patcher.start()
 
     def tearDown(self):
         wm._calendar_turn_state.clear()
         wm._sender_to_chat.clear()
         wm._pending_inbound.clear()
+        wm._pending_inbound_queue.clear()
         wm._turn_key.clear()
         wm._turn_inbound.clear()
         wm._turn_sent.clear()
         wm._turn_inflight.clear()
         wm._turn_context_bindings.set(())
+        wm._core_turn_bindings.clear()
         wm._HUMAN_DELIVER_SYNC = False
+        self.contact_access_patcher.stop()
+        self.runtime_turn_patcher.stop()
+
+    def _runtime_turn(self, session_id: str):
+        if not self.core_turn_id:
+            return None
+        return SimpleNamespace(
+            turn_id=self.core_turn_id,
+            closed=False,
+            lease=SimpleNamespace(
+                session_id=session_id,
+                platform="whatsapp",
+            ),
+        )
 
     def _inbound(self, message_id: str, text: str) -> tuple[str, float]:
         wm._track_inbound(self.chat, message_id, text)
+        turn_id = wm._register_contact_turn(self.chat, self.session, text)
+        self.core_turn_id = f"core:{message_id}"
+        wm._bind_core_turn(self.session, self.core_turn_id, turn_id)
         record = wm._current_inbound_record(self.chat, self.session)
         token = wm._inbound_record_token(record)
         self.assertIsNotNone(token)
@@ -78,6 +111,7 @@ class CalendarPluginIntegrationTests(unittest.TestCase):
         return history + extra
 
     def test_calendar_tools_are_the_only_new_tools_allowed_for_contact(self):
+        self._inbound("msg-tool-policy", "Quero ver os horários disponíveis")
         for tool_name in (wm._CALENDAR_FIND_TOOL, wm._CALENDAR_BOOK_TOOL):
             with self.subTest(tool_name=tool_name):
                 self.assertIsNone(wm.pre_tool_call(
@@ -627,6 +661,163 @@ class CalendarPluginIntegrationTests(unittest.TestCase):
         state = wm._calendar_turn_state[self.chat]
         self.assertEqual(state["kind"], "booked")
         self.assertNotEqual(state.get("reply_kind"), "choice_required")
+
+    def test_reconciled_remote_reschedule_is_treated_as_booked(self):
+        first = self._slots()["slots"][0]
+        old_token = self._inbound(
+            "msg-reconciled-reschedule-offer",
+            "Pode ser esse horário?",
+        )
+        wm._calendar_turn_state[self.chat] = {
+            "kind": "offered",
+            "action": "reschedule",
+            "at": time.time(),
+            "expires_at": time.time() + 600,
+            "inbound_token": old_token,
+            "slots": [first],
+            "query": {"period": "afternoon", "max_slots": 1},
+        }
+        self._inbound("msg-reconciled-reschedule-confirm", "sim, pode remarcar")
+        reconciled = {
+            "status": "already_rescheduled",
+            "event_id": "event-reconciled-reschedule",
+            "summary": "Reunião WhatsAYA — Tony",
+            "start": first["start"],
+            "end": first["end"],
+            "timezone": "America/Sao_Paulo",
+            "meet_link": "https://meet.google.com/reconciled-link",
+        }
+
+        with patch("whatsapp_manager.calendar_ready", return_value=True), \
+             patch(
+                 "whatsapp_manager.reschedule_booking",
+                 return_value=reconciled,
+             ) as reschedule:
+            handled = wm._orchestrate_calendar_turn(
+                chat_id=self.chat,
+                session_id=self.session,
+                user_message="sim, pode remarcar",
+                history=self._gustavo_call_history(),
+            )
+
+        self.assertTrue(handled)
+        reschedule.assert_called_once()
+        state = wm._calendar_turn_state[self.chat]
+        self.assertEqual(state["kind"], "booked")
+        self.assertEqual(state["result"]["status"], "already_rescheduled")
+
+    def test_restart_recovers_lead_reschedule_intent_across_offer_and_confirmation(self):
+        old = {
+            "event_id": "event-before-restart",
+            "start": "2026-08-31T14:00:00-03:00",
+            "end": "2026-08-31T14:30:00-03:00",
+            "timezone": "America/Sao_Paulo",
+            "meet_link": "https://meet.google.com/before-restart",
+        }
+        new = {
+            "start": "2026-09-01T15:00:00-03:00",
+            "end": "2026-09-01T15:30:00-03:00",
+        }
+        available = dict(self._slots(), slots=[new])
+        history = (
+            "Lead: Quero remarcar minha reunião\n"
+            "AYA: Claro. Qual novo dia e horário ficam melhores para você?\n"
+        )
+        now = datetime(2026, 8, 28, 16, 32, tzinfo=ZoneInfo("America/Sao_Paulo"))
+        wm._calendar_turn_state.clear()  # simula um processo novo, sem estado efêmero
+
+        with patch("whatsapp_manager.calendar_ready", return_value=True), \
+             patch("whatsapp_manager.get_booking", return_value=old), \
+             patch("whatsapp_manager.find_available_slots", return_value=available) as find, \
+             patch("whatsapp_manager.reschedule_booking") as reschedule, \
+             patch("whatsapp_manager.create_booking") as create:
+            self._inbound("msg-after-restart-preference", "Dia 01/09 às 15h")
+            offered = wm._orchestrate_calendar_turn(
+                chat_id=self.chat,
+                session_id=self.session,
+                user_message="Dia 01/09 às 15h",
+                history=history,
+                now=now,
+            )
+
+            self.assertTrue(offered)
+            self.assertEqual(wm._calendar_turn_state[self.chat]["action"], "reschedule")
+            find.assert_called_once()
+            reschedule.assert_not_called()
+            create.assert_not_called()
+
+            self._inbound("msg-after-restart-confirm", "Sim, funciona")
+            moved = dict(old, status="rescheduled", start=new["start"], end=new["end"])
+            reschedule.return_value = moved
+            confirmed = wm._orchestrate_calendar_turn(
+                chat_id=self.chat,
+                session_id=self.session,
+                user_message="Sim, funciona",
+                history=(
+                    history
+                    + "Lead: Dia 01/09 às 15h\n"
+                    + "AYA: Boa! O horário livre mais próximo é terça, 01/09, às 15:00. "
+                    + "Funciona para você?\n"
+                ),
+                now=now,
+            )
+
+        self.assertTrue(confirmed)
+        reschedule.assert_called_once()
+        create.assert_not_called()
+        self.assertEqual(wm._calendar_turn_state[self.chat]["kind"], "booked")
+        self.assertEqual(wm._calendar_turn_state[self.chat]["action"], "reschedule")
+
+    def test_pending_reschedule_history_ends_on_completion_or_lead_cancellation(self):
+        pending = (
+            "Lead: Quero remarcar minha reunião\n"
+            "AYA: Claro. Qual novo dia e horário ficam melhores para você?\n"
+        )
+        self.assertTrue(wm._history_has_pending_reschedule(pending))
+        self.assertFalse(wm._history_has_pending_reschedule(
+            pending
+            + "AYA: Fechado, sua reunião ficou remarcada para terça às 15:00.\n"
+        ))
+        self.assertFalse(wm._history_has_pending_reschedule(
+            pending
+            + "Lead: Deixa como está, não quero mais remarcar.\n"
+        ))
+
+    def test_current_lead_cancellation_clears_reschedule_state_without_mutation(self):
+        old_token = self._inbound("msg-reschedule-before-cancel", "Quero remarcar")
+        wm._calendar_turn_state[self.chat] = {
+            "kind": "collecting",
+            "action": "reschedule",
+            "at": time.time(),
+            "expires_at": time.time() + 600,
+            "inbound_token": old_token,
+            "slots": [],
+        }
+        self._inbound("msg-reschedule-cancel", "Deixa como está, não quero mais remarcar")
+        current_booking = {
+            "event_id": "event-kept-after-cancel",
+            "start": "2026-08-31T14:00:00-03:00",
+            "end": "2026-08-31T14:30:00-03:00",
+            "meet_link": "https://meet.google.com/kept-after-cancel",
+        }
+
+        with patch("whatsapp_manager.calendar_ready", return_value=True), \
+             patch("whatsapp_manager.get_booking", return_value=current_booking), \
+             patch("whatsapp_manager.find_available_slots") as find, \
+             patch("whatsapp_manager.reschedule_booking") as reschedule, \
+             patch("whatsapp_manager.create_booking") as create:
+            handled = wm._orchestrate_calendar_turn(
+                chat_id=self.chat,
+                session_id=self.session,
+                user_message="Deixa como está, não quero mais remarcar",
+                history="Lead: Quero remarcar minha reunião\n",
+            )
+
+        self.assertFalse(handled)
+        self.assertNotIn(self.chat, wm._calendar_turn_state)
+        find.assert_not_called()
+        reschedule.assert_not_called()
+        create.assert_not_called()
 
     def test_confirmation_language_accepts_natural_yes_but_preserves_negatives(self):
         for message in (

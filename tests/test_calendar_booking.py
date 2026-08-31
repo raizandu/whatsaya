@@ -378,6 +378,181 @@ class CalendarBookingTests(unittest.TestCase):
             self.assertFalse(service.patch_calls)
             self.assertFalse(service.insert_calls)
 
+    def test_reschedule_retry_reconciles_remote_move_after_meet_timeout(self):
+        chat_id = "5562999999999@s.whatsapp.net"
+        event_id = "event-reschedule-retry"
+        old_start = "2026-08-31T14:00:00-03:00"
+        old_end = "2026-08-31T14:30:00-03:00"
+        new_start = "2026-09-01T15:00:00-03:00"
+        new_end = "2026-09-01T15:30:00-03:00"
+        meet_link = "https://meet.google.com/retry-link"
+        cb._persist_booking(
+            chat_id=chat_id,
+            result={
+                "event_id": event_id,
+                "start": old_start,
+                "end": old_end,
+                "timezone": TZ.key,
+                "meet_link": "",
+                "htmlLink": "https://calendar.google.test/event",
+            },
+            db_path=self._db_path,
+        )
+        service = FakeService(existing_event={
+            "id": event_id,
+            "status": "confirmed",
+            "summary": "Reunião WhatsAYA — Maria",
+            "start": {"dateTime": old_start, "timeZone": TZ.key},
+            "end": {"dateTime": old_end, "timeZone": TZ.key},
+            "htmlLink": "https://calendar.google.test/event",
+        })
+        service.conference_data = None
+
+        with patch("calendar_booking.datetime") as mocked_datetime, patch(
+            "calendar_booking._ensure_event_meet",
+            side_effect=cb.CalendarBookingError("Meet ainda pendente"),
+        ):
+            mocked_datetime.now.return_value = datetime(2026, 8, 28, 10, 0, tzinfo=TZ)
+            mocked_datetime.fromisoformat.side_effect = datetime.fromisoformat
+            with self.assertRaisesRegex(cb.CalendarBookingError, "Meet ainda pendente"):
+                cb.reschedule_booking(
+                    chat_id=chat_id,
+                    start=new_start,
+                    end=new_end,
+                    lead_name="Maria",
+                    service=service,
+                    db_path=self._db_path,
+                )
+
+        stale = cb.get_booking(chat_id, db_path=self._db_path)
+        self.assertEqual(stale["start"], old_start)
+        self.assertEqual(service.existing_event["start"]["dateTime"], new_start)
+        self.assertEqual(len(service.patch_calls), 1)
+
+        service.busy = [{"start": new_start, "end": new_end}]
+        service.existing_event["hangoutLink"] = meet_link
+        with patch("calendar_booking.datetime") as mocked_datetime:
+            mocked_datetime.now.return_value = datetime(2026, 8, 28, 10, 0, tzinfo=TZ)
+            mocked_datetime.fromisoformat.side_effect = datetime.fromisoformat
+            reconciled = cb.reschedule_booking(
+                chat_id=chat_id,
+                start=new_start,
+                end=new_end,
+                lead_name="Maria",
+                service=service,
+                db_path=self._db_path,
+            )
+
+        self.assertEqual(reconciled["status"], "already_rescheduled")
+        self.assertEqual(reconciled["event_id"], event_id)
+        self.assertEqual(reconciled["start"], new_start)
+        self.assertEqual(reconciled["end"], new_end)
+        self.assertEqual(reconciled["meet_link"], meet_link)
+        self.assertEqual(len(service.patch_calls), 1)
+        self.assertEqual(len(service.get_calls), 1)
+        stored = cb.get_booking(chat_id, db_path=self._db_path)
+        self.assertEqual(stored["start"], new_start)
+        self.assertEqual(stored["end"], new_end)
+        self.assertEqual(stored["meet_link"], meet_link)
+
+    def test_reschedule_same_local_window_recovers_remote_meet_before_returning(self):
+        chat_id = "5562999999999@s.whatsapp.net"
+        event_id = "event-reschedule-local-window"
+        start = "2026-09-01T15:00:00-03:00"
+        end = "2026-09-01T15:30:00-03:00"
+        meet_link = "https://meet.google.com/local-window-link"
+        cb._persist_booking(
+            chat_id=chat_id,
+            result={
+                "event_id": event_id,
+                "start": start,
+                "end": end,
+                "timezone": TZ.key,
+                "meet_link": "",
+                "htmlLink": "https://calendar.google.test/event",
+            },
+            db_path=self._db_path,
+        )
+        service = FakeService(existing_event={
+            "id": event_id,
+            "status": "confirmed",
+            "summary": "Reunião WhatsAYA — Maria",
+            "start": {"dateTime": start, "timeZone": TZ.key},
+            "end": {"dateTime": end, "timeZone": TZ.key},
+            "hangoutLink": meet_link,
+            "htmlLink": "https://calendar.google.test/event",
+        })
+
+        with patch("calendar_booking.datetime") as mocked_datetime, patch(
+            "calendar_booking._ensure_event_meet",
+            wraps=cb._ensure_event_meet,
+        ) as ensure_meet:
+            mocked_datetime.now.return_value = datetime(2026, 8, 28, 10, 0, tzinfo=TZ)
+            mocked_datetime.fromisoformat.side_effect = datetime.fromisoformat
+            reconciled = cb.reschedule_booking(
+                chat_id=chat_id,
+                start=start,
+                end=end,
+                lead_name="Maria",
+                service=service,
+                db_path=self._db_path,
+            )
+
+        self.assertEqual(reconciled["status"], "already_rescheduled")
+        self.assertEqual(reconciled["meet_link"], meet_link)
+        ensure_meet.assert_called_once()
+        self.assertEqual(len(service.get_calls), 1)
+        self.assertFalse(service.freebusy_bodies)
+        self.assertFalse(service.patch_calls)
+        stored = cb.get_booking(chat_id, db_path=self._db_path)
+        self.assertEqual(stored["meet_link"], meet_link)
+
+    def test_reschedule_still_rejects_busy_slot_when_active_event_is_elsewhere(self):
+        chat_id = "5562999999999@s.whatsapp.net"
+        event_id = "event-reschedule-conflict"
+        old_start = "2026-08-31T14:00:00-03:00"
+        old_end = "2026-08-31T14:30:00-03:00"
+        new_start = "2026-09-01T15:00:00-03:00"
+        new_end = "2026-09-01T15:30:00-03:00"
+        cb._persist_booking(
+            chat_id=chat_id,
+            result={
+                "event_id": event_id,
+                "start": old_start,
+                "end": old_end,
+                "timezone": TZ.key,
+                "meet_link": "https://meet.google.com/original-link",
+                "htmlLink": "https://calendar.google.test/event",
+            },
+            db_path=self._db_path,
+        )
+        service = FakeService(
+            busy=[{"start": new_start, "end": new_end}],
+            existing_event={
+                "id": event_id,
+                "status": "confirmed",
+                "start": {"dateTime": old_start, "timeZone": TZ.key},
+                "end": {"dateTime": old_end, "timeZone": TZ.key},
+            },
+        )
+
+        with patch("calendar_booking.datetime") as mocked_datetime:
+            mocked_datetime.now.return_value = datetime(2026, 8, 28, 10, 0, tzinfo=TZ)
+            mocked_datetime.fromisoformat.side_effect = datetime.fromisoformat
+            with self.assertRaisesRegex(cb.CalendarBookingError, "ocupado"):
+                cb.reschedule_booking(
+                    chat_id=chat_id,
+                    start=new_start,
+                    end=new_end,
+                    service=service,
+                    db_path=self._db_path,
+                )
+
+        self.assertEqual(len(service.get_calls), 1)
+        self.assertFalse(service.patch_calls)
+        stored = cb.get_booking(chat_id, db_path=self._db_path)
+        self.assertEqual(stored["start"], old_start)
+
     def test_create_booking_is_idempotent_on_google_conflict(self):
         class ConflictError(RuntimeError):
             def __init__(self):
